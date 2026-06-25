@@ -17,13 +17,13 @@ enum {
 };
 
 typedef enum XqColor {
-    XQ_RED = 0,
-    XQ_BLACK = 1,
-    XQ_COLOR_NB = 2
+    XQ_RED,
+    XQ_BLACK,
+    XQ_COLOR_NB
 } XqColor;
 
 typedef enum XqPieceType {
-    XQ_KING = 0,
+    XQ_KING,
     XQ_ADVISOR,
     XQ_BISHOP,
     XQ_KNIGHT,
