@@ -45,6 +45,9 @@ typedef struct XqMoveList {
     int count;
 } XqMoveList;
 
+/**
+ * 返回输入方的对方
+ */
 static inline XqColor xq_color_opponent(XqColor color) {
     return color == XQ_RED ? XQ_BLACK : XQ_RED;
 }
@@ -53,14 +56,23 @@ static inline int xq_make_piece(XqColor color, XqPieceType type) {
     return (int)color * XQ_PIECE_TYPE_NB + (int)type;
 }
 
+/**
+ * 获取 piece 的 color
+ */
 static inline XqColor xq_piece_color(int piece) {
     return (XqColor)(piece / XQ_PIECE_TYPE_NB);
 }
 
+/**
+ * 获取 piece 的 type
+ */
 static inline XqPieceType xq_piece_type(int piece) {
     return (XqPieceType)(piece % XQ_PIECE_TYPE_NB);
 }
 
+/**
+ * 根据行列获取棋盘编号
+ */
 static inline XqSquare xq_square_make(int file, int rank) {
     return (XqSquare)(rank * XQ_FILES + file);
 }

@@ -15,6 +15,9 @@ typedef struct XqBitboard {
     uint64_t hi;
 } XqBitboard;
 
+/**
+ * 返回一个崭新的空棋盘
+ */
 static inline XqBitboard xq_bb_empty(void) {
     XqBitboard bb = {0u, 0u};
     return bb;
@@ -34,6 +37,9 @@ static inline XqBitboard xq_bb_from_square(XqSquare sq) {
     return bb;
 }
 
+/**
+ * 设置 *bb 上 sq 位置的棋子标记
+ */
 static inline void xq_bb_set(XqBitboard *bb, XqSquare sq) {
     if (sq < 64) {
         bb->lo |= UINT64_C(1) << sq;
@@ -42,6 +48,9 @@ static inline void xq_bb_set(XqBitboard *bb, XqSquare sq) {
     }
 }
 
+/**
+ * 清除 *bb 上 sq 位置的棋子标记
+ */
 static inline void xq_bb_clear(XqBitboard *bb, XqSquare sq) {
     if (sq < 64) {
         bb->lo &= ~(UINT64_C(1) << sq);
@@ -50,6 +59,9 @@ static inline void xq_bb_clear(XqBitboard *bb, XqSquare sq) {
     }
 }
 
+/**
+ * 判断棋盘 bb 的 sq 位置是否有棋子
+ */
 static inline bool xq_bb_test(XqBitboard bb, XqSquare sq) {
     if (sq < 64) {
         return (bb.lo & (UINT64_C(1) << sq)) != 0u;
@@ -72,6 +84,9 @@ static inline XqBitboard xq_bb_not(XqBitboard a) {
     return bb;
 }
 
+/**
+ * 返回一个棋盘中有多少棋子
+ */
 static inline int xq_bb_count(XqBitboard bb) {
 #if defined(_MSC_VER)
     return (int)(__popcnt64(bb.lo) + __popcnt64(bb.hi));

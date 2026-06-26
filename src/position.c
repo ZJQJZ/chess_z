@@ -4,10 +4,16 @@
 #include <stdio.h>
 #include <string.h>
 
+/**
+ * 判断某个棋盘编号是否合法
+ */
 static bool valid_square(XqSquare sq) {
     return sq >= 0 && sq < XQ_SQUARES;
 }
 
+/**
+ * 根据棋子类型枚举获取棋子字符串名称
+ */
 const char *xq_piece_type_name(XqPieceType type) {
     static const char *names[] = {
         "king", "advisor", "bishop", "knight", "rook", "cannon", "pawn"
@@ -18,6 +24,9 @@ const char *xq_piece_type_name(XqPieceType type) {
     return names[type];
 }
 
+/**
+ * 根据 piece（程序内部的棋盘单位信息标识）获取终端显示的更易读的棋盘单位 char
+ */
 char xq_piece_to_char(int piece) {
     static const char red_chars[] = {'K', 'A', 'B', 'N', 'R', 'C', 'P'};
     static const char black_chars[] = {'k', 'a', 'b', 'n', 'r', 'c', 'p'};
@@ -34,6 +43,9 @@ char xq_piece_to_char(int piece) {
     return xq_piece_color(piece) == XQ_RED ? red_chars[type] : black_chars[type];
 }
 
+/**
+ * xq_piece_to_char(int) 的逆操作
+ */
 int xq_piece_from_char(char ch) {
     XqColor color = isupper((unsigned char)ch) ? XQ_RED : XQ_BLACK;
     switch ((char)tolower((unsigned char)ch)) {
@@ -49,6 +61,9 @@ int xq_piece_from_char(char ch) {
     }
 }
 
+/**
+ * 清空、重置 XqPosition
+ */
 void xq_position_clear(XqPosition *pos) {
     int i;
 
@@ -60,6 +75,9 @@ void xq_position_clear(XqPosition *pos) {
     pos->fullmove_number = 1;
 }
 
+/**
+ * 在 *pos 的 sq 位置安置 color 方的 type 类型的棋子
+ */
 bool xq_position_set_piece(XqPosition *pos, XqSquare sq, XqColor color, XqPieceType type) {
     int piece;
 
@@ -78,6 +96,10 @@ bool xq_position_set_piece(XqPosition *pos, XqSquare sq, XqColor color, XqPieceT
     return true;
 }
 
+/**
+ * 删除 *pos 中 sq 处的棋子
+ * 如果 sq 位置的棋子为空，则返回 false
+ */
 bool xq_position_remove_piece(XqPosition *pos, XqSquare sq) {
     int piece;
     XqColor color;
@@ -101,6 +123,9 @@ bool xq_position_remove_piece(XqPosition *pos, XqSquare sq) {
     return true;
 }
 
+/**
+ * 根据输入的一步走棋 XqMove move，改变 *pos
+ */
 bool xq_position_make_move(XqPosition *pos, XqMove move) {
     XqSquare from = (XqSquare)move.from;
     XqSquare to = (XqSquare)move.to;
@@ -128,6 +153,9 @@ bool xq_position_make_move(XqPosition *pos, XqMove move) {
     return true;
 }
 
+/**
+ * 
+ */
 void xq_position_startpos(XqPosition *pos) {
     static const char *start_fen =
         "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR r - - 0 1";
@@ -277,14 +305,32 @@ XqSquare xq_position_king_square(const XqPosition *pos, XqColor color) {
     return XQ_NO_SQUARE;
 }
 
+/**
+ * 查看 *pos 中某种类型棋子的数量
+ */
 int xq_position_piece_count(const XqPosition *pos, XqColor color, XqPieceType type) {
     return xq_bb_count(pos->pieces[color][type]);
 }
 
+/**
+ * 用于检查某个 *pos 是否数据一致且双方存在将帅
+ * 
+ * 根据 *pos 的 board 信息复制一份相匹配的 XqPosition 中的 pieces、occupied、all 信息
+ * 然后和 *pos 中的进行比较查看是否一致，最后看是否存在双方将帅
+ */
 bool xq_position_validate(const XqPosition *pos) {
+    XqBitboard pieces[XQ_COLOR_NB][XQ_PIECE_TYPE_NB];
     XqBitboard occupied[XQ_COLOR_NB] = {xq_bb_empty(), xq_bb_empty()};
     XqBitboard all = xq_bb_empty();
     int sq;
+    int color;
+    int type;
+
+    for (color = 0; color < XQ_COLOR_NB; ++color) {
+        for (type = 0; type < XQ_PIECE_TYPE_NB; ++type) {
+            pieces[color][type] = xq_bb_empty();
+        }
+    }
 
     for (sq = 0; sq < XQ_SQUARES; ++sq) {
         int piece = pos->board[sq];
@@ -298,8 +344,15 @@ bool xq_position_validate(const XqPosition *pos) {
 
         xq_bb_set(&occupied[xq_piece_color(piece)], (XqSquare)sq);
         xq_bb_set(&all, (XqSquare)sq);
-        if (!xq_bb_test(pos->pieces[xq_piece_color(piece)][xq_piece_type(piece)], (XqSquare)sq)) {
-            return false;
+        xq_bb_set(&pieces[xq_piece_color(piece)][xq_piece_type(piece)], (XqSquare)sq);
+    }
+
+    for (color = 0; color < XQ_COLOR_NB; ++color) {
+        for (type = 0; type < XQ_PIECE_TYPE_NB; ++type) {
+            if (pieces[color][type].lo != pos->pieces[color][type].lo ||
+                    pieces[color][type].hi != pos->pieces[color][type].hi) {
+                return false;
+            }
         }
     }
 

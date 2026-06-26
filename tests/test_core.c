@@ -26,6 +26,14 @@ static void test_startpos(void) {
     assert(strcmp(fen, "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR r - -") == 0);
 }
 
+static void test_validate_rejects_extra_piece_bits(void) {
+    XqPosition pos;
+
+    xq_position_startpos(&pos);
+    xq_bb_set(&pos.pieces[XQ_RED][XQ_ROOK], xq_square_make(4, 4));
+    assert(!xq_position_validate(&pos));
+}
+
 static void test_flying_king_check(void) {
     XqPosition pos;
     XqMoveList legal;
@@ -50,6 +58,7 @@ static void test_engine_adapter(void) {
 
 int main(void) {
     test_startpos();
+    test_validate_rejects_extra_piece_bits();
     test_flying_king_check();
     test_engine_adapter();
     printf("xiangqi core tests passed\n");
