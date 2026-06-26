@@ -69,6 +69,44 @@ static inline bool xq_bb_test(XqBitboard bb, XqSquare sq) {
     return (bb.hi & (UINT64_C(1) << (sq - 64))) != 0u;
 }
 
+static inline XqSquare xq_bb_first_square(XqBitboard bb) {
+    if (bb.lo != 0u) {
+#if defined(_MSC_VER)
+        unsigned long index;
+        _BitScanForward64(&index, bb.lo);
+        return (XqSquare)index;
+#elif defined(__GNUC__) || defined(__clang__)
+        return (XqSquare)__builtin_ctzll(bb.lo);
+#else
+        XqSquare sq = 0;
+        while ((bb.lo & UINT64_C(1)) == 0u) {
+            bb.lo >>= 1;
+            ++sq;
+        }
+        return sq;
+#endif
+    }
+
+    if (bb.hi != 0u) {
+#if defined(_MSC_VER)
+        unsigned long index;
+        _BitScanForward64(&index, bb.hi);
+        return (XqSquare)(64 + index);
+#elif defined(__GNUC__) || defined(__clang__)
+        return (XqSquare)(64 + __builtin_ctzll(bb.hi));
+#else
+        XqSquare sq = 64;
+        while ((bb.hi & UINT64_C(1)) == 0u) {
+            bb.hi >>= 1;
+            ++sq;
+        }
+        return sq;
+#endif
+    }
+
+    return XQ_NO_SQUARE;
+}
+
 static inline XqBitboard xq_bb_or(XqBitboard a, XqBitboard b) {
     XqBitboard bb = {a.lo | b.lo, a.hi | b.hi};
     return bb;
