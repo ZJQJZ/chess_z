@@ -69,6 +69,9 @@ static inline bool xq_bb_test(XqBitboard bb, XqSquare sq) {
     return (bb.hi & (UINT64_C(1) << (sq - 64))) != 0u;
 }
 
+/**
+ * 棋盘编号从小到大第一个棋子出现的位置
+ */
 static inline XqSquare xq_bb_first_square(XqBitboard bb) {
     if (bb.lo != 0u) {
 #if defined(_MSC_VER)

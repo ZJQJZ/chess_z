@@ -7,22 +7,21 @@
 static const int piece_values[XQ_PIECE_TYPE_NB] = {
     10000, 120, 120, 270, 600, 285, 70};
 
+/**
+ * 简陋的评估函数，基于 piece_values，返回对于 perspective 方的局面评分
+ */
 int xq_engine_material_evaluate(const XqPosition *pos, XqColor perspective, void *user)
 {
     int score = 0;
-    int sq;
+    XqColor opponent = xq_color_opponent(perspective);
+    int type;
 
     (void)user;
-    for (sq = 0; sq < XQ_SQUARES; ++sq)
+    for (type = 0; type < XQ_PIECE_TYPE_NB; ++type)
     {
-        int piece = pos->board[sq];
-        int value;
-        if (piece == XQ_EMPTY_PIECE)
-        {
-            continue;
-        }
-        value = piece_values[xq_piece_type(piece)];
-        score += xq_piece_color(piece) == perspective ? value : -value;
+        int value = piece_values[type];
+        score += value * xq_bb_count(pos->pieces[perspective][type]);
+        score -= value * xq_bb_count(pos->pieces[opponent][type]);
     }
     return score;
 }
