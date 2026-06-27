@@ -77,14 +77,23 @@ static inline XqSquare xq_square_make(int file, int rank) {
     return (XqSquare)(rank * XQ_FILES + file);
 }
 
+/**
+ * 根据棋盘编号获取列
+ */
 static inline int xq_square_file(XqSquare sq) {
     return sq % XQ_FILES;
 }
 
+/**
+ * 根据棋盘编号获取行
+ */
 static inline int xq_square_rank(XqSquare sq) {
     return sq / XQ_FILES;
 }
 
+/**
+ * 判断行列是否合法
+ */
 static inline bool xq_square_is_valid(int file, int rank) {
     return file >= 0 && file < XQ_FILES && rank >= 0 && rank < XQ_RANKS;
 }

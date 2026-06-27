@@ -26,12 +26,14 @@ int xq_engine_material_evaluate(const XqPosition *pos, XqColor perspective, void
     return score;
 }
 
+/**
+ * 根据输入的引擎适配器，计算 perspective 方在 *pos 下的局面评分
+ * 如果输入的引擎适配器为空，则直接用 xq_engine_material_evaluate 函数评分
+ */
 static int default_eval(const XqEngineAdapter *engine, const XqPosition *pos, XqColor perspective)
 {
     if (engine != NULL && engine->evaluate != NULL)
-    {
         return engine->evaluate(pos, perspective, engine->user);
-    }
     return xq_engine_material_evaluate(pos, perspective, NULL);
 }
 
@@ -42,9 +44,7 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
     int i;
 
     if (depth == 0)
-    {
         return default_eval(engine, pos, pos->side_to_move);
-    }
 
     xq_generate_legal(pos, &list);
     if (list.count == 0)

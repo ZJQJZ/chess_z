@@ -305,6 +305,7 @@ bool xq_position_to_fen(const XqPosition *pos, char *buffer, size_t buffer_size)
 
 /**
  * 返回将帅所在的棋盘编号
+ * 如果没找到的话，返回 XQ_NO_SQUARE
  */
 XqSquare xq_position_king_square(const XqPosition *pos, XqColor color)
 {
