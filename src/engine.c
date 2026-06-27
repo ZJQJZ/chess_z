@@ -100,6 +100,9 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
     return best;
 }
 
+/**
+ * 内部搜索算法，通过 negamax 函数计算出 *pos 盘面下，depth 深度的最佳走法
+ */
 static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move)
 {
     XqMoveList list;
@@ -107,15 +110,11 @@ static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos,
     int i;
 
     if (depth == 0)
-    {
         depth = 1;
-    }
 
     xq_generate_legal(pos, &list);
     if (list.count == 0)
-    {
         return false;
-    }
 
     for (i = 0; i < list.count; ++i)
     {
@@ -134,15 +133,14 @@ static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos,
     return true;
 }
 
+/**
+ * 引擎搜索算法，引擎为空或引擎搜索函数的话调用 builtin_search
+ */
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move)
 {
     if (best_move == NULL)
-    {
         return false;
-    }
     if (engine != NULL && engine->search != NULL)
-    {
         return engine->search(pos, depth, best_move, engine->user);
-    }
     return builtin_search(engine, pos, depth, best_move);
 }
