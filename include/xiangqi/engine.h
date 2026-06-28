@@ -9,7 +9,8 @@
 typedef int (*XqEvaluateFn)(const XqPosition *pos, XqColor perspective, void *user);
 typedef bool (*XqSearchFn)(const XqPosition *pos, unsigned depth, XqMove *best_move, void *user);
 
-typedef struct XqEngineAdapter {
+typedef struct XqEngineAdapter
+{
     XqEvaluateFn evaluate;
     XqSearchFn search;
     void *user;

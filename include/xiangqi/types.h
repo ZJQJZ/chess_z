@@ -11,18 +11,21 @@
 
 typedef int8_t XqSquare;
 
-enum {
+enum
+{
     XQ_NO_SQUARE = -1,
     XQ_EMPTY_PIECE = -1
 };
 
-typedef enum XqColor {
+typedef enum XqColor
+{
     XQ_RED,
     XQ_BLACK,
     XQ_COLOR_NB
 } XqColor;
 
-typedef enum XqPieceType {
+typedef enum XqPieceType
+{
     XQ_KING,
     XQ_ADVISOR,
     XQ_BISHOP,
@@ -33,14 +36,16 @@ typedef enum XqPieceType {
     XQ_PIECE_TYPE_NB
 } XqPieceType;
 
-typedef struct XqMove {
+typedef struct XqMove
+{
     uint8_t from;
     uint8_t to;
     int8_t piece;
     int8_t captured;
 } XqMove;
 
-typedef struct XqMoveList {
+typedef struct XqMoveList
+{
     XqMove moves[XQ_MAX_MOVES];
     int count;
 } XqMoveList;
@@ -48,53 +53,64 @@ typedef struct XqMoveList {
 /**
  * 返回输入方的对方
  */
-static inline XqColor xq_color_opponent(XqColor color) {
+static inline XqColor xq_color_opponent(XqColor color)
+{
     return color == XQ_RED ? XQ_BLACK : XQ_RED;
 }
 
-static inline int xq_make_piece(XqColor color, XqPieceType type) {
+/**
+ * 通过 color、type 来构造 piece
+ */
+static inline int xq_make_piece(XqColor color, XqPieceType type)
+{
     return (int)color * XQ_PIECE_TYPE_NB + (int)type;
 }
 
 /**
  * 获取 piece 的 color
  */
-static inline XqColor xq_piece_color(int piece) {
+static inline XqColor xq_piece_color(int piece)
+{
     return (XqColor)(piece / XQ_PIECE_TYPE_NB);
 }
 
 /**
  * 获取 piece 的 type
  */
-static inline XqPieceType xq_piece_type(int piece) {
+static inline XqPieceType xq_piece_type(int piece)
+{
     return (XqPieceType)(piece % XQ_PIECE_TYPE_NB);
 }
 
 /**
  * 根据行列获取棋盘编号
  */
-static inline XqSquare xq_square_make(int file, int rank) {
+static inline XqSquare xq_square_make(int file, int rank)
+{
     return (XqSquare)(rank * XQ_FILES + file);
 }
 
 /**
  * 根据棋盘编号获取列
  */
-static inline int xq_square_file(XqSquare sq) {
+static inline int xq_square_file(XqSquare sq)
+{
     return sq % XQ_FILES;
 }
 
 /**
  * 根据棋盘编号获取行
  */
-static inline int xq_square_rank(XqSquare sq) {
+static inline int xq_square_rank(XqSquare sq)
+{
     return sq / XQ_FILES;
 }
 
 /**
  * 判断行列是否合法
  */
-static inline bool xq_square_is_valid(int file, int rank) {
+static inline bool xq_square_is_valid(int file, int rank)
+{
     return file >= 0 && file < XQ_FILES && rank >= 0 && rank < XQ_RANKS;
 }
 

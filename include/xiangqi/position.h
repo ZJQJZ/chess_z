@@ -8,7 +8,8 @@
 #include "xiangqi/bitboard.h"
 #include "xiangqi/types.h"
 
-typedef struct XqPosition {
+typedef struct XqPosition
+{
     XqBitboard pieces[XQ_COLOR_NB][XQ_PIECE_TYPE_NB];
     XqBitboard occupied[XQ_COLOR_NB];
     XqBitboard all_occupied;
