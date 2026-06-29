@@ -370,6 +370,25 @@ bool xq_position_validate(const XqPosition *pos)
 }
 
 /**
+ * 将内部的棋子表达 piece 转换为更易懂的中文字符
+ */
+static const char *piece_display_text(int piece)
+{
+    static const char *red_text[] = {"帥", "仕", "相", "馬", "車", "炮", "兵"};
+    static const char *black_text[] = {"将", "士", "象", "馬", "車", "炮", "卒"};
+    XqPieceType type;
+
+    if (piece == XQ_EMPTY_PIECE)
+        return ".";
+
+    type = xq_piece_type(piece);
+    if (type < 0 || type >= XQ_PIECE_TYPE_NB)
+        return "?";
+
+    return xq_piece_color(piece) == XQ_RED ? red_text[type] : black_text[type];
+}
+
+/**
  * 打印 *pos 的状况
  */
 void xq_position_print(const XqPosition *pos)
@@ -383,10 +402,17 @@ void xq_position_print(const XqPosition *pos)
         for (file = 0; file < XQ_FILES; ++file)
         {
             XqSquare sq = xq_square_make(file, rank);
-            printf("%c ", xq_piece_to_char(pos->board[sq]));
+            int piece = pos->board[sq];
+            const char *text = piece_display_text(piece);
+            if (piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == XQ_RED)
+                printf("\x1b[31m%s\x1b[0m ", text);
+            else if (piece != XQ_EMPTY_PIECE)
+                printf("%s ", text);
+            else
+                printf("%s  ", text);
         }
         printf("\n");
     }
-    printf("  a b c d e f g h i\n");
+    printf("  a  b  c  d  e  f  g  h  i\n");
     printf("side: %s\n", pos->side_to_move == XQ_RED ? "red" : "black");
 }
