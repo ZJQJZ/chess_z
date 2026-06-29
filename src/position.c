@@ -387,6 +387,6 @@ void xq_position_print(const XqPosition *pos)
         }
         printf("\n");
     }
-    printf("  0 1 2 3 4 5 6 7 8\n");
+    printf("  a b c d e f g h i\n");
     printf("side: %s\n", pos->side_to_move == XQ_RED ? "red" : "black");
 }
