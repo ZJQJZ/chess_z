@@ -102,7 +102,7 @@ int main(void)
         {
             XqMove best;
             char text[8];
-            if (!xq_engine_find_best_move(NULL, &pos, 2, &best))
+            if (!xq_engine_find_best_move(NULL, &pos, 5, &best))
             {
                 printf("engine failed to move\n");
                 break;
