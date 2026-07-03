@@ -39,34 +39,34 @@ static int default_eval(const XqEngineAdapter *engine, const XqPosition *pos, Xq
 
 /**
  * 本象棋引擎的核心：alpha-beta 剪枝后的 Minimax 搜索，并采用了取负最大化的代码简化的写法
- * 
+ *
  * 首先，Minimax 搜索不再赘述，它就是基本的零和博弈游戏的对某一方最优局面评分的搜索函数，在
  * 己方局面中，搜索最优的走法，而在对方的局面中，搜索最差（对对方最优，即不把对方当傻子）走法
- * 
+ *
  * 然后，在深入 alpha-beta 剪枝之前，先看这个例子：
- * 
+ *
  * MAX :       (1:>=x)
  *             /     \
  * MIN :    (2:x)  (3:!(<=x),<=y)
  *                   /           \
  * MAX :          (4:y)      (5:!(<=x),!(>=y))
- * 
+ *
  * 假设这个局面树中，节点 2 评分为 x，节点 4 评分为 y，那么节点 1 的评分根据节点 2 就可知
  * 大于等于 x，于是如果节点 3 的评分小于等于 x，也不会影响已经计算的结果，记 !(exp) 的含义
  * 为如果节点的分值满足 exp，则不影响目前已计算结果，则为节点 3 标记一个 !(<=x)
  * 再根据节点 4 的评分得到节点 3 的评分 <= y，结合 3 的 !(<=x)，可以知道 5 的评分只要满足
  * <=x 或 >=y 就不会影响目前结果，于是我们就得到了一个计算 5 时的 alpha, beta 的例子，分别
  * 是 x, y
- * 
+ *
  * 接下来详细说一下计算 MAX 层节点评分时的 alpha-beta 剪枝逻辑，MIN 层同理，只是符号相反：
  * 因为计算 MAX 层节点过程中，或者说计算完某个该 MAX 层节点的子节点后，只能以 >=x 的方式
  * 更新父节点（比如上边那个例子中的 (2) 节点，在计算得到评分 x 后，父节点的范围变成 >= x）
  * 所以，只有计算完某个子节点让父节点评分值 >= beta 时，才跳过该 MAX 层剩余子节点的计算，即剪枝
  * 另外，当计算子节点的评分落入到了 (alpha, beta) 中，在以 >=x 的方式更新父节点后，得到父节点
- * 评分可能出现的范围与 (alpha, beta) 的交集包含于 (alpha, beta)，所以我们可以更新 alpha 
+ * 评分可能出现的范围与 (alpha, beta) 的交集包含于 (alpha, beta)，所以我们可以更新 alpha
  * 值为刚计算的子节点的评分
- * 
- * 最后，说下取负最大化的代码简化：通过对对手的局势评分取负，就将 Minimax 搜索转化为 "Maxmax 
+ *
+ * 最后，说下取负最大化的代码简化：通过对对手的局势评分取负，就将 Minimax 搜索转化为 "Maxmax
  * 搜索"，起到简化代码的作用
  */
 static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, int alpha, int beta)
@@ -106,7 +106,8 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
 static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move)
 {
     XqMoveList list;
-    int worst_opponent_score = INT_MAX / 2;
+    int alpha = INT_MIN / 2;
+    int beta = INT_MAX / 2;
     int i;
 
     if (depth == 0)
@@ -119,13 +120,13 @@ static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos,
     for (i = 0; i < list.count; ++i)
     {
         XqPosition next = *pos;
-        int opponent_score;
+        int score;
 
         xq_position_make_move(&next, list.moves[i]);
-        opponent_score = negamax(engine, &next, depth - 1, INT_MIN / 2, INT_MAX / 2);
-        if (opponent_score < worst_opponent_score)
+        score = -negamax(engine, &next, depth - 1, -beta, -alpha);
+        if (score > alpha)
         {
-            worst_opponent_score = opponent_score;
+            alpha = score;
             *best_move = list.moves[i];
         }
     }
