@@ -7,3 +7,4 @@ build/
 gmon.out
 *.gcda
 *.gcno
+.DS_Store

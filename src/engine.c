@@ -106,7 +106,7 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
 static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move)
 {
     XqMoveList list;
-    int best_score = INT_MIN / 2;
+    int worst_opponent_score = INT_MAX / 2;
     int i;
 
     if (depth == 0)
@@ -119,13 +119,13 @@ static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos,
     for (i = 0; i < list.count; ++i)
     {
         XqPosition next = *pos;
-        int score;
+        int opponent_score;
 
         xq_position_make_move(&next, list.moves[i]);
-        score = -negamax(engine, &next, depth - 1, INT_MIN / 2, INT_MAX / 2);
-        if (score > best_score)
+        opponent_score = negamax(engine, &next, depth - 1, INT_MIN / 2, INT_MAX / 2);
+        if (opponent_score < worst_opponent_score)
         {
-            best_score = score;
+            worst_opponent_score = opponent_score;
             *best_move = list.moves[i];
         }
     }
