@@ -4,3 +4,6 @@ build/
 *.o
 *.a
 *.lib
+gmon.out
+*.gcda
+*.gcno
