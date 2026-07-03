@@ -61,7 +61,7 @@ static int default_eval(const XqEngineAdapter *engine, const XqPosition *pos, Xq
  * 接下来详细说一下计算 MAX 层节点评分时的 alpha-beta 剪枝逻辑，MIN 层同理，只是符号相反：
  * 因为计算 MAX 层节点过程中，或者说计算完某个该 MAX 层节点的子节点后，只能以 >=x 的方式
  * 更新父节点（比如上边那个例子中的 (2) 节点，在计算得到评分 x 后，父节点的范围变成 >= x）
- * 所以，只有当计算完某个节点的评分值 >= beta 时，才会跳过该 MAX 层节点剩余的计算，即剪枝
+ * 所以，只有计算完某个子节点让父节点评分值 >= beta 时，才跳过该 MAX 层剩余子节点的计算，即剪枝
  * 另外，当计算子节点的评分落入到了 (alpha, beta) 中，在以 >=x 的方式更新父节点后，得到父节点
  * 评分可能出现的范围与 (alpha, beta) 的交集包含于 (alpha, beta)，所以我们可以更新 alpha 
  * 值为刚计算的子节点的评分
