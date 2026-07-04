@@ -1,5 +1,4 @@
 #include "xiangqi/engine.h"
-#include "xiangqi/movegen.h"
 #include "xiangqi/position.h"
 
 #include <inttypes.h>
@@ -10,11 +9,14 @@
 #include <string.h>
 #include <time.h>
 
-#define SEARCH_DEPTH 4u
+#define SEARCH_DEPTH 5u
 #define LINE_BUFFER_SIZE 256u
 
 static const char *default_input_path = "stats/random_fen/random_positions.fen";
 
+/**
+ * 返回从 start 到当前时刻消耗的 CPU 时间（秒）；计时失败时返回 0.0。
+ */
 static double elapsed_seconds(clock_t start)
 {
     clock_t end = clock();
@@ -24,6 +26,9 @@ static double elapsed_seconds(clock_t start)
     return (double)(end - start) / (double)CLOCKS_PER_SEC;
 }
 
+/**
+ * 类似 generate_positions.c 中的 checksum_text
+ */
 static uint64_t checksum_move(uint64_t checksum, XqMove move)
 {
     checksum ^= (uint64_t)move.from;
@@ -33,27 +38,18 @@ static uint64_t checksum_move(uint64_t checksum, XqMove move)
     return checksum;
 }
 
-static bool find_legal_move(const XqMoveList *legal, XqMove best, XqMove *canonical)
-{
-    int i;
-
-    for (i = 0; i < legal->count; ++i)
-    {
-        if (legal->moves[i].from == best.from && legal->moves[i].to == best.to)
-        {
-            *canonical = legal->moves[i];
-            return true;
-        }
-    }
-    return false;
-}
-
+/**
+ * 打印信息
+ */
 static void print_summary(size_t searched, unsigned failures, clock_t start, uint64_t checksum)
 {
     printf("search summary: completed=%zu failures=%u cpu_seconds=%.3f checksum=%" PRIu64 "\n",
            searched, failures, elapsed_seconds(start), checksum);
 }
 
+/**
+ * 失败回调
+ */
 static int fail_at_line(FILE *input, const char *path, size_t line_number,
                         const char *reason, const char *line, size_t searched,
                         clock_t start, uint64_t checksum)
@@ -97,10 +93,7 @@ int main(int argc, char **argv)
     while (fgets(line, sizeof(line), input) != NULL)
     {
         XqPosition pos;
-        XqPosition next;
-        XqMoveList legal;
         XqMove best;
-        XqMove canonical;
         char *newline;
         size_t length;
 
@@ -112,8 +105,7 @@ int main(int argc, char **argv)
             int ch;
 
             while ((ch = fgetc(input)) != '\n' && ch != EOF)
-            {
-            }
+                ;
             return fail_at_line(input, input_path, line_number, "line is too long", NULL,
                                 searched, start, checksum);
         }
@@ -130,23 +122,15 @@ int main(int argc, char **argv)
             return fail_at_line(input, input_path, line_number, "invalid FEN", line,
                                 searched, start, checksum);
 
-        xq_generate_legal(&pos, &legal);
-        if (legal.count == 0)
-            return fail_at_line(input, input_path, line_number, "position has no legal moves", line,
-                                searched, start, checksum);
         if (!xq_engine_find_best_move(NULL, &pos, SEARCH_DEPTH, &best))
             return fail_at_line(input, input_path, line_number, "engine failed to find a move", line,
                                 searched, start, checksum);
-        if (!find_legal_move(&legal, best, &canonical))
-            return fail_at_line(input, input_path, line_number, "engine returned an illegal move", line,
-                                searched, start, checksum);
 
-        next = pos;
-        if (!xq_position_make_move(&next, canonical) || !xq_position_validate(&next))
+        if (!xq_position_make_move(&pos, best) || !xq_position_validate(&pos))
             return fail_at_line(input, input_path, line_number, "engine move produced an invalid position", line,
                                 searched, start, checksum);
 
-        checksum = checksum_move(checksum, canonical);
+        checksum = checksum_move(checksum, best);
         ++searched;
     }
 
