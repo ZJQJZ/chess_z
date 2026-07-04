@@ -129,6 +129,11 @@ static char *make_temp_path(const char *output_path)
     return temp_path;
 }
 
+/**
+ * 用已经完整写入并关闭的临时文件替换正式输出文件，避免正式文件保留半成品。
+ * Windows 和 POSIX 分别使用各自支持覆盖已有文件的移动/重命名接口。
+ * 替换成功返回 true，否则返回 false。
+ */
 static bool replace_file(const char *temp_path, const char *output_path)
 {
 #if defined(_WIN32)
@@ -140,7 +145,7 @@ static bool replace_file(const char *temp_path, const char *output_path)
 }
 
 /**
- * 用已经写完的临时文件替换正式输出文件
+ * 返回从 start 到当前时刻消耗的 CPU 时间（秒）；计时失败时返回 0.0。
  */
 static double elapsed_seconds(clock_t start)
 {
