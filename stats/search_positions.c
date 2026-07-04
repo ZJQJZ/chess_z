@@ -9,7 +9,7 @@
 #include <string.h>
 #include <time.h>
 
-#define SEARCH_DEPTH 5u
+#define SEARCH_DEPTH 4u
 #define LINE_BUFFER_SIZE 256u
 
 static const char *default_input_path = "stats/random_fen/random_positions.fen";
