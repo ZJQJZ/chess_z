@@ -7,6 +7,17 @@
 static const int piece_values[XQ_PIECE_TYPE_NB] = {
     10000, 120, 120, 270, 600, 285, 70};
 
+enum
+{
+    CAPTURE_ORDER_BASE = 100000
+};
+
+typedef struct ScoredMove
+{
+    XqMove move;
+    int score;
+} ScoredMove;
+
 /**
  * 简陋的评估函数，基于 piece_values，返回对于 perspective 方的局面评分
  */
@@ -35,6 +46,62 @@ static int default_eval(const XqEngineAdapter *engine, const XqPosition *pos, Xq
     if (engine != NULL && engine->evaluate != NULL)
         return engine->evaluate(pos, perspective, engine->user);
     return xq_engine_material_evaluate(pos, perspective, NULL);
+}
+
+/**
+ * 返回走法的排序分数，分数越高越优先搜索。
+ * 引擎未提供自定义评分函数时，使用 MVV-LVA 将吃子着法排在普通着法之前。
+ *
+ * 默认公式为：
+ *   CAPTURE_ORDER_BASE + 被吃棋子的价值 * 16 - 走子棋子的价值
+ *
+ * CAPTURE_ORDER_BASE 保证吃子着法整体排在普通着法之前；被吃棋子的价值
+ * 乘以 16，使吃价值更高棋子的着法通常更靠前；减去走子棋子的价值，则在
+ * 吃相同棋子时倾向于优先使用价值更低的棋子。例如兵吃车的排序分数高于
+ * 车吃兵，兵吃炮的排序分数也高于车吃炮。
+ *
+ * 这里的 16 是经验权重，并不保证严格的字典序 MVV-LVA。整个公式也不是
+ * 对走后局面的真实评价，只是用于猜测哪些着法更可能较好并尽早触发剪枝；
+ * 它只影响搜索效率，不影响完整 Alpha-Beta 搜索的正确结果。
+ */
+static int move_order_score(const XqEngineAdapter *engine, const XqPosition *pos, XqMove move)
+{
+    if (engine != NULL && engine->score_move != NULL)
+        return engine->score_move(pos, move, engine->user);
+
+    if (move.captured == XQ_EMPTY_PIECE)
+        return 0;
+
+    return CAPTURE_ORDER_BASE +
+           piece_values[xq_piece_type(move.captured)] * 16 -
+           piece_values[xq_piece_type(move.piece)];
+}
+
+/**
+ * 预先计算每个走法的排序分数，并通过稳定插入排序按分数降序排列。
+ */
+static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list)
+{
+    ScoredMove ordered[XQ_MAX_MOVES];
+    int i;
+
+    for (i = 0; i < list->count; ++i)
+    {
+        ScoredMove current;
+        int j = i;
+
+        current.move = list->moves[i];
+        current.score = move_order_score(engine, pos, current.move);
+        while (j > 0 && ordered[j - 1].score < current.score)
+        {
+            ordered[j] = ordered[j - 1];
+            --j;
+        }
+        ordered[j] = current;
+    }
+
+    for (i = 0; i < list->count; ++i)
+        list->moves[i] = ordered[i].move;
 }
 
 /**
@@ -84,6 +151,7 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
     xq_generate_legal(pos, &list);
     if (list.count == 0)
         return -30000 - (int)depth;
+    order_moves(engine, pos, &list);
 
     for (i = 0; i < list.count; ++i)
     {
@@ -119,6 +187,7 @@ static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos,
     xq_generate_legal(pos, &list);
     if (list.count == 0)
         return false;
+    order_moves(engine, pos, &list);
 
     for (i = 0; i < list.count; ++i)
     {
