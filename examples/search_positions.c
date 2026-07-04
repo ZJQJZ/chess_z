@@ -1,0 +1,165 @@
+#include "xiangqi/engine.h"
+#include "xiangqi/movegen.h"
+#include "xiangqi/position.h"
+
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define SEARCH_DEPTH 4u
+#define LINE_BUFFER_SIZE 256u
+
+static const char *default_input_path = "random_positions.fen";
+
+static double elapsed_seconds(clock_t start)
+{
+    clock_t end = clock();
+
+    if (start == (clock_t)-1 || end == (clock_t)-1)
+        return 0.0;
+    return (double)(end - start) / (double)CLOCKS_PER_SEC;
+}
+
+static uint64_t checksum_move(uint64_t checksum, XqMove move)
+{
+    checksum ^= (uint64_t)move.from;
+    checksum *= UINT64_C(1099511628211);
+    checksum ^= (uint64_t)move.to;
+    checksum *= UINT64_C(1099511628211);
+    return checksum;
+}
+
+static bool find_legal_move(const XqMoveList *legal, XqMove best, XqMove *canonical)
+{
+    int i;
+
+    for (i = 0; i < legal->count; ++i)
+    {
+        if (legal->moves[i].from == best.from && legal->moves[i].to == best.to)
+        {
+            *canonical = legal->moves[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static void print_summary(size_t searched, unsigned failures, clock_t start, uint64_t checksum)
+{
+    printf("search summary: completed=%zu failures=%u cpu_seconds=%.3f checksum=%" PRIu64 "\n",
+           searched, failures, elapsed_seconds(start), checksum);
+}
+
+static int fail_at_line(FILE *input, const char *path, size_t line_number,
+                        const char *reason, const char *line, size_t searched,
+                        clock_t start, uint64_t checksum)
+{
+    if (input != NULL)
+        (void)fclose(input);
+    if (line_number == 0)
+        fprintf(stderr, "error: %s: %s\n", path, reason);
+    else if (line != NULL && line[0] != '\0')
+        fprintf(stderr, "error: %s:%zu: %s: %s\n", path, line_number, reason, line);
+    else
+        fprintf(stderr, "error: %s:%zu: %s\n", path, line_number, reason);
+    print_summary(searched, 1u, start, checksum);
+    return EXIT_FAILURE;
+}
+
+int main(int argc, char **argv)
+{
+    const char *input_path;
+    FILE *input;
+    char line[LINE_BUFFER_SIZE];
+    size_t line_number = 0;
+    size_t searched = 0;
+    uint64_t checksum = UINT64_C(14695981039346656037);
+    clock_t start = clock();
+
+    if (argc > 2)
+    {
+        fprintf(stderr, "usage: %s [fen_file]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    input_path = argc == 2 ? argv[1] : default_input_path;
+    printf("search: input=%s depth=%u\n", input_path, SEARCH_DEPTH);
+
+    input = fopen(input_path, "rb");
+    if (input == NULL)
+        return fail_at_line(NULL, input_path, 0, "could not open input file", NULL,
+                            searched, start, checksum);
+
+    while (fgets(line, sizeof(line), input) != NULL)
+    {
+        XqPosition pos;
+        XqPosition next;
+        XqMoveList legal;
+        XqMove best;
+        XqMove canonical;
+        char *newline;
+        size_t length;
+
+        ++line_number;
+        length = strlen(line);
+        newline = strchr(line, '\n');
+        if (newline == NULL && length == sizeof(line) - 1u)
+        {
+            int ch;
+
+            while ((ch = fgetc(input)) != '\n' && ch != EOF)
+            {
+            }
+            return fail_at_line(input, input_path, line_number, "line is too long", NULL,
+                                searched, start, checksum);
+        }
+        if (newline != NULL)
+            *newline = '\0';
+
+        length = strlen(line);
+        if (length > 0 && line[length - 1u] == '\r')
+            line[length - 1u] = '\0';
+        if (line[0] == '\0')
+            continue;
+
+        if (!xq_position_from_fen(&pos, line))
+            return fail_at_line(input, input_path, line_number, "invalid FEN", line,
+                                searched, start, checksum);
+
+        xq_generate_legal(&pos, &legal);
+        if (legal.count == 0)
+            return fail_at_line(input, input_path, line_number, "position has no legal moves", line,
+                                searched, start, checksum);
+        if (!xq_engine_find_best_move(NULL, &pos, SEARCH_DEPTH, &best))
+            return fail_at_line(input, input_path, line_number, "engine failed to find a move", line,
+                                searched, start, checksum);
+        if (!find_legal_move(&legal, best, &canonical))
+            return fail_at_line(input, input_path, line_number, "engine returned an illegal move", line,
+                                searched, start, checksum);
+
+        next = pos;
+        if (!xq_position_make_move(&next, canonical) || !xq_position_validate(&next))
+            return fail_at_line(input, input_path, line_number, "engine move produced an invalid position", line,
+                                searched, start, checksum);
+
+        checksum = checksum_move(checksum, canonical);
+        ++searched;
+    }
+
+    if (ferror(input))
+        return fail_at_line(input, input_path, line_number, "failed while reading input file", NULL,
+                            searched, start, checksum);
+    if (fclose(input) != 0)
+        return fail_at_line(NULL, input_path, line_number, "failed to close input file", NULL,
+                            searched, start, checksum);
+    if (searched == 0)
+        return fail_at_line(NULL, input_path, 0, "input file contains no positions", NULL,
+                            searched, start, checksum);
+
+    print_summary(searched, 0u, start, checksum);
+    return EXIT_SUCCESS;
+}

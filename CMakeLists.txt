@@ -17,14 +17,26 @@ target_include_directories(xiangqi
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-if(MSVC)
-    target_compile_options(xiangqi PRIVATE /W4)
-else()
-    target_compile_options(xiangqi PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+function(xq_enable_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endfunction()
+
+xq_enable_warnings(xiangqi)
 
 add_executable(xiangqi_cli examples/cli.c)
 target_link_libraries(xiangqi_cli PRIVATE xiangqi)
+
+add_executable(xiangqi_generate_positions examples/generate_positions.c)
+target_link_libraries(xiangqi_generate_positions PRIVATE xiangqi)
+xq_enable_warnings(xiangqi_generate_positions)
+
+add_executable(xiangqi_search_positions examples/search_positions.c)
+target_link_libraries(xiangqi_search_positions PRIVATE xiangqi)
+xq_enable_warnings(xiangqi_search_positions)
 
 enable_testing()
 
