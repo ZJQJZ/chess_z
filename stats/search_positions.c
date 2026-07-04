@@ -13,7 +13,7 @@
 #define SEARCH_DEPTH 4u
 #define LINE_BUFFER_SIZE 256u
 
-static const char *default_input_path = "random_positions.fen";
+static const char *default_input_path = "stats/random_fen/random_positions.fen";
 
 static double elapsed_seconds(clock_t start)
 {

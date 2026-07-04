@@ -18,8 +18,10 @@ include/xiangqi/movegen.h    伪合法/合法着法、将军检测、perft
 include/xiangqi/engine.h     AI 引擎适配接口
 src/                         核心实现
 examples/cli.c               示例命令行入口
-examples/generate_positions.c 随机合法局面生成入口
-examples/search_positions.c   批量局面搜索入口
+stats/generate_positions.c   随机合法局面生成入口
+stats/search_positions.c     批量局面搜索入口
+stats/random_fen/            随机局面 FEN 数据
+stats/data/                  性能分析结果
 tests/test_core.c            基础规则测试
 ```
 
@@ -71,7 +73,7 @@ quit   退出
 ./build/xiangqi_search_positions
 ```
 
-两个程序默认使用当前目录下的 `random_positions.fen`，也可以为二者指定相同的文件路径：
+两个程序默认使用 `stats/random_fen/random_positions.fen`，也可以为二者指定相同的文件路径：
 
 ```sh
 ./build/xiangqi_generate_positions build/profile_positions.fen

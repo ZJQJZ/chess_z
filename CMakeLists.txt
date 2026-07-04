@@ -30,11 +30,11 @@ xq_enable_warnings(xiangqi)
 add_executable(xiangqi_cli examples/cli.c)
 target_link_libraries(xiangqi_cli PRIVATE xiangqi)
 
-add_executable(xiangqi_generate_positions examples/generate_positions.c)
+add_executable(xiangqi_generate_positions stats/generate_positions.c)
 target_link_libraries(xiangqi_generate_positions PRIVATE xiangqi)
 xq_enable_warnings(xiangqi_generate_positions)
 
-add_executable(xiangqi_search_positions examples/search_positions.c)
+add_executable(xiangqi_search_positions stats/search_positions.c)
 target_link_libraries(xiangqi_search_positions PRIVATE xiangqi)
 xq_enable_warnings(xiangqi_search_positions)
 

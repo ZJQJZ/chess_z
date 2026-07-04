@@ -18,7 +18,7 @@
 #define MAX_GENERATION_ATTEMPTS 256u
 #define RANDOM_SEED UINT32_C(0x00C0FFEE)
 
-static const char *default_output_path = "random_positions.fen";
+static const char *default_output_path = "stats/random_fen/random_positions.fen";
 
 typedef struct RandomState
 {
