@@ -68,6 +68,9 @@ static int default_eval(const XqEngineAdapter *engine, const XqPosition *pos, Xq
  *
  * 最后，说下取负最大化的代码简化：通过对对手的局势评分取负，就将 Minimax 搜索转化为 "Maxmax
  * 搜索"，起到简化代码的作用
+ *
+ * 总结：相比 Minimax，alpha-beta 通过 alpha、beta 两个参数剪枝来提升性能；代价是当局面的
+ * 真实评分落在窗口外时，返值可能不再是精确分数，而只是一个足以支持剪枝和决策的上界或下界。
  */
 static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, int alpha, int beta)
 {
