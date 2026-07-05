@@ -31,6 +31,7 @@ bool xq_position_make_move(XqPosition *pos, XqMove move);
 XqSquare xq_position_king_square(const XqPosition *pos, XqColor color);
 int xq_position_piece_count(const XqPosition *pos, XqColor color, XqPieceType type);
 bool xq_position_validate(const XqPosition *pos);
+const char *xq_piece_to_text(int piece);
 void xq_position_print(const XqPosition *pos);
 
 #endif

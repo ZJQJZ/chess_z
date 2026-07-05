@@ -372,7 +372,7 @@ bool xq_position_validate(const XqPosition *pos)
 /**
  * 将内部的棋子表达 piece 转换为更易懂的中文字符
  */
-static const char *piece_display_text(int piece)
+const char *xq_piece_to_text(int piece)
 {
     static const char *red_text[] = {"帥", "仕", "相", "馬", "車", "炮", "兵"};
     static const char *black_text[] = {"将", "士", "象", "馬", "車", "炮", "卒"};
@@ -403,7 +403,7 @@ void xq_position_print(const XqPosition *pos)
         {
             XqSquare sq = xq_square_make(file, rank);
             int piece = pos->board[sq];
-            const char *text = piece_display_text(piece);
+            const char *text = xq_piece_to_text(piece);
             if (piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == XQ_RED)
                 printf("\x1b[31m%s\x1b[0m ", text);
             else if (piece != XQ_EMPTY_PIECE)
