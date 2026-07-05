@@ -36,9 +36,26 @@ typedef struct ScoredMove
 } ScoredMove;
 
 /**
- * 简陋的评估函数，基于 piece_values，返回对于 perspective 方的局面评分
+ * 计算 color 方所有合法着法的机动性价值。
  */
-int xq_engine_material_evaluate(const XqPosition *pos, XqColor perspective, void *user)
+static int evaluate_legal_moves(const XqPosition *pos, XqColor color)
+{
+    XqPosition evaluation_pos = *pos;
+    XqMoveList legal;
+    int score = 0;
+    int i;
+
+    evaluation_pos.side_to_move = color;
+    xq_generate_legal(&evaluation_pos, &legal);
+    for (i = 0; i < legal.count; ++i)
+        score += legal_move_values[xq_piece_type(legal.moves[i].piece)];
+    return score;
+}
+
+/**
+ * 默认静态评估函数，基于材料和合法着法机动性，返回 perspective 方的局面评分。
+ */
+int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user)
 {
     int score = 0;
     XqColor opponent = xq_color_opponent(perspective);
@@ -51,19 +68,21 @@ int xq_engine_material_evaluate(const XqPosition *pos, XqColor perspective, void
         score += value * xq_bb_count(pos->pieces[perspective][type]);
         score -= value * xq_bb_count(pos->pieces[opponent][type]);
     }
+    score += evaluate_legal_moves(pos, perspective);
+    score -= evaluate_legal_moves(pos, opponent);
     return score;
 }
 
 /**
  * 静态评估函数
  * 根据输入的引擎适配器，计算 perspective 方在 *pos 下的局面评分
- * 如果输入的引擎适配器为空，则直接用 xq_engine_material_evaluate 函数评分
+ * 如果输入的引擎适配器为空，则直接用 xq_engine_default_static_evaluate 函数评分
  */
 static int static_evaluate(const XqEngineAdapter *engine, const XqPosition *pos, XqColor perspective)
 {
     if (engine != NULL && engine->static_evaluate != NULL)
         return engine->static_evaluate(pos, perspective, engine->user);
-    return xq_engine_material_evaluate(pos, perspective, NULL);
+    return xq_engine_default_static_evaluate(pos, perspective, NULL);
 }
 
 /**

@@ -14,7 +14,7 @@ enum
     BOARD_LEFT = 70,
     BOARD_TOP = 55,
     CELL_SIZE = 60,
-    ENGINE_DEPTH = 6
+    ENGINE_DEPTH = 5
 };
 
 static Vector2 square_center(XqSquare sq)

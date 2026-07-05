@@ -18,7 +18,7 @@ typedef struct XqEngineAdapter
     XqMoveScoreFn score_move;
 } XqEngineAdapter;
 
-int xq_engine_material_evaluate(const XqPosition *pos, XqColor perspective, void *user);
+int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user);
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move);
 
 #endif

@@ -56,6 +56,21 @@ static void test_engine_adapter(void) {
     assert(best.to < XQ_SQUARES);
 }
 
+static void test_default_static_evaluate(void) {
+    XqPosition pos;
+    XqPosition before;
+
+    xq_position_startpos(&pos);
+    assert(xq_engine_default_static_evaluate(&pos, XQ_RED, NULL) == 0);
+    assert(xq_engine_default_static_evaluate(&pos, XQ_BLACK, NULL) == 0);
+
+    assert(xq_position_from_fen(&pos, "3k5/9/9/9/9/9/9/9/9/R3K4 b - -"));
+    before = pos;
+    assert(xq_engine_default_static_evaluate(&pos, XQ_RED, NULL) == 850);
+    assert(xq_engine_default_static_evaluate(&pos, XQ_BLACK, NULL) == -850);
+    assert(memcmp(&pos, &before, sizeof(pos)) == 0);
+}
+
 static int constant_evaluate(const XqPosition *pos, XqColor perspective, void *user) {
     (void)pos;
     (void)perspective;
@@ -114,6 +129,7 @@ int main(void) {
     test_validate_rejects_extra_piece_bits();
     test_flying_king_check();
     test_engine_adapter();
+    test_default_static_evaluate();
     test_default_move_ordering();
     test_custom_move_ordering();
     printf("xiangqi core tests passed\n");
