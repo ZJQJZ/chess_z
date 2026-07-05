@@ -5,7 +5,24 @@
 #include <limits.h>
 
 static const int piece_values[XQ_PIECE_TYPE_NB] = {
-    10000, 120, 120, 270, 600, 285, 70};
+    [XQ_KING] = 10000,
+    [XQ_ADVISOR] = 120,
+    [XQ_BISHOP] = 120,
+    [XQ_KNIGHT] = 270,
+    [XQ_ROOK] = 600,
+    [XQ_CANNON] = 285,
+    [XQ_PAWN] = 70,
+};
+
+static const int legal_move_values[XQ_PIECE_TYPE_NB] = {
+    [XQ_KING] = 10,
+    [XQ_ADVISOR] = 10,
+    [XQ_BISHOP] = 10,
+    [XQ_KNIGHT] = 20,
+    [XQ_ROOK] = 20,
+    [XQ_CANNON] = 15,
+    [XQ_PAWN] = 10,
+};
 
 enum
 {
@@ -38,13 +55,14 @@ int xq_engine_material_evaluate(const XqPosition *pos, XqColor perspective, void
 }
 
 /**
+ * 静态评估函数
  * 根据输入的引擎适配器，计算 perspective 方在 *pos 下的局面评分
  * 如果输入的引擎适配器为空，则直接用 xq_engine_material_evaluate 函数评分
  */
-static int default_eval(const XqEngineAdapter *engine, const XqPosition *pos, XqColor perspective)
+static int static_evaluate(const XqEngineAdapter *engine, const XqPosition *pos, XqColor perspective)
 {
-    if (engine != NULL && engine->evaluate != NULL)
-        return engine->evaluate(pos, perspective, engine->user);
+    if (engine != NULL && engine->static_evaluate != NULL)
+        return engine->static_evaluate(pos, perspective, engine->user);
     return xq_engine_material_evaluate(pos, perspective, NULL);
 }
 
@@ -146,7 +164,7 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
     int i;
 
     if (depth == 0)
-        return default_eval(engine, pos, pos->side_to_move);
+        return static_evaluate(engine, pos, pos->side_to_move);
 
     xq_generate_legal(pos, &list);
     if (list.count == 0)

@@ -12,7 +12,7 @@ typedef int (*XqMoveScoreFn)(const XqPosition *pos, XqMove move, void *user);
 
 typedef struct XqEngineAdapter
 {
-    XqEvaluateFn evaluate;
+    XqEvaluateFn static_evaluate;
     XqSearchFn search;
     void *user;
     XqMoveScoreFn score_move;

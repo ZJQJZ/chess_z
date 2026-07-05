@@ -78,7 +78,7 @@ static void test_default_move_ordering(void) {
     XqPosition pos;
     XqMove best;
     XqEngineAdapter engine = {
-        .evaluate = constant_evaluate,
+        .static_evaluate = constant_evaluate,
         .search = NULL,
         .user = NULL,
         .score_move = NULL,
@@ -95,7 +95,7 @@ static void test_custom_move_ordering(void) {
     XqMove best;
     int score_calls = 0;
     XqEngineAdapter engine = {
-        .evaluate = constant_evaluate,
+        .static_evaluate = constant_evaluate,
         .search = NULL,
         .user = &score_calls,
         .score_move = prefer_a0a1,
