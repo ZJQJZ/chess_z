@@ -141,6 +141,9 @@ static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, Xq
         list->moves[i] = ordered[i].move;
 }
 
+/**
+ * 逻辑类似 order_moves，只不过多谢带了排序所需要的积分
+ */
 static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list, int *scores)
 {
     ScoredMove ordered[XQ_MAX_MOVES];
@@ -277,7 +280,7 @@ static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos,
 }
 
 /**
- * 引擎搜索算法，引擎为空或引擎搜索函数的话调用 builtin_search
+ * 带有解释信息的引擎搜索算法，引擎为空或引擎搜索函数为空的话调用 builtin_search
  */
 bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqExplainResult *result)
 {
