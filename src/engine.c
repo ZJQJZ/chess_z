@@ -35,8 +35,6 @@ typedef struct ScoredMove
     int score;
 } ScoredMove;
 
-static void order_moves_with_scores(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list, int *scores);
-
 /**
  * 计算 color 方所有合法着法的机动性价值。
  */
@@ -121,10 +119,29 @@ static int move_order_score(const XqEngineAdapter *engine, const XqPosition *pos
  */
 static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list)
 {
-    order_moves_with_scores(engine, pos, list, NULL);
+    ScoredMove ordered[XQ_MAX_MOVES];
+    int i;
+
+    for (i = 0; i < list->count; ++i)
+    {
+        ScoredMove current;
+        int j = i;
+
+        current.move = list->moves[i];
+        current.score = move_order_score(engine, pos, current.move);
+        while (j > 0 && ordered[j - 1].score < current.score)
+        {
+            ordered[j] = ordered[j - 1];
+            --j;
+        }
+        ordered[j] = current;
+    }
+
+    for (i = 0; i < list->count; ++i)
+        list->moves[i] = ordered[i].move;
 }
 
-static void order_moves_with_scores(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list, int *scores)
+static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list, int *scores)
 {
     ScoredMove ordered[XQ_MAX_MOVES];
     int i;
@@ -147,8 +164,7 @@ static void order_moves_with_scores(const XqEngineAdapter *engine, const XqPosit
     for (i = 0; i < list->count; ++i)
     {
         list->moves[i] = ordered[i].move;
-        if (scores != NULL)
-            scores[i] = ordered[i].score;
+        scores[i] = ordered[i].score;
     }
 }
 
@@ -288,7 +304,7 @@ bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, const XqPosition *
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
         return false;
-    order_moves_with_scores(engine, pos, &list, order_scores);
+    order_moves_for_explain(engine, pos, &list, order_scores);
 
     for (i = 0; i < list.count; ++i)
     {
