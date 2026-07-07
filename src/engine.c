@@ -352,6 +352,9 @@ bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, const XqPosition *
     return result->count > 0;
 }
 
+/**
+ * 引擎搜索算法，引擎为空或引擎搜索函数的话调用 builtin_search
+ */
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move)
 {
     if (best_move == NULL)
