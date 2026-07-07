@@ -182,10 +182,13 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
     int best = INT_MIN / 2;
     int i;
 
+    if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
+        return -30000 - (int)depth;
+
     if (depth == 0)
         return static_evaluate(engine, pos, pos->side_to_move);
 
-    xq_generate_legal(pos, &list);
+    xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
         return -30000 - (int)depth;
     order_moves(engine, pos, &list);
@@ -221,7 +224,10 @@ static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos,
     if (depth == 0)
         depth = 1;
 
-    xq_generate_legal(pos, &list);
+    if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
+        return false;
+
+    xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
         return false;
     order_moves(engine, pos, &list);
