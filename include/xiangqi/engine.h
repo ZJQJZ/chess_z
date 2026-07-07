@@ -18,7 +18,36 @@ typedef struct XqEngineAdapter
     XqMoveScoreFn score_move;
 } XqEngineAdapter;
 
+typedef enum XqSearchScoreKind
+{
+    XQ_SEARCH_SCORE_EXACT,
+    XQ_SEARCH_SCORE_UPPER_BOUND,
+    XQ_SEARCH_SCORE_LOWER_BOUND
+} XqSearchScoreKind;
+
+typedef struct XqExplainedMove
+{
+    XqMove move;
+    unsigned depth;
+    int alpha_before;
+    int beta;
+    int score;
+    int order_score;
+    XqSearchScoreKind score_kind;
+    bool is_best;
+    bool caused_cutoff;
+} XqExplainedMove;
+
+typedef struct XqExplainResult
+{
+    XqExplainedMove moves[XQ_MAX_MOVES];
+    int count;
+    int best_index;
+    int final_score;
+} XqExplainResult;
+
 int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user);
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move);
+bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqExplainResult *result);
 
 #endif

@@ -35,6 +35,8 @@ typedef struct ScoredMove
     int score;
 } ScoredMove;
 
+static void order_moves_with_scores(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list, int *scores);
+
 /**
  * 计算 color 方所有合法着法的机动性价值。
  */
@@ -119,6 +121,11 @@ static int move_order_score(const XqEngineAdapter *engine, const XqPosition *pos
  */
 static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list)
 {
+    order_moves_with_scores(engine, pos, list, NULL);
+}
+
+static void order_moves_with_scores(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list, int *scores)
+{
     ScoredMove ordered[XQ_MAX_MOVES];
     int i;
 
@@ -138,7 +145,11 @@ static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, Xq
     }
 
     for (i = 0; i < list->count; ++i)
+    {
         list->moves[i] = ordered[i].move;
+        if (scores != NULL)
+            scores[i] = ordered[i].score;
+    }
 }
 
 /**
@@ -252,6 +263,76 @@ static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos,
 /**
  * 引擎搜索算法，引擎为空或引擎搜索函数的话调用 builtin_search
  */
+bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqExplainResult *result)
+{
+    XqMoveList list;
+    int order_scores[XQ_MAX_MOVES];
+    int alpha = INT_MIN / 2;
+    int beta = INT_MAX / 2;
+    int i;
+
+    if (result == NULL)
+        return false;
+
+    result->count = 0;
+    result->best_index = -1;
+    result->final_score = INT_MIN / 2;
+
+    if (pos == NULL)
+        return false;
+    if (depth == 0)
+        depth = 1;
+    if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
+        return false;
+
+    xq_generate_pseudo_legal(pos, &list);
+    if (list.count == 0)
+        return false;
+    order_moves_with_scores(engine, pos, &list, order_scores);
+
+    for (i = 0; i < list.count; ++i)
+    {
+        XqPosition next = *pos;
+        XqExplainedMove *explained = &result->moves[result->count];
+        int alpha_before = alpha;
+        int score;
+
+        xq_position_make_move(&next, list.moves[i]);
+        score = -negamax(engine, &next, depth - 1, -beta, -alpha);
+
+        explained->move = list.moves[i];
+        explained->depth = depth;
+        explained->alpha_before = alpha_before;
+        explained->beta = beta;
+        explained->score = score;
+        explained->order_score = order_scores[i];
+        explained->score_kind = XQ_SEARCH_SCORE_UPPER_BOUND;
+        explained->is_best = false;
+        explained->caused_cutoff = false;
+
+        if (score > alpha)
+        {
+            alpha = score;
+            result->best_index = result->count;
+            explained->score_kind = XQ_SEARCH_SCORE_EXACT;
+        }
+        if (alpha >= beta)
+        {
+            explained->score_kind = XQ_SEARCH_SCORE_LOWER_BOUND;
+            explained->caused_cutoff = true;
+            ++result->count;
+            break;
+        }
+
+        ++result->count;
+    }
+
+    result->final_score = alpha;
+    if (result->best_index >= 0 && result->best_index < result->count)
+        result->moves[result->best_index].is_best = true;
+    return result->count > 0;
+}
+
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move)
 {
     if (best_move == NULL)

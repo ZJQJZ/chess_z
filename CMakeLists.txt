@@ -30,6 +30,10 @@ xq_enable_warnings(xiangqi)
 add_executable(xiangqi_cli examples/cli.c)
 target_link_libraries(xiangqi_cli PRIVATE xiangqi)
 
+add_executable(xiangqi_explain examples/explain.c)
+target_link_libraries(xiangqi_explain PRIVATE xiangqi)
+xq_enable_warnings(xiangqi_explain)
+
 find_package(raylib QUIET)
 if(raylib_FOUND)
     add_executable(xiangqi_gui examples/gui.c)

@@ -124,6 +124,46 @@ static void test_custom_move_ordering(void) {
     assert(score_calls == legal.count);
 }
 
+static void test_explain_one_ply(void) {
+    XqPosition pos;
+    XqMove best;
+    XqExplainResult result;
+
+    xq_position_startpos(&pos);
+    assert(xq_engine_explain_one_ply(NULL, &pos, 1, &result));
+    assert(result.count > 0);
+    assert(result.best_index >= 0);
+    assert(result.best_index < result.count);
+    assert(result.moves[result.best_index].is_best);
+
+    assert(xq_engine_find_best_move(NULL, &pos, 1, &best));
+    assert(result.moves[result.best_index].move.from == best.from);
+    assert(result.moves[result.best_index].move.to == best.to);
+
+    assert(!xq_engine_explain_one_ply(NULL, &pos, 1, NULL));
+}
+
+static void test_explain_custom_move_ordering(void) {
+    XqPosition pos;
+    XqMoveList legal;
+    XqExplainResult result;
+    int score_calls = 0;
+    XqEngineAdapter engine = {
+        .static_evaluate = constant_evaluate,
+        .search = NULL,
+        .user = &score_calls,
+        .score_move = prefer_a0a1,
+    };
+
+    xq_position_startpos(&pos);
+    xq_generate_legal(&pos, &legal);
+    assert(xq_engine_explain_one_ply(&engine, &pos, 1, &result));
+    assert(result.best_index >= 0);
+    assert(result.moves[result.best_index].move.from == (uint8_t)xq_square_make(0, 0));
+    assert(result.moves[result.best_index].move.to == (uint8_t)xq_square_make(0, 1));
+    assert(score_calls == legal.count);
+}
+
 int main(void) {
     test_startpos();
     test_validate_rejects_extra_piece_bits();
@@ -132,6 +172,8 @@ int main(void) {
     test_default_static_evaluate();
     test_default_move_ordering();
     test_custom_move_ordering();
+    test_explain_one_ply();
+    test_explain_custom_move_ordering();
     printf("xiangqi core tests passed\n");
     return 0;
 }
