@@ -4,7 +4,7 @@
 
 int main()
 {
-    char *a = "1CCa2b1r/4a4/5kn2/p1N1c3p/6R2/9/4P4/9/4A4/2B1KcB2 b - -";
+    char *a = "r1ba1abnr/4k4/2n3c2/2p3p1p/p3C4/7C1/P1P1P1P1P/N8/7R1/R1BAKAB2 b - - 0 1";
     XqPosition pos;
     xq_position_from_fen(&pos, a);
     xq_position_print(&pos);

@@ -68,8 +68,8 @@ int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective
         score += value * xq_bb_count(pos->pieces[perspective][type]);
         score -= value * xq_bb_count(pos->pieces[opponent][type]);
     }
-    score += evaluate_legal_moves(pos, perspective);
-    score -= evaluate_legal_moves(pos, opponent);
+    // score += evaluate_legal_moves(pos, perspective);
+    // score -= evaluate_legal_moves(pos, opponent);
     return score;
 }
 

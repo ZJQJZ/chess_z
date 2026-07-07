@@ -17,11 +17,17 @@ enum
     NODE_ID_SIZE = 64
 };
 
+/**
+ * 目前 program 都是 main 函数的 argv[0]，此函数意义在于用户这个程序应该怎么运行、支持哪些命令行参数
+ */
 static void print_usage(const char *program)
 {
     printf("usage: %s [--depth N] [--fen FEN]\n", program);
 }
 
+/**
+ * 将搜索节点类型转换为描述字符串 "exact"、"upper"、"lower"
+ */
 static const char *score_kind_text(XqSearchScoreKind kind)
 {
     switch (kind)
@@ -37,6 +43,9 @@ static const char *score_kind_text(XqSearchScoreKind kind)
     }
 }
 
+/**
+ * 把字符串中的英文字母转化为小写
+ */
 static void lower_text(char *text)
 {
     while (*text != '\0')
@@ -46,6 +55,9 @@ static void lower_text(char *text)
     }
 }
 
+/**
+ * 跳过字符串开头的所有空白字符，返回第一个非空白字符的位置
+ */
 static char *skip_spaces(char *text)
 {
     while (*text != '\0' && isspace((unsigned char)*text))
@@ -53,6 +65,9 @@ static char *skip_spaces(char *text)
     return text;
 }
 
+/**
+ * 带完整合法性检查的正整数转换函数
+ */
 static bool parse_positive_int(const char *text, int *value)
 {
     char *end;
@@ -71,6 +86,31 @@ static bool parse_positive_int(const char *text, int *value)
     return true;
 }
 
+/**
+ * 根据从根节点到当前节点的选择路径，生成便于阅读的节点编号。
+ *
+ * path 保存从根节点走到当前节点时依次选择的着法编号；ply 既表示当前
+ * 节点所在的层数，也表示 path 中有效元素的数量。因此，ply 为 3 时，
+ * 函数会依次读取 path[0]、path[1] 和 path[2]。
+ *
+ * child_index 用于决定是否在当前路径末尾追加一个子节点编号：
+ *   - child_index == 0：生成当前节点的编号；
+ *   - child_index > 0：生成当前节点的第 child_index 个子节点的编号。
+ *
+ * 生成的字符串写入 buffer，buffer_size 是 buffer 的总容量，用于避免
+ * 写越界。如果容量不足，buffer 中可能只保留一个被截断的节点编号。
+ * 调用者应保证 buffer 不为 NULL、buffer_size 与 buffer 的实际容量一致，
+ * 并且 path 至少包含 ply 个有效元素。
+ *
+ * 根节点是一个特殊情况：当 ply == 0 且 child_index == 0 时，结果为
+ * "root"。
+ *
+ * 示例（假设缓冲区足够大）：
+ *   path = {1, 4, 2}, ply = 3, child_index = 0  -> "1.4.2"
+ *   path = {1, 4, 2}, ply = 3, child_index = 2  -> "1.4.2.2"
+ *   path = {3},       ply = 1, child_index = 7  -> "3.7"
+ *   ply = 0, child_index = 0                    -> "root"
+ */
 static void format_node_id(const int *path, int ply, int child_index, char *buffer, size_t buffer_size)
 {
     size_t used = 0;
@@ -81,7 +121,7 @@ static void format_node_id(const int *path, int ply, int child_index, char *buff
     buffer[0] = '\0';
     if (ply == 0 && child_index == 0)
     {
-        (void)snprintf(buffer, buffer_size, "root");
+        snprintf(buffer, buffer_size, "root");
         return;
     }
 
@@ -97,6 +137,11 @@ static void format_node_id(const int *path, int ply, int child_index, char *buff
         (void)snprintf(buffer + used, buffer_size - used, "%s%d", used == 0 ? "" : ".", child_index);
 }
 
+/**
+ * 根据已经向下浏览的层数 ply，计算当前节点还应该搜索多深
+ * ply: 已经向下浏览的层数
+ * root_depth: 输入的搜索层数
+ */
 static unsigned current_depth(unsigned root_depth, int ply)
 {
     if (root_depth > (unsigned)ply)
@@ -104,6 +149,9 @@ static unsigned current_depth(unsigned root_depth, int ply)
     return 1u;
 }
 
+/**
+ * 打印帮助信息
+ */
 static void print_help(void)
 {
     printf("commands:\n");
@@ -118,6 +166,9 @@ static void print_help(void)
     printf("  quit        exit\n");
 }
 
+/**
+ * 根据局面信息打印 FEN 字符串
+ */
 static void print_fen(const XqPosition *pos)
 {
     char fen[FEN_SIZE];
@@ -128,6 +179,9 @@ static void print_fen(const XqPosition *pos)
         printf("could not encode FEN\n");
 }
 
+/**
+ * 打印当前局面评分：对红方、黑方、行棋方
+ */
 static void print_eval(const XqPosition *pos)
 {
     int red = xq_engine_default_static_evaluate(pos, XQ_RED, NULL);
