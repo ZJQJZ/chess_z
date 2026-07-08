@@ -171,12 +171,13 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
     }
 }
 
-static int quiescence(const XqEngineAdapter *engine, const XqPosition *pos, int alpha, int beta)
+static int quiescence(const XqEngineAdapter *engine, const XqPosition *pos, int depth, int alpha, int beta)
 {
     XqMoveList list;
-    int stand_pat = static_evaluate(engine, pos, pos->side_to_move);
+    int stand_pat;
     int i;
 
+    stand_pat = static_evaluate(engine, pos, pos->side_to_move);
     if (stand_pat >= beta)
         return beta;
     if (stand_pat > alpha)
@@ -192,9 +193,11 @@ static int quiescence(const XqEngineAdapter *engine, const XqPosition *pos, int 
 
         if (list.moves[i].captured == XQ_EMPTY_PIECE)
             continue;
+        if (xq_piece_type(list.moves[i].captured) == XQ_KING)
+            return 30000 + depth;
 
         xq_position_make_move(&next, list.moves[i]);
-        score = -quiescence(engine, &next, -beta, -alpha);
+        score = -quiescence(engine, &next, depth - 1, -beta, -alpha);
         if (score >= beta)
             return beta;
         if (score > alpha)
@@ -249,7 +252,7 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
         return -30000 - (int)depth;
 
     if (depth == 0)
-        return quiescence(engine, pos, alpha, beta);
+        return quiescence(engine, pos, 0, alpha, beta);
 
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
