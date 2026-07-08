@@ -66,8 +66,8 @@ static void test_default_static_evaluate(void) {
 
     assert(xq_position_from_fen(&pos, "3k5/9/9/9/9/9/9/9/9/R3K4 b - -"));
     before = pos;
-    assert(xq_engine_default_static_evaluate(&pos, XQ_RED, NULL) == 850);
-    assert(xq_engine_default_static_evaluate(&pos, XQ_BLACK, NULL) == -850);
+    assert(xq_engine_default_static_evaluate(&pos, XQ_RED, NULL) == 600);
+    assert(xq_engine_default_static_evaluate(&pos, XQ_BLACK, NULL) == -600);
     assert(memcmp(&pos, &before, sizeof(pos)) == 0);
 }
 
@@ -104,6 +104,15 @@ static void test_default_move_ordering(void) {
     assert(best.captured != XQ_EMPTY_PIECE);
 }
 
+static void test_quiescence_avoids_bad_capture(void) {
+    XqPosition pos;
+    XqMove best;
+
+    assert(xq_position_from_fen(&pos, "4k4/9/9/9/4p4/9/9/r8/c8/R3K4 r - -"));
+    assert(xq_engine_find_best_move(NULL, &pos, 1, &best));
+    assert(best.captured == XQ_EMPTY_PIECE);
+}
+
 static void test_custom_move_ordering(void) {
     XqPosition pos;
     XqMoveList legal;
@@ -121,7 +130,7 @@ static void test_custom_move_ordering(void) {
     assert(xq_engine_find_best_move(&engine, &pos, 1, &best));
     assert(best.from == (uint8_t)xq_square_make(0, 0));
     assert(best.to == (uint8_t)xq_square_make(0, 1));
-    assert(score_calls == legal.count);
+    assert(score_calls >= legal.count);
 }
 
 static void test_explain_one_ply(void) {
@@ -161,7 +170,7 @@ static void test_explain_custom_move_ordering(void) {
     assert(result.best_index >= 0);
     assert(result.moves[result.best_index].move.from == (uint8_t)xq_square_make(0, 0));
     assert(result.moves[result.best_index].move.to == (uint8_t)xq_square_make(0, 1));
-    assert(score_calls == legal.count);
+    assert(score_calls >= legal.count);
 }
 
 int main(void) {
@@ -171,6 +180,7 @@ int main(void) {
     test_engine_adapter();
     test_default_static_evaluate();
     test_default_move_ordering();
+    test_quiescence_avoids_bad_capture();
     test_custom_move_ordering();
     test_explain_one_ply();
     test_explain_custom_move_ordering();

@@ -171,6 +171,39 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
     }
 }
 
+static int quiescence(const XqEngineAdapter *engine, const XqPosition *pos, int alpha, int beta)
+{
+    XqMoveList list;
+    int stand_pat = static_evaluate(engine, pos, pos->side_to_move);
+    int i;
+
+    if (stand_pat >= beta)
+        return beta;
+    if (stand_pat > alpha)
+        alpha = stand_pat;
+
+    xq_generate_pseudo_legal(pos, &list);
+    order_moves(engine, pos, &list);
+
+    for (i = 0; i < list.count; ++i)
+    {
+        XqPosition next = *pos;
+        int score;
+
+        if (list.moves[i].captured == XQ_EMPTY_PIECE)
+            continue;
+
+        xq_position_make_move(&next, list.moves[i]);
+        score = -quiescence(engine, &next, -beta, -alpha);
+        if (score >= beta)
+            return beta;
+        if (score > alpha)
+            alpha = score;
+    }
+
+    return alpha;
+}
+
 /**
  * 本象棋引擎的核心：alpha-beta 剪枝后的 Minimax 搜索，并采用了取负最大化的代码简化的写法
  *
@@ -216,7 +249,7 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
         return -30000 - (int)depth;
 
     if (depth == 0)
-        return static_evaluate(engine, pos, pos->side_to_move);
+        return quiescence(engine, pos, alpha, beta);
 
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
