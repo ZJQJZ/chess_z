@@ -264,7 +264,7 @@ static int negamax(const XqEngineAdapter *engine, XqPosition *pos, unsigned dept
         return -30000 - (int)depth;
 
     if (depth == 0)
-        return static_evaluate(engine, pos, pos->side_to_move);
+        return quiescence(engine, pos, 0, alpha, beta);
 
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
