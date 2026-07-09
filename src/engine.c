@@ -207,8 +207,7 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
             xq_piece_type(list.moves[i].captured) == XQ_KING)
             return 30000 + depth;
 
-        if (!xq_position_make_move(pos, list.moves[i]))
-            continue;
+        xq_position_make_move(pos, list.moves[i]);
         score = -quiescence(engine, pos, depth - 1, -beta, -alpha);
         xq_position_unmake_move(pos, list.moves[i]);
         if (score >= beta)
@@ -276,8 +275,7 @@ static int negamax(const XqEngineAdapter *engine, XqPosition *pos, unsigned dept
     {
         int score;
 
-        if (!xq_position_make_move(pos, list.moves[i]))
-            continue;
+        xq_position_make_move(pos, list.moves[i]);
         score = -negamax(engine, pos, depth - 1, -beta, -alpha);
         xq_position_unmake_move(pos, list.moves[i]);
         if (score > best)
@@ -316,8 +314,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsig
     {
         int score;
 
-        if (!xq_position_make_move(pos, list.moves[i]))
-            continue;
+        xq_position_make_move(pos, list.moves[i]);
         score = -negamax(engine, pos, depth - 1, -beta, -alpha);
         xq_position_unmake_move(pos, list.moves[i]);
         if (score > alpha)
@@ -366,8 +363,7 @@ bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, XqPosition *pos, u
         int alpha_before = alpha;
         int score;
 
-        if (!xq_position_make_move(pos, list.moves[i]))
-            continue;
+        xq_position_make_move(pos, list.moves[i]);
         score = -negamax(engine, pos, depth - 1, -beta, -alpha);
         xq_position_unmake_move(pos, list.moves[i]);
 

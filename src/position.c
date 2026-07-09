@@ -168,15 +168,6 @@ bool xq_position_unmake_move(XqPosition *pos, XqMove move)
     int piece = move.piece;
     int captured = move.captured;
 
-    if (!valid_square(from) || !valid_square(to))
-        return false;
-    if (piece < 0 || piece >= XQ_COLOR_NB * XQ_PIECE_TYPE_NB)
-        return false;
-    if (captured != XQ_EMPTY_PIECE && (captured < 0 || captured >= XQ_COLOR_NB * XQ_PIECE_TYPE_NB))
-        return false;
-    if (pos->board[to] == XQ_EMPTY_PIECE || pos->board[from] != XQ_EMPTY_PIECE)
-        return false;
-
     if (pos->side_to_move == XQ_RED && pos->fullmove_number > 1)
         --pos->fullmove_number;
     pos->side_to_move = xq_color_opponent(pos->side_to_move);
