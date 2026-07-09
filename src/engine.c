@@ -171,19 +171,30 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
     }
 }
 
+/**
+ * 静态搜索函数，为了避免地平线效应，即恰好搜索到局面波动幅度大的策略树部分停止，对 negamax 搜索
+ * 的叶子节点采用静态搜索。目前认为吃子、应将是比较明显让局势评分波动的着法，故次静态搜索囊括了这
+ * 两类着法
+ */
 static int quiescence(const XqEngineAdapter *engine, const XqPosition *pos, int depth, int alpha, int beta)
 {
     XqMoveList list;
+    bool in_check = xq_position_in_check(pos, pos->side_to_move);
     int stand_pat;
     int i;
 
-    stand_pat = static_evaluate(engine, pos, pos->side_to_move);
-    if (stand_pat >= beta)
-        return beta;
-    if (stand_pat > alpha)
-        alpha = stand_pat;
+    if (!in_check)
+    {
+        stand_pat = static_evaluate(engine, pos, pos->side_to_move);
+        if (stand_pat >= beta)
+            return beta;
+        if (stand_pat > alpha)
+            alpha = stand_pat;
+    }
 
     xq_generate_pseudo_legal(pos, &list);
+    if (in_check && list.count == 0)
+        return -30000 - depth;
     order_moves(engine, pos, &list);
 
     for (i = 0; i < list.count; ++i)
@@ -191,9 +202,10 @@ static int quiescence(const XqEngineAdapter *engine, const XqPosition *pos, int 
         XqPosition next = *pos;
         int score;
 
-        if (list.moves[i].captured == XQ_EMPTY_PIECE)
+        if (!in_check && list.moves[i].captured == XQ_EMPTY_PIECE)
             continue;
-        if (xq_piece_type(list.moves[i].captured) == XQ_KING)
+        if (list.moves[i].captured != XQ_EMPTY_PIECE &&
+            xq_piece_type(list.moves[i].captured) == XQ_KING)
             return 30000 + depth;
 
         xq_position_make_move(&next, list.moves[i]);
