@@ -46,6 +46,32 @@ static void test_flying_king_check(void) {
     assert(legal.count > 0);
 }
 
+static void test_unmake_move_restores_position(void) {
+    XqPosition pos;
+    XqPosition before;
+    XqMoveList legal;
+    int i;
+
+    xq_position_startpos(&pos);
+    before = pos;
+    xq_generate_legal(&pos, &legal);
+    assert(legal.count > 0);
+    assert(xq_position_make_move(&pos, legal.moves[0]));
+    assert(xq_position_unmake_move(&pos, legal.moves[0]));
+    assert(memcmp(&pos, &before, sizeof(pos)) == 0);
+
+    assert(xq_position_from_fen(&pos, "4k4/9/9/9/9/9/9/9/r8/R3K4 r - -"));
+    before = pos;
+    xq_generate_legal(&pos, &legal);
+    for (i = 0; i < legal.count; ++i)
+        if (legal.moves[i].captured != XQ_EMPTY_PIECE)
+            break;
+    assert(i < legal.count);
+    assert(xq_position_make_move(&pos, legal.moves[i]));
+    assert(xq_position_unmake_move(&pos, legal.moves[i]));
+    assert(memcmp(&pos, &before, sizeof(pos)) == 0);
+}
+
 static void test_engine_adapter(void) {
     XqPosition pos;
     XqMove best;
@@ -177,6 +203,7 @@ int main(void) {
     test_startpos();
     test_validate_rejects_extra_piece_bits();
     test_flying_king_check();
+    test_unmake_move_restores_position();
     test_engine_adapter();
     test_default_static_evaluate();
     test_default_move_ordering();

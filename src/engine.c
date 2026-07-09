@@ -176,7 +176,7 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
  * 的叶子节点采用静态搜索。目前认为吃子、应将是比较明显让局势评分波动的着法，故次静态搜索囊括了这
  * 两类着法
  */
-static int quiescence(const XqEngineAdapter *engine, const XqPosition *pos, int depth, int alpha, int beta)
+static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth, int alpha, int beta)
 {
     XqMoveList list;
     bool in_check = xq_position_in_check(pos, pos->side_to_move);
@@ -199,7 +199,6 @@ static int quiescence(const XqEngineAdapter *engine, const XqPosition *pos, int 
 
     for (i = 0; i < list.count; ++i)
     {
-        XqPosition next = *pos;
         int score;
 
         if (!in_check && list.moves[i].captured == XQ_EMPTY_PIECE)
@@ -208,8 +207,10 @@ static int quiescence(const XqEngineAdapter *engine, const XqPosition *pos, int 
             xq_piece_type(list.moves[i].captured) == XQ_KING)
             return 30000 + depth;
 
-        xq_position_make_move(&next, list.moves[i]);
-        score = -quiescence(engine, &next, depth - 1, -beta, -alpha);
+        if (!xq_position_make_move(pos, list.moves[i]))
+            continue;
+        score = -quiescence(engine, pos, depth - 1, -beta, -alpha);
+        xq_position_unmake_move(pos, list.moves[i]);
         if (score >= beta)
             return beta;
         if (score > alpha)
@@ -254,7 +255,7 @@ static int quiescence(const XqEngineAdapter *engine, const XqPosition *pos, int 
  * 总结：相比 Minimax，alpha-beta 通过 alpha、beta 两个参数剪枝来提升性能；代价是当局面的
  * 真实评分落在窗口外时，返值可能不再是精确分数，而只是一个足以支持剪枝和决策的上界或下界。
  */
-static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, int alpha, int beta)
+static int negamax(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, int alpha, int beta)
 {
     XqMoveList list;
     int best = INT_MIN / 2;
@@ -264,7 +265,7 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
         return -30000 - (int)depth;
 
     if (depth == 0)
-        return quiescence(engine, pos, 0, alpha, beta);
+        return static_evaluate(engine, pos, pos->side_to_move);
 
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
@@ -273,11 +274,12 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
 
     for (i = 0; i < list.count; ++i)
     {
-        XqPosition next = *pos;
         int score;
 
-        xq_position_make_move(&next, list.moves[i]);
-        score = -negamax(engine, &next, depth - 1, -beta, -alpha);
+        if (!xq_position_make_move(pos, list.moves[i]))
+            continue;
+        score = -negamax(engine, pos, depth - 1, -beta, -alpha);
+        xq_position_unmake_move(pos, list.moves[i]);
         if (score > best)
             best = score;
         if (score > alpha)
@@ -292,7 +294,7 @@ static int negamax(const XqEngineAdapter *engine, const XqPosition *pos, unsigne
 /**
  * 内部搜索算法，通过 negamax 函数计算出 *pos 盘面下，depth 深度的最佳走法
  */
-static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move)
+static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqMove *best_move)
 {
     XqMoveList list;
     int alpha = INT_MIN / 2;
@@ -312,11 +314,12 @@ static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos,
 
     for (i = 0; i < list.count; ++i)
     {
-        XqPosition next = *pos;
         int score;
 
-        xq_position_make_move(&next, list.moves[i]);
-        score = -negamax(engine, &next, depth - 1, -beta, -alpha);
+        if (!xq_position_make_move(pos, list.moves[i]))
+            continue;
+        score = -negamax(engine, pos, depth - 1, -beta, -alpha);
+        xq_position_unmake_move(pos, list.moves[i]);
         if (score > alpha)
         {
             alpha = score;
@@ -330,7 +333,7 @@ static bool builtin_search(const XqEngineAdapter *engine, const XqPosition *pos,
 /**
  * 带有解释信息的引擎搜索算法，引擎为空或引擎搜索函数为空的话调用 builtin_search
  */
-bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqExplainResult *result)
+bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result)
 {
     XqMoveList list;
     int order_scores[XQ_MAX_MOVES];
@@ -359,13 +362,14 @@ bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, const XqPosition *
 
     for (i = 0; i < list.count; ++i)
     {
-        XqPosition next = *pos;
         XqExplainedMove *explained = &result->moves[result->count];
         int alpha_before = alpha;
         int score;
 
-        xq_position_make_move(&next, list.moves[i]);
-        score = -negamax(engine, &next, depth - 1, -beta, -alpha);
+        if (!xq_position_make_move(pos, list.moves[i]))
+            continue;
+        score = -negamax(engine, pos, depth - 1, -beta, -alpha);
+        xq_position_unmake_move(pos, list.moves[i]);
 
         explained->move = list.moves[i];
         explained->depth = depth;
@@ -403,7 +407,7 @@ bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, const XqPosition *
 /**
  * 引擎搜索算法，引擎为空或引擎搜索函数的话调用 builtin_search
  */
-bool xq_engine_find_best_move(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move)
+bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqMove *best_move)
 {
     if (best_move == NULL)
         return false;

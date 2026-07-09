@@ -47,7 +47,7 @@ typedef struct XqExplainResult
 } XqExplainResult;
 
 int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user);
-bool xq_engine_find_best_move(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqMove *best_move);
-bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, const XqPosition *pos, unsigned depth, XqExplainResult *result);
+bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqMove *best_move);
+bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result);
 
 #endif

@@ -158,6 +158,38 @@ bool xq_position_make_move(XqPosition *pos, XqMove move)
 }
 
 /**
+ * 撤回 xq_position_make_move 已经执行过的一步走棋。
+ * move 必须携带生成走法时记录的 piece 和 captured 信息。
+ */
+bool xq_position_unmake_move(XqPosition *pos, XqMove move)
+{
+    XqSquare from = (XqSquare)move.from;
+    XqSquare to = (XqSquare)move.to;
+    int piece = move.piece;
+    int captured = move.captured;
+
+    if (!valid_square(from) || !valid_square(to))
+        return false;
+    if (piece < 0 || piece >= XQ_COLOR_NB * XQ_PIECE_TYPE_NB)
+        return false;
+    if (captured != XQ_EMPTY_PIECE && (captured < 0 || captured >= XQ_COLOR_NB * XQ_PIECE_TYPE_NB))
+        return false;
+    if (pos->board[to] == XQ_EMPTY_PIECE || pos->board[from] != XQ_EMPTY_PIECE)
+        return false;
+
+    if (pos->side_to_move == XQ_RED && pos->fullmove_number > 1)
+        --pos->fullmove_number;
+    pos->side_to_move = xq_color_opponent(pos->side_to_move);
+
+    xq_position_remove_piece(pos, to);
+    xq_position_set_piece(pos, from, xq_piece_color(piece), xq_piece_type(piece));
+    if (captured != XQ_EMPTY_PIECE)
+        xq_position_set_piece(pos, to, xq_piece_color(captured), xq_piece_type(captured));
+
+    return true;
+}
+
+/**
  * 根据字符串初始化棋盘
  */
 void xq_position_startpos(XqPosition *pos)

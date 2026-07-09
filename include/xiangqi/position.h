@@ -27,6 +27,7 @@ bool xq_position_to_fen(const XqPosition *pos, char *buffer, size_t buffer_size)
 bool xq_position_set_piece(XqPosition *pos, XqSquare sq, XqColor color, XqPieceType type);
 bool xq_position_remove_piece(XqPosition *pos, XqSquare sq);
 bool xq_position_make_move(XqPosition *pos, XqMove move);
+bool xq_position_unmake_move(XqPosition *pos, XqMove move);
 
 XqSquare xq_position_king_square(const XqPosition *pos, XqColor color);
 int xq_position_piece_count(const XqPosition *pos, XqColor color, XqPieceType type);
