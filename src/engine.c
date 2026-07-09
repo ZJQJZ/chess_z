@@ -328,9 +328,21 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsig
 }
 
 /**
+ * 引擎搜索算法，引擎为空或引擎搜索函数的话调用 builtin_search
+ */
+bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqMove *best_move)
+{
+    if (best_move == NULL)
+        return false;
+    if (engine != NULL && engine->search != NULL)
+        return engine->search(pos, depth, best_move, engine->user);
+    return builtin_search(engine, pos, depth, best_move);
+}
+
+/**
  * 带有解释信息的引擎搜索算法，引擎为空或引擎搜索函数为空的话调用 builtin_search
  */
-bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result)
+bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result)
 {
     XqMoveList list;
     int order_scores[XQ_MAX_MOVES];
@@ -401,13 +413,114 @@ bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, XqPosition *pos, u
 }
 
 /**
- * 引擎搜索算法，引擎为空或引擎搜索函数的话调用 builtin_search
+ * 解释当前局面的一层静态搜索：先展示 stand pat，再展示静态搜索实际会继续看的吃子/应将着法。
+ * 每个着法的 score 仍由递归 quiescence 计算，避免解释结果和真实搜索结果不一致。
  */
-bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqMove *best_move)
+bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos, XqQuiescenceExplainResult *result)
 {
-    if (best_move == NULL)
+    XqMoveList list;
+    int order_scores[XQ_MAX_MOVES];
+    int alpha = INT_MIN / 2;
+    int beta = INT_MAX / 2;
+    int i;
+
+    if (result == NULL)
         return false;
-    if (engine != NULL && engine->search != NULL)
-        return engine->search(pos, depth, best_move, engine->user);
-    return builtin_search(engine, pos, depth, best_move);
+
+    result->count = 0;
+    result->best_index = -1;
+    result->alpha_before = alpha;
+    result->alpha_after_stand_pat = alpha;
+    result->beta = beta;
+    result->stand_pat = 0;
+    result->final_score = alpha;
+    result->in_check = false;
+    result->stand_pat_used = false;
+    result->stand_pat_cutoff = false;
+
+    if (pos == NULL)
+        return false;
+    if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
+        return false;
+
+    result->in_check = xq_position_in_check(pos, pos->side_to_move);
+    if (!result->in_check)
+    {
+        result->stand_pat_used = true;
+        result->stand_pat = static_evaluate(engine, pos, pos->side_to_move);
+        if (result->stand_pat >= beta)
+        {
+            result->stand_pat_cutoff = true;
+            result->final_score = beta;
+            return true;
+        }
+        if (result->stand_pat > alpha)
+            alpha = result->stand_pat;
+        result->alpha_after_stand_pat = alpha;
+    }
+
+    xq_generate_pseudo_legal(pos, &list);
+    if (result->in_check && list.count == 0)
+    {
+        result->final_score = -30000;
+        return true;
+    }
+    order_moves_for_explain(engine, pos, &list, order_scores);
+
+    for (i = 0; i < list.count; ++i)
+    {
+        XqExplainedMove *explained;
+        int alpha_before;
+        int score;
+
+        if (!result->in_check && list.moves[i].captured == XQ_EMPTY_PIECE)
+            continue;
+
+        explained = &result->moves[result->count];
+        alpha_before = alpha;
+
+        if (list.moves[i].captured != XQ_EMPTY_PIECE &&
+            xq_piece_type(list.moves[i].captured) == XQ_KING)
+            score = 30000;
+        else
+        {
+            xq_position_make_move(pos, list.moves[i]);
+            score = -quiescence(engine, pos, -1, -beta, -alpha);
+            xq_position_unmake_move(pos, list.moves[i]);
+        }
+
+        explained->move = list.moves[i];
+        explained->depth = 0;
+        explained->alpha_before = alpha_before;
+        explained->beta = beta;
+        explained->score = score;
+        explained->order_score = order_scores[i];
+        explained->score_kind = XQ_SEARCH_SCORE_UPPER_BOUND;
+        explained->is_best = false;
+        explained->caused_cutoff = false;
+
+        if (score >= beta)
+        {
+            result->best_index = result->count;
+            explained->score_kind = XQ_SEARCH_SCORE_LOWER_BOUND;
+            explained->caused_cutoff = true;
+            ++result->count;
+            result->final_score = beta;
+            result->moves[result->best_index].is_best = true;
+            return true;
+        }
+        if (score > alpha)
+        {
+            alpha = score;
+            result->best_index = result->count;
+            explained->score_kind = XQ_SEARCH_SCORE_EXACT;
+        }
+
+        ++result->count;
+    }
+
+    result->final_score = alpha;
+    if (result->best_index >= 0 && result->best_index < result->count)
+        result->moves[result->best_index].is_best = true;
+    return true;
 }

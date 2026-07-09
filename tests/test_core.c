@@ -159,13 +159,13 @@ static void test_custom_move_ordering(void) {
     assert(score_calls >= legal.count);
 }
 
-static void test_explain_one_ply(void) {
+static void test_explain_search_one_ply(void) {
     XqPosition pos;
     XqMove best;
     XqExplainResult result;
 
     xq_position_startpos(&pos);
-    assert(xq_engine_explain_one_ply(NULL, &pos, 1, &result));
+    assert(xq_engine_explain_search_one_ply(NULL, &pos, 1, &result));
     assert(result.count > 0);
     assert(result.best_index >= 0);
     assert(result.best_index < result.count);
@@ -175,7 +175,7 @@ static void test_explain_one_ply(void) {
     assert(result.moves[result.best_index].move.from == best.from);
     assert(result.moves[result.best_index].move.to == best.to);
 
-    assert(!xq_engine_explain_one_ply(NULL, &pos, 1, NULL));
+    assert(!xq_engine_explain_search_one_ply(NULL, &pos, 1, NULL));
 }
 
 static void test_explain_custom_move_ordering(void) {
@@ -192,11 +192,34 @@ static void test_explain_custom_move_ordering(void) {
 
     xq_position_startpos(&pos);
     xq_generate_legal(&pos, &legal);
-    assert(xq_engine_explain_one_ply(&engine, &pos, 1, &result));
+    assert(xq_engine_explain_search_one_ply(&engine, &pos, 1, &result));
     assert(result.best_index >= 0);
     assert(result.moves[result.best_index].move.from == (uint8_t)xq_square_make(0, 0));
     assert(result.moves[result.best_index].move.to == (uint8_t)xq_square_make(0, 1));
     assert(score_calls >= legal.count);
+}
+
+static void test_explain_quiescence(void) {
+    XqPosition pos;
+    XqQuiescenceExplainResult quiet;
+    XqQuiescenceExplainResult tactical;
+
+    xq_position_startpos(&pos);
+    assert(xq_engine_explain_quiescence_one_ply(NULL, &pos, &quiet));
+    assert(quiet.stand_pat_used);
+    assert(quiet.stand_pat == 0);
+    assert(quiet.final_score == 0);
+    assert(quiet.count == 0);
+
+    assert(xq_position_from_fen(&pos, "4k4/9/9/9/4p4/9/9/9/r8/R3K4 r - -"));
+    assert(xq_engine_explain_quiescence_one_ply(NULL, &pos, &tactical));
+    assert(!tactical.in_check);
+    assert(tactical.count > 0);
+    assert(tactical.best_index >= 0);
+    assert(tactical.best_index < tactical.count);
+    assert(tactical.moves[tactical.best_index].is_best);
+
+    assert(!xq_engine_explain_quiescence_one_ply(NULL, &pos, NULL));
 }
 
 int main(void) {
@@ -209,8 +232,9 @@ int main(void) {
     test_default_move_ordering();
     test_quiescence_avoids_bad_capture();
     test_custom_move_ordering();
-    test_explain_one_ply();
+    test_explain_search_one_ply();
     test_explain_custom_move_ordering();
+    test_explain_quiescence();
     printf("xiangqi core tests passed\n");
     return 0;
 }

@@ -146,7 +146,7 @@ static unsigned current_depth(unsigned root_depth, int ply)
 {
     if (root_depth > (unsigned)ply)
         return root_depth - (unsigned)ply;
-    return 1u;
+    return 0u;
 }
 
 /**
@@ -162,6 +162,7 @@ static void print_help(void)
     printf("  fen         print current FEN\n");
     printf("  eval        print static evaluation\n");
     printf("  list        redraw the current one-ply explanation\n");
+    printf("  depth 0     automatically shows quiescence search\n");
     printf("  help        print this help\n");
     printf("  quit        exit\n");
 }
@@ -192,31 +193,27 @@ static void print_eval(const XqPosition *pos)
            red, black, pos->side_to_move == XQ_RED ? "red" : "black", current);
 }
 
-static bool explain_current(const XqPosition *pos, unsigned root_depth, const int *path, int ply, XqExplainResult *result)
+/**
+ * 在 navigation 尾部追加 move
+ */
+static void add_navigation_move(XqMoveList *navigation, XqMove move)
 {
-    unsigned depth = current_depth(root_depth, ply);
-    char current_id[NODE_ID_SIZE];
+    if (navigation->count < XQ_MAX_MOVES)
+        navigation->moves[navigation->count++] = move;
+}
+
+/**
+ * 把一组“已经解释过的候选走法”打印成表格
+ */
+static void print_explained_moves(const XqExplainedMove *moves, int count, const int *path, int ply)
+{
     int i;
 
-    format_node_id(path, ply, 0, current_id, sizeof(current_id));
-    printf("\nnode=%s side=%s depth=%u\n",
-           current_id,
-           pos->side_to_move == XQ_RED ? "red" : "black",
-           depth);
-    xq_position_print(pos);
-
-    if (!xq_engine_explain_one_ply(NULL, pos, depth, result))
-    {
-        printf("no moves to explain\n");
-        return false;
-    }
-
-    printf("final_score=%d best=%d\n", result->final_score, result->best_index + 1);
     printf("%-4s %-12s %-5s %-5s %-5s %-9s %-11s %-11s %-8s %-7s %-10s\n",
            "idx", "node", "move", "pc", "cap", "order", "alpha", "beta", "score", "kind", "flags");
-    for (i = 0; i < result->count; ++i)
+    for (i = 0; i < count; ++i)
     {
-        const XqExplainedMove *explained = &result->moves[i];
+        const XqExplainedMove *explained = &moves[i];
         char move_text[8];
         char node_id[NODE_ID_SIZE];
         char flags[16] = "";
@@ -240,6 +237,74 @@ static bool explain_current(const XqPosition *pos, unsigned root_depth, const in
                score_kind_text(explained->score_kind),
                flags);
     }
+}
+
+/**
+ * 类似 explain_current，只不过是针对静态搜索
+ */
+static bool explain_quiescence_current(XqPosition *pos, const int *path, int ply, XqMoveList *navigation)
+{
+    XqQuiescenceExplainResult result;
+    int i;
+
+    if (!xq_engine_explain_quiescence_one_ply(NULL, pos, &result))
+    {
+        printf("no quiescence result\n");
+        return false;
+    }
+
+    printf("qsearch in_check=%s final_score=%d",
+           result.in_check ? "yes" : "no",
+           result.final_score);
+    if (result.stand_pat_used)
+        printf(" stand_pat=%d alpha_after_stand_pat=%d",
+               result.stand_pat,
+               result.alpha_after_stand_pat);
+    if (result.stand_pat_cutoff)
+        printf(" stand_pat_cutoff=yes");
+    printf("\n");
+
+    if (result.count == 0)
+        printf("no tactical continuations\n");
+    else
+        print_explained_moves(result.moves, result.count, path, ply);
+
+    for (i = 0; i < result.count; ++i)
+        add_navigation_move(navigation, result.moves[i].move);
+    return true;
+}
+
+/**
+ * 解释当前节点：普通搜索深度展示一层 alpha-beta；叶子深度展示静态搜索。
+ */
+static bool explain_current(XqPosition *pos, unsigned root_depth, const int *path, int ply, XqMoveList *navigation)
+{
+    unsigned depth = current_depth(root_depth, ply);
+    char current_id[NODE_ID_SIZE];
+    XqExplainResult result;
+    int i;
+
+    xq_movelist_clear(navigation);
+    format_node_id(path, ply, 0, current_id, sizeof(current_id));
+    printf("\nnode=%s side=%s depth=%u\n",
+           current_id,
+           pos->side_to_move == XQ_RED ? "red" : "black",
+           depth);
+    xq_position_print(pos);
+
+    if (depth == 0)
+        return explain_quiescence_current(pos, path, ply, navigation);
+
+    if (!xq_engine_explain_search_one_ply(NULL, pos, depth, &result))
+    {
+        printf("no moves to explain\n");
+        return false;
+    }
+
+    printf("final_score=%d best=%d\n", result.final_score, result.best_index + 1);
+    print_explained_moves(result.moves, result.count, path, ply);
+    for (i = 0; i < result.count; ++i)
+        add_navigation_move(navigation, result.moves[i].move);
     return true;
 }
 
@@ -301,8 +366,8 @@ int main(int argc, char **argv)
     print_help();
     for (;;)
     {
-        XqExplainResult result;
-        bool have_result = explain_current(&positions[ply], depth, path, ply, &result);
+        XqMoveList navigation;
+        bool have_result = explain_current(&positions[ply], depth, path, ply, &navigation);
         char *command;
 
         printf("explain> ");
@@ -361,7 +426,7 @@ int main(int argc, char **argv)
                 printf("unknown command: %s\n", command);
                 continue;
             }
-            if (!have_result || index > result.count)
+            if (!have_result || index > navigation.count)
             {
                 printf("move index out of range\n");
                 continue;
@@ -373,7 +438,7 @@ int main(int argc, char **argv)
             }
 
             positions[ply + 1] = positions[ply];
-            if (!xq_position_make_move(&positions[ply + 1], result.moves[index - 1].move))
+            if (!xq_position_make_move(&positions[ply + 1], navigation.moves[index - 1]))
             {
                 printf("could not make selected move\n");
                 continue;

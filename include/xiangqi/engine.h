@@ -46,8 +46,24 @@ typedef struct XqExplainResult
     int final_score;
 } XqExplainResult;
 
+typedef struct XqQuiescenceExplainResult
+{
+    XqExplainedMove moves[XQ_MAX_MOVES];
+    int count;
+    int best_index;
+    int alpha_before;
+    int alpha_after_stand_pat;
+    int beta;
+    int stand_pat;
+    int final_score;
+    bool in_check;
+    bool stand_pat_used;
+    bool stand_pat_cutoff;
+} XqQuiescenceExplainResult;
+
 int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user);
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqMove *best_move);
-bool xq_engine_explain_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result);
+bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result);
+bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos, XqQuiescenceExplainResult *result);
 
 #endif
