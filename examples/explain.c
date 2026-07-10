@@ -156,15 +156,15 @@ static void print_help(void)
 {
     printf("commands:\n");
     printf("  N / open N  enter move N from the current table\n");
-    printf("  back        return to parent node\n");
+    printf("  back / b    return to parent node\n");
     printf("  root        return to root position\n");
     printf("  board       print only the current board\n");
     printf("  fen         print current FEN\n");
     printf("  eval        print static evaluation\n");
     printf("  list        redraw the current one-ply explanation\n");
     printf("  depth 0     automatically shows quiescence search\n");
-    printf("  help        print this help\n");
-    printf("  quit        exit\n");
+    printf("  help / ?    print this help\n");
+    printf("  quit / q    exit\n");
 }
 
 /**
@@ -401,7 +401,7 @@ int main(int argc, char **argv)
             print_eval(&positions[ply]);
             continue;
         }
-        if (strcmp(command, "back") == 0)
+        if (strcmp(command, "back") == 0 || strcmp(command, "b") == 0)
         {
             if (ply > 0)
                 --ply;
