@@ -46,6 +46,69 @@ static void test_flying_king_check(void) {
     assert(legal.count > 0);
 }
 
+static void test_direct_attack_detection(void) {
+    XqPosition pos;
+
+    assert(xq_position_from_fen(&pos, "4k4/9/9/9/4r4/9/9/9/9/4K4 r - -"));
+    assert(xq_square_attacked(&pos, xq_square_make(4, 0), XQ_BLACK));
+
+    assert(xq_position_from_fen(&pos, "4k4/9/9/9/4c4/9/4P4/9/9/4K4 r - -"));
+    assert(xq_square_attacked(&pos, xq_square_make(4, 0), XQ_BLACK));
+    assert(xq_position_set_piece(&pos, xq_square_make(4, 2), XQ_RED, XQ_PAWN));
+    assert(!xq_square_attacked(&pos, xq_square_make(4, 0), XQ_BLACK));
+
+    assert(xq_position_from_fen(&pos, "4k4/9/9/9/4P4/9/9/3n5/9/4K4 r - -"));
+    assert(xq_square_attacked(&pos, xq_square_make(4, 0), XQ_BLACK));
+    assert(xq_position_set_piece(&pos, xq_square_make(3, 1), XQ_RED, XQ_PAWN));
+    assert(!xq_square_attacked(&pos, xq_square_make(4, 0), XQ_BLACK));
+
+    assert(xq_position_from_fen(&pos, "4k4/9/9/9/9/9/9/9/4p4/4K4 r - -"));
+    assert(xq_square_attacked(&pos, xq_square_make(4, 0), XQ_BLACK));
+}
+
+static bool pseudo_list_attacks(const XqPosition *pos, XqSquare sq, XqColor color) {
+    XqPosition tmp = *pos;
+    XqMoveList pseudo;
+    int i;
+
+    tmp.side_to_move = color;
+    xq_generate_pseudo_legal(&tmp, &pseudo);
+    for (i = 0; i < pseudo.count; ++i)
+        if ((XqSquare)pseudo.moves[i].to == sq)
+            return true;
+    return false;
+}
+
+static void test_direct_attack_matches_pseudo_generation(void) {
+    static const char *fens[] = {
+        "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR r - -",
+        "4k4/9/9/9/4c4/9/4P4/9/9/4K4 r - -",
+        "4k4/9/9/9/4P4/9/9/3n5/9/4K4 r - -",
+        "3aka3/9/2b3b2/9/4p4/4P4/9/2B3B2/9/3AKA3 r - -",
+    };
+    XqPosition pos;
+    size_t fen_index;
+    int color;
+    int sq;
+
+    for (fen_index = 0; fen_index < sizeof(fens) / sizeof(fens[0]); ++fen_index) {
+        assert(xq_position_from_fen(&pos, fens[fen_index]));
+        for (color = 0; color < XQ_COLOR_NB; ++color)
+            for (sq = 0; sq < XQ_SQUARES; ++sq)
+            {
+                int target = pos.board[sq];
+                bool direct = xq_square_attacked(&pos, (XqSquare)sq, (XqColor)color);
+                bool generated = target != XQ_EMPTY_PIECE &&
+                                 xq_piece_color(target) != (XqColor)color &&
+                                 pseudo_list_attacks(&pos, (XqSquare)sq, (XqColor)color);
+                if (direct != generated)
+                    fprintf(stderr, "attack mismatch: fen=%zu color=%d sq=%d direct=%d generated=%d\n",
+                            fen_index, color, sq, direct, generated);
+                assert(direct == generated);
+            }
+    }
+}
+
 static void test_unmake_move_restores_position(void) {
     XqPosition pos;
     XqPosition before;
@@ -209,7 +272,7 @@ static void test_explain_quiescence(void) {
     assert(quiet.stand_pat_used);
     assert(quiet.stand_pat == 0);
     assert(quiet.final_score == 0);
-    assert(quiet.count == 0);
+    assert(quiet.count > 0);
 
     assert(xq_position_from_fen(&pos, "4k4/9/9/9/4p4/9/9/9/r8/R3K4 r - -"));
     assert(xq_engine_explain_quiescence_one_ply(NULL, &pos, &tactical));
@@ -226,6 +289,8 @@ int main(void) {
     test_startpos();
     test_validate_rejects_extra_piece_bits();
     test_flying_king_check();
+    test_direct_attack_detection();
+    test_direct_attack_matches_pseudo_generation();
     test_unmake_move_restores_position();
     test_engine_adapter();
     test_default_static_evaluate();

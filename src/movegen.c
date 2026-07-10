@@ -325,19 +325,162 @@ void xq_generate_pseudo_legal(const XqPosition *pos, XqMoveList *list)
 }
 
 /**
- * 判断棋盘上的 sq 棋子是否可以受到 by_color 方的进攻
+ * 判断棋盘上的 sq 棋子是否受到 by_color 方的进攻。
+ * sq 必须放有 by_color 的敌方棋子。
  */
 bool xq_square_attacked(const XqPosition *pos, XqSquare sq, XqColor by_color)
 {
-    XqPosition tmp = *pos;
-    XqMoveList list;
+    static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    static const int knight_sources[8][4] = {
+        {-1, -2, -1, -1}, {1, -2, 1, -1}, {-1, 2, -1, 1}, {1, 2, 1, 1}, {-2, -1, -1, -1}, {-2, 1, -1, 1}, {2, -1, 1, -1}, {2, 1, 1, 1}};
+    static const int diagonals[4][2] = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+    int target_file;
+    int target_rank;
+    int target_piece;
     int i;
 
-    tmp.side_to_move = by_color;
-    xq_generate_pseudo_legal(&tmp, &list);
-    for (i = 0; i < list.count; ++i)
-        if ((XqSquare)list.moves[i].to == sq)
-            return true;
+    if (pos == NULL || sq < 0 || sq >= XQ_SQUARES ||
+        by_color < 0 || by_color >= XQ_COLOR_NB)
+        return false;
+    target_piece = pos->board[sq];
+    if (target_piece == XQ_EMPTY_PIECE ||
+        xq_piece_color(target_piece) == by_color)
+        return false;
+
+    target_file = xq_square_file(sq);
+    target_rank = xq_square_rank(sq);
+
+    /* 车、炮、将帅都沿直线攻击。每个方向的第一个棋子可能是车；
+     * 隔过恰好一个棋子后的第一个棋子可能是炮。将帅还需分别处理
+     * 九宫内的一步攻击以及仅针对对方将帅的照面攻击。 */
+    for (i = 0; i < 4; ++i)
+    {
+        int file = target_file + dirs[i][0];
+        int rank = target_rank + dirs[i][1];
+        bool screen_seen = false;
+
+        while (xq_square_is_valid(file, rank))
+        {
+            XqSquare from = xq_square_make(file, rank);
+            int piece = pos->board[from];
+
+            if (piece == XQ_EMPTY_PIECE)
+            {
+                file += dirs[i][0];
+                rank += dirs[i][1];
+                continue;
+            }
+
+            if (!screen_seen)
+            {
+                if (xq_piece_color(piece) == by_color)
+                {
+                    XqPieceType type = xq_piece_type(piece);
+
+                    if (type == XQ_ROOK)
+                        return true;
+                    if (type == XQ_KING)
+                    {
+                        bool adjacent = (file == target_file ? rank == target_rank + dirs[i][1] : file == target_file + dirs[i][0]) &&
+                                        in_palace(by_color, target_file, target_rank);
+                        bool flying = file == target_file &&
+                                      xq_piece_type(target_piece) == XQ_KING;
+                        if (adjacent || flying)
+                            return true;
+                    }
+                }
+                screen_seen = true;
+            }
+            else
+            {
+                if (xq_piece_color(piece) == by_color &&
+                    xq_piece_type(piece) == XQ_CANNON)
+                    return true;
+                break;
+            }
+
+            file += dirs[i][0];
+            rank += dirs[i][1];
+        }
+    }
+
+    /* 反向枚举可能跳到目标格的马，并检查相应马腿。 */
+    for (i = 0; i < 8; ++i)
+    {
+        int file = target_file + knight_sources[i][0];
+        int rank = target_rank + knight_sources[i][1];
+        int leg_file = target_file + knight_sources[i][2];
+        int leg_rank = target_rank + knight_sources[i][3];
+
+        if (xq_square_is_valid(file, rank))
+        {
+            int piece = pos->board[xq_square_make(file, rank)];
+            if (piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == by_color &&
+                xq_piece_type(piece) == XQ_KNIGHT &&
+                pos->board[xq_square_make(leg_file, leg_rank)] == XQ_EMPTY_PIECE)
+                return true;
+        }
+    }
+
+    /* 兵卒的前进攻击。 */
+    {
+        int source_rank = target_rank + (by_color == XQ_RED ? -1 : 1);
+        if (xq_square_is_valid(target_file, source_rank))
+        {
+            int piece = pos->board[xq_square_make(target_file, source_rank)];
+            if (piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == by_color &&
+                xq_piece_type(piece) == XQ_PAWN)
+                return true;
+        }
+    }
+
+    /* 过河兵卒的横向攻击。 */
+    for (i = -1; i <= 1; i += 2)
+    {
+        int file = target_file + i;
+        if (xq_square_is_valid(file, target_rank))
+        {
+            int piece = pos->board[xq_square_make(file, target_rank)];
+            bool crossed = by_color == XQ_RED ? target_rank >= 5 : target_rank <= 4;
+            if (crossed && piece != XQ_EMPTY_PIECE &&
+                xq_piece_color(piece) == by_color && xq_piece_type(piece) == XQ_PAWN)
+                return true;
+        }
+    }
+
+    /* 士从相邻斜格攻击九宫内的目标格。 */
+    if (in_palace(by_color, target_file, target_rank))
+        for (i = 0; i < 4; ++i)
+        {
+            int file = target_file + diagonals[i][0];
+            int rank = target_rank + diagonals[i][1];
+            if (xq_square_is_valid(file, rank))
+            {
+                int piece = pos->board[xq_square_make(file, rank)];
+                if (piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == by_color &&
+                    xq_piece_type(piece) == XQ_ADVISOR)
+                    return true;
+            }
+        }
+
+    /* 象从两格外攻击，目标必须未过河且象眼为空。 */
+    if (bishop_on_own_side(by_color, target_rank))
+        for (i = 0; i < 4; ++i)
+        {
+            int file = target_file + diagonals[i][0] * 2;
+            int rank = target_rank + diagonals[i][1] * 2;
+            int eye_file = target_file + diagonals[i][0];
+            int eye_rank = target_rank + diagonals[i][1];
+            if (xq_square_is_valid(file, rank))
+            {
+                int piece = pos->board[xq_square_make(file, rank)];
+                if (piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == by_color &&
+                    xq_piece_type(piece) == XQ_BISHOP &&
+                    pos->board[xq_square_make(eye_file, eye_rank)] == XQ_EMPTY_PIECE)
+                    return true;
+            }
+        }
+
     return false;
 }
 
