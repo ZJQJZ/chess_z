@@ -26,7 +26,8 @@ static const int legal_move_values[XQ_PIECE_TYPE_NB] = {
 
 enum
 {
-    CAPTURE_ORDER_BASE = 100000
+    CAPTURE_ORDER_BASE = 100000,
+    XQ_MAX_PV_MOVES = 64
 };
 
 typedef struct ScoredMove
@@ -34,6 +35,12 @@ typedef struct ScoredMove
     XqMove move;
     int score;
 } ScoredMove;
+
+typedef struct PrincipalVariation
+{
+    XqMove moves[XQ_MAX_PV_MOVES];
+    int count;
+} PrincipalVariation;
 
 /**
  * 计算 color 方所有合法着法的机动性价值。
@@ -163,6 +170,57 @@ static void order_root_moves(ScoredMove *moves, int count)
 }
 
 /**
+ * 判断两个走法是否相同。
+ */
+static bool moves_equal(XqMove a, XqMove b)
+{
+    return a.from == b.from &&
+           a.to == b.to;
+}
+
+/**
+ * 如果 list 中存在 move，则将它稳定移动到首位，并保持其他走法的相对顺序。
+ */
+static bool prioritize_move(XqMoveList *list, XqMove move)
+{
+    int i;
+
+    for (i = 0; i < list->count; ++i)
+        if (moves_equal(list->moves[i], move))
+        {
+            XqMove prioritized = list->moves[i];
+
+            while (i > 0)
+            {
+                list->moves[i] = list->moves[i - 1];
+                --i;
+            }
+            list->moves[0] = prioritized;
+            return true;
+        }
+
+    return false;
+}
+
+/**
+ * 用 move 和它的子节点主变化路线构造当前节点的主变化路线。
+ */
+static void build_principal_variation(PrincipalVariation *pv, XqMove move,
+                                      const PrincipalVariation *child_pv)
+{
+    int child_count = child_pv != NULL ? child_pv->count : 0;
+    int i;
+
+    if (child_count > XQ_MAX_PV_MOVES - 1)
+        child_count = XQ_MAX_PV_MOVES - 1;
+
+    pv->moves[0] = move;
+    for (i = 0; i < child_count; ++i)
+        pv->moves[i + 1] = child_pv->moves[i];
+    pv->count = child_count + 1;
+}
+
+/**
  * 逻辑类似 order_moves，只不过多谢带了排序所需要的积分
  */
 static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list, int *scores)
@@ -275,11 +333,17 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  * 总结：相比 Minimax，alpha-beta 通过 alpha、beta 两个参数剪枝来提升性能；代价是当局面的
  * 真实评分落在窗口外时，返值可能不再是精确分数，而只是一个足以支持剪枝和决策的上界或下界。
  */
-static int negamax(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, int alpha, int beta)
+static int negamax(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth,
+                   int alpha, int beta, const XqMove *pv_hint, int pv_hint_count,
+                   PrincipalVariation *pv_out)
 {
     XqMoveList list;
     int best = INT_MIN / 2;
+    bool pv_move_found = false;
     int i;
+
+    if (pv_out != NULL)
+        pv_out->count = 0;
 
     if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
         return -30000 - (int)depth;
@@ -291,16 +355,33 @@ static int negamax(const XqEngineAdapter *engine, XqPosition *pos, unsigned dept
     if (list.count == 0)
         return -30000 - (int)depth;
     order_moves(engine, pos, &list);
+    if (pv_hint != NULL && pv_hint_count > 0)
+        pv_move_found = prioritize_move(&list, pv_hint[0]);
 
     for (i = 0; i < list.count; ++i)
     {
+        PrincipalVariation child_pv;
+        const XqMove *child_hint = NULL;
+        int child_hint_count = 0;
         int score;
 
+        if (pv_move_found && moves_equal(list.moves[i], pv_hint[0]))
+        {
+            child_hint = pv_hint + 1;
+            child_hint_count = pv_hint_count - 1;
+        }
+
         xq_position_make_move(pos, list.moves[i]);
-        score = -negamax(engine, pos, depth - 1, -beta, -alpha);
+        score = -negamax(engine, pos, depth - 1, -beta, -alpha,
+                         child_hint, child_hint_count,
+                         pv_out != NULL ? &child_pv : NULL);
         xq_position_unmake_move(pos, list.moves[i]);
         if (score > best)
+        {
             best = score;
+            if (pv_out != NULL)
+                build_principal_variation(pv_out, list.moves[i], &child_pv);
+        }
         if (score > alpha)
             alpha = score;
         if (alpha >= beta)
@@ -318,6 +399,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsig
 {
     XqMoveList list;
     ScoredMove root_moves[XQ_MAX_MOVES];
+    PrincipalVariation previous_pv = {0};
     unsigned current_depth;
     int i;
 
@@ -340,24 +422,41 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsig
 
     for (current_depth = 1;; ++current_depth)
     {
+        PrincipalVariation current_pv = {0};
         int alpha = INT_MIN / 2;
         int beta = INT_MAX / 2;
 
         for (i = 0; i < list.count; ++i)
         {
+            PrincipalVariation child_pv;
+            const XqMove *child_hint = NULL;
+            int child_hint_count = 0;
             int score;
 
+            if (previous_pv.count > 0 &&
+                moves_equal(root_moves[i].move, previous_pv.moves[0]))
+            {
+                child_hint = previous_pv.moves + 1;
+                child_hint_count = previous_pv.count - 1;
+            }
+
             xq_position_make_move(pos, root_moves[i].move);
-            score = -negamax(engine, pos, current_depth - 1, -beta, -alpha);
+            score = -negamax(engine, pos, current_depth - 1, -beta, -alpha,
+                             child_hint, child_hint_count, &child_pv);
             xq_position_unmake_move(pos, root_moves[i].move);
 
             root_moves[i].score = score;
             if (score > alpha)
+            {
                 alpha = score;
+                build_principal_variation(&current_pv, root_moves[i].move,
+                                          &child_pv);
+            }
         }
 
         order_root_moves(root_moves, list.count);
         *best_move = root_moves[0].move;
+        previous_pv = current_pv;
 
         if (current_depth == depth)
             break;
@@ -415,7 +514,8 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
         int score;
 
         xq_position_make_move(pos, list.moves[i]);
-        score = -negamax(engine, pos, depth - 1, -beta, -alpha);
+        score = -negamax(engine, pos, depth - 1, -beta, -alpha,
+                         NULL, 0, NULL);
         xq_position_unmake_move(pos, list.moves[i]);
 
         explained->move = list.moves[i];
