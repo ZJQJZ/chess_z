@@ -142,6 +142,27 @@ static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, Xq
 }
 
 /**
+ * 按搜索分数稳定降序排列根着法。同分着法保留上一轮的相对顺序。
+ */
+static void order_root_moves(ScoredMove *moves, int count)
+{
+    int i;
+
+    for (i = 1; i < count; ++i)
+    {
+        ScoredMove current = moves[i];
+        int j = i;
+
+        while (j > 0 && moves[j - 1].score < current.score)
+        {
+            moves[j] = moves[j - 1];
+            --j;
+        }
+        moves[j] = current;
+    }
+}
+
+/**
  * 逻辑类似 order_moves，只不过多谢带了排序所需要的积分
  */
 static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list, int *scores)
@@ -290,13 +311,14 @@ static int negamax(const XqEngineAdapter *engine, XqPosition *pos, unsigned dept
 }
 
 /**
- * 内部搜索算法，通过 negamax 函数计算出 *pos 盘面下，depth 深度的最佳走法
+ * 内部搜索算法。从深度 1 迭代搜索到 depth，并使用上一轮全部根着法的
+ * 评分顺序指导下一轮搜索。
  */
 static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqMove *best_move)
 {
     XqMoveList list;
-    int alpha = INT_MIN / 2;
-    int beta = INT_MAX / 2;
+    ScoredMove root_moves[XQ_MAX_MOVES];
+    unsigned current_depth;
     int i;
 
     if (depth == 0)
@@ -312,16 +334,33 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsig
 
     for (i = 0; i < list.count; ++i)
     {
-        int score;
+        root_moves[i].move = list.moves[i];
+        root_moves[i].score = INT_MIN / 2;
+    }
 
-        xq_position_make_move(pos, list.moves[i]);
-        score = -negamax(engine, pos, depth - 1, -beta, -alpha);
-        xq_position_unmake_move(pos, list.moves[i]);
-        if (score > alpha)
+    for (current_depth = 1;; ++current_depth)
+    {
+        int alpha = INT_MIN / 2;
+        int beta = INT_MAX / 2;
+
+        for (i = 0; i < list.count; ++i)
         {
-            alpha = score;
-            *best_move = list.moves[i];
+            int score;
+
+            xq_position_make_move(pos, root_moves[i].move);
+            score = -negamax(engine, pos, current_depth - 1, -beta, -alpha);
+            xq_position_unmake_move(pos, root_moves[i].move);
+
+            root_moves[i].score = score;
+            if (score > alpha)
+                alpha = score;
         }
+
+        order_root_moves(root_moves, list.count);
+        *best_move = root_moves[0].move;
+
+        if (current_depth == depth)
+            break;
     }
 
     return true;
