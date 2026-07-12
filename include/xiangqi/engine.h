@@ -30,6 +30,22 @@ typedef struct XqEngineAdapter
     XqTranspositionTable *transposition_table;
 } XqEngineAdapter;
 
+typedef enum XqSearchTimeMode
+{
+    /* 用户实际等待的单调墙钟时间。 */
+    XQ_SEARCH_TIME_MONOTONIC,
+    /* 当前进程消耗的 CPU 时间。 */
+    XQ_SEARCH_TIME_CPU
+} XqSearchTimeMode;
+
+typedef struct XqSearchLimits
+{
+    unsigned max_depth;
+    uint64_t time_limit_ms;
+    int depth_bonus;
+    XqSearchTimeMode time_mode;
+} XqSearchLimits;
+
 typedef enum XqSearchScoreKind
 {
     XQ_SEARCH_SCORE_EXACT,
@@ -80,7 +96,11 @@ void xq_transposition_table_destroy(XqTranspositionTable *table);
 void xq_transposition_table_reset_stats(XqTranspositionTable *table);
 void xq_transposition_table_get_stats(const XqTranspositionTable *table,
                                       XqTranspositionStats *stats);
+XqSearchLimits xq_search_limits_default(unsigned max_depth);
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqMove *best_move);
+/* 时间限制和深度奖励仅适用于内置搜索；自定义 search 回调仍自行管理时间。 */
+bool xq_engine_find_best_move_with_limits(const XqEngineAdapter *engine, XqPosition *pos,
+                                          const XqSearchLimits *limits, XqMove *best_move);
 bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result);
 bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos, XqQuiescenceExplainResult *result);
 
