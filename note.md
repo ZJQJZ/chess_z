@@ -9,3 +9,8 @@
 1nbakabnr/9/1c1R5/1r2C1pCp/p7c/4P4/P5P1P/4B4/N3AR3/4KABN1 b - -
 
 极度长考
+
+长将测试：
+```
+./build/xiangqi_cli -f "4kaR2/4a4/4R4/9/9/9/9/9/r8/5K3 b - -" -e b
+```
