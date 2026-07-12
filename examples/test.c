@@ -2,51 +2,110 @@
 #include "xiangqi/movegen.h"
 #include "xiangqi/position.h"
 
+#include <ctype.h>
+#include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
-typedef struct ScoredMove
+/**
+ * 将使用中文棋子名称首拼的 FEN 转换为标准英文棋子字母 FEN。
+ * 只转换第一个空白字符之前的棋盘字段，行棋方等后续字段保持不变。
+ * 红方大写、黑方小写的规则在转换后保持不变。
+ *
+ * 中文首拼映射为：j -> k、s -> a、x -> b、m -> n、c -> r、
+ * p -> c、b/z -> p。
+ *
+ * @param chinese_fen 待转换的中文首拼 FEN 字符串。
+ * @param english_fen 用于保存标准英文 FEN 的输出缓冲区。
+ * @param buffer_size english_fen 缓冲区的容量，包括结尾的 '\0'。
+ * @return 转换成功时返回 true；参数无效、缓冲区不足或棋盘字段中包含
+ *         无法识别的字母时返回 false。
+ */
+static bool chinese_fen_to_english(const char *chinese_fen,
+                                   char *english_fen,
+                                   size_t buffer_size)
 {
-    XqMove move;
-    int score;
-} ScoredMove;
+    bool in_board = true;
+    size_t length;
+    size_t i;
 
-typedef struct PrincipalVariation
-{
-    XqMove moves[64];
-    int count;
-} PrincipalVariation;
+    if (chinese_fen == NULL || english_fen == NULL)
+        return false;
 
-typedef struct XqTranspositionEntry
-{
-    uint64_t key;
-    int score;
-    XqMove best_move;
-    uint16_t depth;
-    uint8_t generation;
-    uint8_t score_kind;
-} XqTranspositionEntry;
+    length = strlen(chinese_fen);
+    if (buffer_size <= length)
+        return false;
 
-typedef struct XqTranspositionBucket
-{
-    XqTranspositionEntry entries[4];
-} XqTranspositionBucket;
+    for (i = 0; i < length; ++i)
+    {
+        unsigned char input = (unsigned char)chinese_fen[i];
+        char output = (char)input;
 
-struct XqTranspositionTable
-{
-    XqTranspositionBucket *buckets; // size: 1 << 18
-    uint8_t generation;
-    XqTranspositionStats stats;
-};
+        if (in_board && isspace(input))
+            in_board = false;
+        else if (in_board && isalpha(input))
+        {
+            bool uppercase = isupper(input) != 0;
+
+            switch (tolower(input))
+            {
+            case 'j':
+                output = 'k';
+                break;
+            case 's':
+                output = 'a';
+                break;
+            case 'x':
+                output = 'b';
+                break;
+            case 'm':
+                output = 'n';
+                break;
+            case 'c':
+                output = 'r';
+                break;
+            case 'p':
+                output = 'c';
+                break;
+            case 'b':
+            case 'z':
+                output = 'p';
+                break;
+            default:
+                english_fen[0] = '\0';
+                return false;
+            }
+
+            if (uppercase)
+                output = (char)toupper((unsigned char)output);
+        }
+
+        english_fen[i] = output;
+    }
+
+    english_fen[length] = '\0';
+    return true;
+}
 
 int main()
 {
-    // char *a = "r1ba1abnr/4k4/2n3c2/2p3p1p/p3C4/7C1/P1P1P1P1P/N8/7R1/R1BAKAB2 b - - 0 1";
-    // char *a = "1nbakabnr/9/1c1R5/1r2C1pCp/p7c/4P4/P5P1P/4B4/N3AR3/4KABN1 b - -";
-    char *a = "1nbakabnr/9/rc7/4C1p1p/p4c3/4P2C1/P2p2P1P/4B4/N3A3R/3RKABN1 b - -";
+    // const char *chinese_fen = "1mxsjsxmc/9/cp7/4P1z1z/z4p3/4B2P1/B2z2B1B/4X4/M3S3C/3CJSXM1 b - -";
+    const char *chinese_fen = "4B3P/C8/2M1j1PMx/4z1cc1/9/9/9/3m5/4z4/3J5 r - -";
+    char english_fen[128];
     XqPosition pos;
-    xq_position_from_fen(&pos, a);
+
+    if (!chinese_fen_to_english(chinese_fen, english_fen, sizeof(english_fen)))
+    {
+        fprintf(stderr, "failed to convert Chinese FEN\n");
+        return 1;
+    }
+
+    printf("%s\n", english_fen);
+    if (!xq_position_from_fen(&pos, english_fen))
+    {
+        fprintf(stderr, "converted FEN is invalid\n");
+        return 1;
+    }
     xq_position_print(&pos);
-    printf("%zu\n", sizeof(XqTranspositionEntry));
-    printf("%zu\n", sizeof(XqTranspositionBucket));
     return 0;
 }

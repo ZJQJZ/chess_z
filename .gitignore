@@ -8,3 +8,4 @@ gmon.out
 *.gcda
 *.gcno
 .DS_Store
+.vscode/
