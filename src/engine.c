@@ -3,6 +3,8 @@
 #include "xiangqi/movegen.h"
 
 #include <limits.h>
+#include <stdlib.h>
+#include <string.h>
 
 static const int piece_values[XQ_PIECE_TYPE_NB] = {
     [XQ_KING] = 10000,
@@ -27,7 +29,11 @@ static const int legal_move_values[XQ_PIECE_TYPE_NB] = {
 enum
 {
     CAPTURE_ORDER_BASE = 100000,
-    XQ_MAX_PV_MOVES = 64
+    XQ_MAX_PV_MOVES = 64,
+    XQ_MATE_SCORE = 30000,
+    XQ_MATE_THRESHOLD = 29000,
+    XQ_TT_BUCKET_SIZE = 4,
+    XQ_TT_BUCKET_COUNT = 1 << 18
 };
 
 typedef struct ScoredMove
@@ -41,6 +47,359 @@ typedef struct PrincipalVariation
     XqMove moves[XQ_MAX_PV_MOVES];
     int count;
 } PrincipalVariation;
+
+typedef struct XqTranspositionEntry
+{
+    uint64_t key;
+    int score;
+    XqMove best_move;
+    uint16_t depth;
+    uint8_t generation;
+    uint8_t score_kind;
+} XqTranspositionEntry;
+
+typedef struct XqTranspositionBucket
+{
+    XqTranspositionEntry entries[XQ_TT_BUCKET_SIZE];
+} XqTranspositionBucket;
+
+struct XqTranspositionTable
+{
+    XqTranspositionBucket *buckets; // size: 1 << 18
+    uint8_t generation;
+    XqTranspositionStats stats;
+};
+
+/**
+ * 在堆上创建并初始化一张固定容量的置换表
+ * 创建失败时返回 NULL；使用完毕后应调用
+ * xq_transposition_table_destroy() 释放
+ */
+XqTranspositionTable *xq_transposition_table_create(void)
+{
+    XqTranspositionTable *table = (XqTranspositionTable *)malloc(sizeof(*table));
+
+    if (table == NULL)
+        return NULL;
+
+    table->buckets = (XqTranspositionBucket *)calloc(
+        XQ_TT_BUCKET_COUNT, sizeof(*table->buckets));
+    if (table->buckets == NULL)
+    {
+        free(table);
+        return NULL;
+    }
+
+    table->generation = 0;
+    memset(&table->stats, 0, sizeof(table->stats));
+    return table;
+}
+
+/**
+ * 清空置换表中的所有条目，并重置轮次和统计信息
+ * table 为 NULL 时不执行任何操作
+ */
+void xq_transposition_table_clear(XqTranspositionTable *table)
+{
+    if (table == NULL)
+        return;
+
+    memset(table->buckets, 0,
+           XQ_TT_BUCKET_COUNT * sizeof(*table->buckets));
+    table->generation = 0;
+    memset(&table->stats, 0, sizeof(table->stats));
+}
+
+/**
+ * 销毁置换表，释放桶数组和表对象占用的堆内存
+ * table 为 NULL 时不执行任何操作
+ */
+void xq_transposition_table_destroy(XqTranspositionTable *table)
+{
+    if (table == NULL)
+        return;
+    free(table->buckets);
+    free(table);
+}
+
+/**
+ * 将置换表的所有统计计数器重置为零
+ * table 为 NULL 时不执行任何操作
+ */
+void xq_transposition_table_reset_stats(XqTranspositionTable *table)
+{
+    if (table != NULL)
+        memset(&table->stats, 0, sizeof(table->stats));
+}
+
+/**
+ * 将置换表当前的统计计数复制到 *stats
+ * table 为 NULL 时将 *stats 清零；stats 为 NULL 时不执行任何操作
+ */
+void xq_transposition_table_get_stats(const XqTranspositionTable *table,
+                                      XqTranspositionStats *stats)
+{
+    if (stats == NULL)
+        return;
+    if (table == NULL)
+        memset(stats, 0, sizeof(*stats));
+    else
+        *stats = table->stats;
+}
+
+/**
+ * 开始新一轮迭代加深时递增置换表轮次
+ * generation 为 uint8_t，达到上限后按无符号整数规则回绕
+ * table 为 NULL 时不执行任何操作
+ */
+static void tt_new_generation(XqTranspositionTable *table)
+{
+    if (table != NULL)
+        ++table->generation;
+}
+
+/**
+ * 使用 key 的低位定位四路桶，再遍历桶并比较完整的 64 位 key
+ * 不同 key 落入同一桶属于正常的桶索引碰撞，可由完整 key 区分
+ * 不同局面仍可能产生完全相同的 64 位 key；与 Java HashMap 不同，
+ * 这里没有额外保存并比较完整局面，因为这会显著增加条目大小、
+ * 内存带宽和比较开销，当前实现接受这种概率极低的完整哈希碰撞
+ * table 为空或桶内没有匹配条目时返回 NULL
+ */
+static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
+                                           uint64_t key)
+{
+    XqTranspositionBucket *bucket;
+    int i;
+
+    if (table == NULL)
+        return NULL;
+
+    bucket = &table->buckets[key & (XQ_TT_BUCKET_COUNT - 1u)];
+    for (i = 0; i < XQ_TT_BUCKET_SIZE; ++i)
+        if (bucket->entries[i].depth != 0 &&
+            bucket->entries[i].key == key)
+            return &bucket->entries[i];
+    return NULL;
+}
+
+/**
+ * 将相对于当前搜索根节点的评分转换为适合写入置换表的评分
+ * 将杀分数包含当前 ply，需要加减 ply 消除到达路径的影响，使同一局面
+ * 从不同层数命中时仍能正确恢复将杀距离；普通局面评分保持不变
+ * 读取条目时由 score_from_tt() 执行反向转换
+ */
+static int score_to_tt(int score, int ply)
+{
+    if (score >= XQ_MATE_THRESHOLD)
+        return score + ply;
+    if (score <= -XQ_MATE_THRESHOLD)
+        return score - ply;
+    return score;
+}
+
+/**
+ * score_to_tt() 的逆向转换，将置换表评分恢复为当前 ply 下的搜索评分
+ */
+static int score_from_tt(int score, int ply)
+{
+    if (score >= XQ_MATE_THRESHOLD)
+        return score - ply;
+    if (score <= -XQ_MATE_THRESHOLD)
+        return score + ply;
+    return score;
+}
+
+/**
+ * 探测置换表并刷新命中条目的轮次，同时输出 hash move 和评分类型
+ * 仅当缓存深度足够且 EXACT 或边界结果可直接截断搜索时，恢复评分并返回 true
+ * 返回 false 不一定表示未命中，此时输出的 hash move 仍可用于走法排序
+ *
+ * @param table 要探测的置换表，为 NULL 时直接返回 false
+ * @param key 当前局面包含行棋方的完整 64 位哈希
+ * @param depth 当前节点要求的剩余搜索深度
+ * @param alpha 当前 alpha-beta 搜索窗口下界
+ * @param beta 当前 alpha-beta 搜索窗口上界
+ * @param ply 当前节点距离搜索根节点的层数，用于恢复将杀分数
+ * @param score 可选输出参数；返回 true 时写入当前 ply 下可复用的评分
+ * @param hash_move 可选输出参数；命中条目时写入缓存的最佳着法
+ * @param has_hash_move 可选输出参数；写入是否命中了可提供 hash move 的条目
+ * @param score_kind 可选输出参数；命中条目时写入缓存评分的边界类型
+ * @return 缓存评分可直接复用或截断搜索时返回 true，否则返回 false
+ */
+static bool tt_probe(XqTranspositionTable *table, uint64_t key,
+                     unsigned depth, int alpha, int beta, int ply,
+                     int *score, XqMove *hash_move, bool *has_hash_move,
+                     XqSearchScoreKind *score_kind)
+{
+    XqTranspositionEntry *entry;
+    int cached_score;
+
+    if (has_hash_move != NULL)
+        *has_hash_move = false;
+    if (table == NULL)
+        return false;
+
+    ++table->stats.probes;
+    entry = tt_find_entry(table, key);
+    if (entry == NULL)
+        return false;
+
+    ++table->stats.hits;
+    entry->generation = table->generation;
+    if (hash_move != NULL)
+        *hash_move = entry->best_move;
+    if (has_hash_move != NULL)
+        *has_hash_move = true;
+    if (score_kind != NULL)
+        *score_kind = (XqSearchScoreKind)entry->score_kind;
+
+    if ((unsigned)entry->depth < depth)
+        return false;
+
+    cached_score = score_from_tt(entry->score, ply);
+    if (entry->score_kind == XQ_SEARCH_SCORE_EXACT ||
+        (entry->score_kind == XQ_SEARCH_SCORE_LOWER_BOUND &&
+         cached_score >= beta) ||
+        (entry->score_kind == XQ_SEARCH_SCORE_UPPER_BOUND &&
+         cached_score <= alpha))
+    {
+        if (score != NULL)
+            *score = cached_score;
+        ++table->stats.cutoffs;
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * 从置换表获取当前局面的 hash move，并将命中条目刷新为当前轮次
+ * 缓存深度不足或评分边界无法截断时，score 不能替代当前搜索，但
+ * best_move 仍可作为有价值的排序提示，因此本函数不检查 depth、
+ * score_kind 和 alpha-beta 窗口。调用者还会用当前着法列表验证该着法，
+ * 所以它只影响搜索顺序，不影响搜索结果的正确性
+ *
+ * @param table 要查询的置换表，为 NULL 时返回 false
+ * @param key 当前局面包含行棋方的完整 64 位哈希
+ * @param hash_move 输出缓存的最佳着法，为 NULL 时返回 false
+ * @return 找到匹配条目并写入 hash_move 时返回 true，否则返回 false
+ */
+static bool tt_get_hash_move(XqTranspositionTable *table, uint64_t key,
+                             XqMove *hash_move)
+{
+    XqTranspositionEntry *entry;
+
+    if (table == NULL || hash_move == NULL)
+        return false;
+
+    ++table->stats.probes;
+    entry = tt_find_entry(table, key);
+    if (entry == NULL)
+        return false;
+
+    ++table->stats.hits;
+    entry->generation = table->generation;
+    *hash_move = entry->best_move;
+    return true;
+}
+
+/**
+ * 计算置换表条目的保留分，分数越低越容易在桶冲突时被淘汰
+ * 公式为 8 * depth - 4 * age + type_bonus，其中 EXACT 奖励 3 分
+ * 例如 depth=5、条目轮次为 7、当前轮次为 10 且类型为 EXACT 时：
+ * age=3，保留分为 8 * 5 - 4 * 3 + 3 = 31
+ *
+ * @param entry 要评估保留价值的置换表条目，必须非 NULL
+ * @param current_generation 置换表当前的最新轮次
+ * @return 条目的保留分，越高表示越值得继续保留
+ */
+static int tt_retention_score(const XqTranspositionEntry *entry,
+                              uint8_t current_generation)
+{
+    unsigned age = (uint8_t)(current_generation - entry->generation);
+    int type_bonus = entry->score_kind == XQ_SEARCH_SCORE_EXACT ? 3 : 0;
+
+    return (int)entry->depth * 8 - (int)age * 4 + type_bonus;
+}
+
+/**
+ * 将搜索结果写入置换表。优先使用空槽或更新相同 key 的条目；桶已满时，
+ * 根据深度、年龄和评分类型选择保留分最低的条目，并仅在新条目不更弱时替换
+ * depth 为 0 的静态搜索节点不缓存，同时该值被保留为空条目标志
+ *
+ * @param table 要写入的置换表，为 NULL 时不执行任何操作
+ * @param key 当前局面包含行棋方的完整 64 位哈希
+ * @param depth 当前节点的剩余搜索深度，为 0 时不写入
+ * @param score 当前 ply 下得到的搜索评分，写入前会归一化将杀分数
+ * @param ply 当前节点距离搜索根节点的层数
+ * @param score_kind 评分类型，可为 EXACT、LOWER_BOUND 或 UPPER_BOUND
+ * @param best_move 当前局面搜索得到的最佳着法
+ */
+static void tt_store(XqTranspositionTable *table, uint64_t key,
+                     unsigned depth, int score, int ply,
+                     XqSearchScoreKind score_kind, XqMove best_move)
+{
+    XqTranspositionBucket *bucket;
+    XqTranspositionEntry incoming;
+    XqTranspositionEntry *target = NULL;
+    int weakest_score = INT_MAX;
+    int incoming_score;
+    int i;
+
+    if (table == NULL || depth == 0)
+        return;
+
+    incoming.key = key;
+    incoming.score = score_to_tt(score, ply);
+    incoming.best_move = best_move;
+    incoming.depth = depth > UINT16_MAX ? UINT16_MAX : (uint16_t)depth;
+    incoming.generation = table->generation;
+    incoming.score_kind = (uint8_t)score_kind;
+    incoming_score = tt_retention_score(&incoming, table->generation);
+
+    bucket = &table->buckets[key & (XQ_TT_BUCKET_COUNT - 1u)];
+    for (i = 0; i < XQ_TT_BUCKET_SIZE; ++i)
+    {
+        XqTranspositionEntry *entry = &bucket->entries[i];
+        int retention;
+
+        if (entry->depth == 0)
+        {
+            target = entry;
+            break;
+        }
+        if (entry->key == key)
+        {
+            retention = tt_retention_score(entry, table->generation);
+            entry->generation = table->generation;
+            if (incoming_score >= retention)
+                target = entry;
+            else
+                return;
+            break;
+        }
+
+        retention = tt_retention_score(entry, table->generation);
+        if (retention < weakest_score)
+        {
+            weakest_score = retention;
+            target = entry;
+        }
+    }
+
+    if (target == NULL)
+        return;
+    if (target->depth != 0 && target->key != key)
+    {
+        if (incoming_score < weakest_score)
+            return;
+        ++table->stats.replacements;
+    }
+
+    *target = incoming;
+    ++table->stats.stores;
+}
 
 /**
  * 计算 color 方所有合法着法的机动性价值。
@@ -221,6 +580,52 @@ static void build_principal_variation(PrincipalVariation *pv, XqMove move,
 }
 
 /**
+ * 沿足够深的 EXACT 条目重建主变化路线。每一步都从当前局面的伪合法着法
+ * 中取出完整 XqMove，避免直接使用陈旧的 piece/captured 字段。重建期间会
+ * 临时走子，结束前按相反顺序全部撤销，保证 pos 恢复原状
+ *
+ * @param table 用于查找后续 EXACT 条目的置换表，为 NULL 时输出空 PV
+ * @param pos 主变化起点局面，必须非 NULL，函数返回前会恢复其内容
+ * @param depth 最多重建的剩余搜索深度
+ * @param pv 输出的主变化路线，必须非 NULL，原有内容会被清空
+ */
+static void build_pv_from_tt(XqTranspositionTable *table, XqPosition *pos,
+                             unsigned depth, PrincipalVariation *pv)
+{
+    unsigned remaining = depth;
+    int made_count = 0;
+    int i;
+
+    pv->count = 0;
+    while (remaining > 0 && pv->count < XQ_MAX_PV_MOVES)
+    {
+        XqTranspositionEntry *entry = tt_find_entry(table, xq_position_hash(pos));
+        XqMoveList list;
+
+        if (entry == NULL ||
+            entry->score_kind != XQ_SEARCH_SCORE_EXACT ||
+            (unsigned)entry->depth < remaining)
+            break;
+
+        xq_generate_pseudo_legal(pos, &list);
+        for (i = 0; i < list.count; ++i)
+            if (moves_equal(list.moves[i], entry->best_move))
+                break;
+        if (i == list.count)
+            break;
+
+        entry->generation = table->generation;
+        pv->moves[pv->count++] = list.moves[i];
+        xq_position_make_move(pos, list.moves[i]);
+        ++made_count;
+        --remaining;
+    }
+
+    for (i = made_count - 1; i >= 0; --i)
+        xq_position_unmake_move(pos, pv->moves[i]);
+}
+
+/**
  * 逻辑类似 order_moves，只不过多谢带了排序所需要的积分
  */
 static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list, int *scores)
@@ -253,9 +658,11 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
 /**
  * 静态搜索函数，为了避免地平线效应，即恰好搜索到局面波动幅度大的策略树部分停止，对 negamax 搜索
  * 的叶子节点采用静态搜索。目前认为吃子、应将是比较明显让局势评分波动的着法，故次静态搜索囊括了这
- * 两类着法
+ * 两类着法。depth 表示静态搜索内部深度，递归时逐层减一；ply 表示当前节点
+ * 距离整次搜索根节点的层数，递归时逐层加一，用于计算将杀距离
  */
-static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth, int alpha, int beta)
+static int quiescence(const XqEngineAdapter *engine, XqPosition *pos,
+                      int depth, int ply, int alpha, int beta)
 {
     XqMoveList list;
     bool in_check = xq_position_in_check(pos, pos->side_to_move);
@@ -273,7 +680,7 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
 
     xq_generate_pseudo_legal(pos, &list);
     if (in_check && list.count == 0)
-        return -30000 - depth;
+        return -XQ_MATE_SCORE + ply;
     order_moves(engine, pos, &list);
 
     for (i = 0; i < list.count; ++i)
@@ -284,10 +691,11 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
             continue;
         if (list.moves[i].captured != XQ_EMPTY_PIECE &&
             xq_piece_type(list.moves[i].captured) == XQ_KING)
-            return 30000 + depth;
+            return XQ_MATE_SCORE - (ply + 1);
 
         xq_position_make_move(pos, list.moves[i]);
-        score = -quiescence(engine, pos, depth - 1, -beta, -alpha);
+        score = -quiescence(engine, pos, depth - 1, ply + 1,
+                            -beta, -alpha);
         xq_position_unmake_move(pos, list.moves[i]);
         if (score >= beta)
             return beta;
@@ -333,28 +741,53 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  * 总结：相比 Minimax，alpha-beta 通过 alpha、beta 两个参数剪枝来提升性能；代价是当局面的
  * 真实评分落在窗口外时，返值可能不再是精确分数，而只是一个足以支持剪枝和决策的上界或下界。
  */
-static int negamax(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth,
-                   int alpha, int beta, const XqMove *pv_hint, int pv_hint_count,
-                   PrincipalVariation *pv_out)
+static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table,
+                   XqPosition *pos, unsigned depth, int ply,
+                   int alpha, int beta, const XqMove *pv_hint,
+                   int pv_hint_count, PrincipalVariation *pv_out)
 {
     XqMoveList list;
     int best = INT_MIN / 2;
+    int alpha_original = alpha;
+    uint64_t key;
+    XqMove hash_move = {0};
+    XqMove node_best_move = {0};
+    bool has_hash_move = false;
+    bool has_best_move = false;
     bool pv_move_found = false;
+    XqSearchScoreKind cached_kind = XQ_SEARCH_SCORE_UPPER_BOUND;
+    int cached_score;
     int i;
 
     if (pv_out != NULL)
         pv_out->count = 0;
 
     if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
-        return -30000 - (int)depth;
+        return -XQ_MATE_SCORE + ply;
 
     if (depth == 0)
-        return quiescence(engine, pos, 0, alpha, beta);
+        return quiescence(engine, pos, 0, ply, alpha, beta);
+
+    key = xq_position_hash(pos);
+    if (tt_probe(table, key, depth, alpha, beta, ply,
+                 &cached_score, &hash_move, &has_hash_move, &cached_kind))
+    {
+        if (pv_out != NULL && cached_kind == XQ_SEARCH_SCORE_EXACT)
+            build_pv_from_tt(table, pos, depth, pv_out);
+        return cached_score;
+    }
 
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
-        return -30000 - (int)depth;
+        return -XQ_MATE_SCORE + ply;
     order_moves(engine, pos, &list);
+
+    /* 例如当前要求 depth=6、窗口为 [50, 100]，TT 中旧条目是 depth=8、
+     * LOWER_BOUND=80、best_move=A。因为 80<beta，缓存不能截断搜索，但仍
+     * 提供 hash_move=A；若上一轮完整 PV 的首着是 B，则 pv_hint[0]=B，
+     * 此时 hash_move 与 pv_hint[0] 不相等。 */
+    if (has_hash_move)
+        (void)prioritize_move(&list, hash_move);
     if (pv_hint != NULL && pv_hint_count > 0)
         pv_move_found = prioritize_move(&list, pv_hint[0]);
 
@@ -372,13 +805,15 @@ static int negamax(const XqEngineAdapter *engine, XqPosition *pos, unsigned dept
         }
 
         xq_position_make_move(pos, list.moves[i]);
-        score = -negamax(engine, pos, depth - 1, -beta, -alpha,
-                         child_hint, child_hint_count,
+        score = -negamax(engine, table, pos, depth - 1, ply + 1,
+                         -beta, -alpha, child_hint, child_hint_count,
                          pv_out != NULL ? &child_pv : NULL);
         xq_position_unmake_move(pos, list.moves[i]);
         if (score > best)
         {
             best = score;
+            node_best_move = list.moves[i];
+            has_best_move = true;
             if (pv_out != NULL)
                 build_principal_variation(pv_out, list.moves[i], &child_pv);
         }
@@ -386,6 +821,19 @@ static int negamax(const XqEngineAdapter *engine, XqPosition *pos, unsigned dept
             alpha = score;
         if (alpha >= beta)
             break;
+    }
+
+    if (has_best_move)
+    {
+        XqSearchScoreKind score_kind;
+
+        if (best <= alpha_original)
+            score_kind = XQ_SEARCH_SCORE_UPPER_BOUND;
+        else if (best >= beta)
+            score_kind = XQ_SEARCH_SCORE_LOWER_BOUND;
+        else
+            score_kind = XQ_SEARCH_SCORE_EXACT;
+        tt_store(table, key, depth, best, ply, score_kind, node_best_move);
     }
 
     return best;
@@ -400,6 +848,9 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsig
     XqMoveList list;
     ScoredMove root_moves[XQ_MAX_MOVES];
     PrincipalVariation previous_pv = {0};
+    XqTranspositionTable *table = engine != NULL ? engine->transposition_table : NULL;
+    uint64_t root_key;
+    XqMove hash_move;
     unsigned current_depth;
     int i;
 
@@ -413,6 +864,10 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsig
     if (list.count == 0)
         return false;
     order_moves(engine, pos, &list);
+    root_key = xq_position_hash(pos);
+    tt_new_generation(table);
+    if (tt_get_hash_move(table, root_key, &hash_move))
+        (void)prioritize_move(&list, hash_move);
 
     for (i = 0; i < list.count; ++i)
     {
@@ -425,6 +880,9 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsig
         PrincipalVariation current_pv = {0};
         int alpha = INT_MIN / 2;
         int beta = INT_MAX / 2;
+
+        if (current_depth > 1)
+            tt_new_generation(table);
 
         for (i = 0; i < list.count; ++i)
         {
@@ -441,8 +899,9 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsig
             }
 
             xq_position_make_move(pos, root_moves[i].move);
-            score = -negamax(engine, pos, current_depth - 1, -beta, -alpha,
-                             child_hint, child_hint_count, &child_pv);
+            score = -negamax(engine, table, pos, current_depth - 1, 1,
+                             -beta, -alpha, child_hint, child_hint_count,
+                             &child_pv);
             xq_position_unmake_move(pos, root_moves[i].move);
 
             root_moves[i].score = score;
@@ -457,6 +916,8 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos, unsig
         order_root_moves(root_moves, list.count);
         *best_move = root_moves[0].move;
         previous_pv = current_pv;
+        tt_store(table, root_key, current_depth, root_moves[0].score, 0,
+                 XQ_SEARCH_SCORE_EXACT, root_moves[0].move);
 
         if (current_depth == depth)
             break;
@@ -514,8 +975,8 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
         int score;
 
         xq_position_make_move(pos, list.moves[i]);
-        score = -negamax(engine, pos, depth - 1, -beta, -alpha,
-                         NULL, 0, NULL);
+        score = -negamax(engine, NULL, pos, depth - 1, 1,
+                         -beta, -alpha, NULL, 0, NULL);
         xq_position_unmake_move(pos, list.moves[i]);
 
         explained->move = list.moves[i];
@@ -620,11 +1081,11 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
 
         if (list.moves[i].captured != XQ_EMPTY_PIECE &&
             xq_piece_type(list.moves[i].captured) == XQ_KING)
-            score = 30000;
+            score = XQ_MATE_SCORE - 1;
         else
         {
             xq_position_make_move(pos, list.moves[i]);
-            score = -quiescence(engine, pos, -1, -beta, -alpha);
+            score = -quiescence(engine, pos, -1, 1, -beta, -alpha);
             xq_position_unmake_move(pos, list.moves[i]);
         }
 

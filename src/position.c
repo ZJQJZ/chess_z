@@ -13,6 +13,29 @@ static bool valid_square(XqSquare sq)
 }
 
 /**
+ * 通过固定的 SplitMix64 混合函数为棋子位置生成可复现的 Zobrist 键。
+ * 不使用运行时随机表，避免初始化顺序和并发问题。
+ */
+static uint64_t zobrist_mix(uint64_t value)
+{
+    value += UINT64_C(0x9e3779b97f4a7c15);
+    value = (value ^ (value >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return value ^ (value >> 31);
+}
+
+static uint64_t zobrist_piece_key(int piece, XqSquare sq)
+{
+    uint64_t index = (uint64_t)piece * XQ_SQUARES + (uint64_t)sq;
+    return zobrist_mix(UINT64_C(0x243f6a8885a308d3) + index);
+}
+
+static uint64_t zobrist_side_key(void)
+{
+    return zobrist_mix(UINT64_C(0x13198a2e03707344));
+}
+
+/**
  * 根据棋子类型枚举获取棋子字符串名称
  */
 const char *xq_piece_type_name(XqPieceType type)
@@ -98,6 +121,7 @@ bool xq_position_set_piece(XqPosition *pos, XqSquare sq, XqColor color, XqPieceT
 
     piece = xq_make_piece(color, type);
     pos->board[sq] = (int8_t)piece;
+    pos->piece_hash ^= zobrist_piece_key(piece, sq);
     xq_bb_set(&pos->pieces[color][type], sq);
     xq_bb_set(&pos->occupied[color], sq);
     xq_bb_set(&pos->all_occupied, sq);
@@ -123,6 +147,7 @@ bool xq_position_remove_piece(XqPosition *pos, XqSquare sq)
 
     color = xq_piece_color(piece);
     type = xq_piece_type(piece);
+    pos->piece_hash ^= zobrist_piece_key(piece, sq);
     pos->board[sq] = XQ_EMPTY_PIECE;
     xq_bb_clear(&pos->pieces[color][type], sq);
     xq_bb_clear(&pos->occupied[color], sq);
@@ -344,6 +369,15 @@ int xq_position_piece_count(const XqPosition *pos, XqColor color, XqPieceType ty
 }
 
 /**
+ * 返回包含棋子布局和行棋方的局面哈希。回合计数当前不参与搜索规则，故不混入。
+ */
+uint64_t xq_position_hash(const XqPosition *pos)
+{
+    return pos->piece_hash ^
+           (pos->side_to_move == XQ_BLACK ? zobrist_side_key() : UINT64_C(0));
+}
+
+/**
  * 用于检查某个 *pos 是否数据一致且双方存在将帅
  * 根据 *pos 的 board 信息复制一份相匹配的 XqPosition 中的 pieces、occupied、all 信息
  * 然后和 *pos 中的进行比较查看是否一致，最后看是否存在双方将帅
@@ -353,6 +387,7 @@ bool xq_position_validate(const XqPosition *pos)
     XqBitboard pieces[XQ_COLOR_NB][XQ_PIECE_TYPE_NB];
     XqBitboard occupied[XQ_COLOR_NB] = {xq_bb_empty(), xq_bb_empty()};
     XqBitboard all = xq_bb_empty();
+    uint64_t piece_hash = UINT64_C(0);
     int sq;
     int color;
     int type;
@@ -373,6 +408,7 @@ bool xq_position_validate(const XqPosition *pos)
         xq_bb_set(&occupied[xq_piece_color(piece)], (XqSquare)sq);
         xq_bb_set(&all, (XqSquare)sq);
         xq_bb_set(&pieces[xq_piece_color(piece)][xq_piece_type(piece)], (XqSquare)sq);
+        piece_hash ^= zobrist_piece_key(piece, (XqSquare)sq);
     }
 
     for (color = 0; color < XQ_COLOR_NB; ++color)
@@ -386,6 +422,8 @@ bool xq_position_validate(const XqPosition *pos)
     if (occupied[XQ_BLACK].lo != pos->occupied[XQ_BLACK].lo || occupied[XQ_BLACK].hi != pos->occupied[XQ_BLACK].hi)
         return false;
     if (all.lo != pos->all_occupied.lo || all.hi != pos->all_occupied.hi)
+        return false;
+    if (piece_hash != pos->piece_hash)
         return false;
 
     return xq_position_piece_count(pos, XQ_RED, XQ_KING) == 1 &&

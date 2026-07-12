@@ -13,6 +13,7 @@ typedef struct XqPosition
     XqBitboard pieces[XQ_COLOR_NB][XQ_PIECE_TYPE_NB];
     XqBitboard occupied[XQ_COLOR_NB];
     XqBitboard all_occupied;
+    uint64_t piece_hash;
     int8_t board[XQ_SQUARES];
     XqColor side_to_move;
     uint16_t halfmove_clock;
@@ -31,6 +32,7 @@ bool xq_position_unmake_move(XqPosition *pos, XqMove move);
 
 XqSquare xq_position_king_square(const XqPosition *pos, XqColor color);
 int xq_position_piece_count(const XqPosition *pos, XqColor color, XqPieceType type);
+uint64_t xq_position_hash(const XqPosition *pos);
 bool xq_position_validate(const XqPosition *pos);
 const char *xq_piece_to_text(int piece);
 void xq_position_print(const XqPosition *pos);

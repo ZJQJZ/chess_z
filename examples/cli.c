@@ -78,7 +78,18 @@ int main(void)
 {
     XqPosition pos;
     XqMoveList legal;
+    XqTranspositionTable *table = xq_transposition_table_create();
+    XqEngineAdapter engine = {
+        .static_evaluate = NULL,
+        .search = NULL,
+        .user = NULL,
+        .score_move = NULL,
+        .transposition_table = table,
+    };
     char input[64];
+
+    if (table == NULL)
+        fprintf(stderr, "warning: transposition table allocation failed; continuing without cache\n");
 
     xq_position_startpos(&pos);
     printf("Xiangqi demo: human red vs builtin black engine\n");
@@ -102,7 +113,7 @@ int main(void)
         {
             XqMove best;
             char text[8];
-            if (!xq_engine_find_best_move(NULL, &pos, 6, &best))
+            if (!xq_engine_find_best_move(&engine, &pos, 6, &best))
             {
                 printf("engine failed to move\n");
                 break;
@@ -148,5 +159,6 @@ int main(void)
         }
     }
 
+    xq_transposition_table_destroy(table);
     return 0;
 }

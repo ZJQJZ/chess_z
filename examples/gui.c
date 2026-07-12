@@ -137,9 +137,20 @@ int main(void)
     XqSquare selected = XQ_NO_SQUARE;
     bool game_over = false;
     char status[80] = "Red: select a piece";
+    XqTranspositionTable *table = xq_transposition_table_create();
+    XqEngineAdapter engine = {
+        .static_evaluate = NULL,
+        .search = NULL,
+        .user = NULL,
+        .score_move = NULL,
+        .transposition_table = table,
+    };
     int codepoint_count;
     int *codepoints;
     Font piece_font;
+
+    if (table == NULL)
+        fprintf(stderr, "warning: transposition table allocation failed; continuing without cache\n");
 
     xq_position_startpos(&pos);
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "chess_z");
@@ -171,7 +182,7 @@ int main(void)
                     {
                         XqMove best;
                         snprintf(status, sizeof(status), "Black is thinking...");
-                        if (xq_engine_find_best_move(NULL, &pos, ENGINE_DEPTH, &best))
+                        if (xq_engine_find_best_move(&engine, &pos, ENGINE_DEPTH, &best))
                         {
                             XqMoveList replies;
                             char move_text[8];
@@ -204,5 +215,6 @@ int main(void)
 
     UnloadFont(piece_font);
     CloseWindow();
+    xq_transposition_table_destroy(table);
     return 0;
 }

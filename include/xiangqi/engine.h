@@ -10,12 +10,24 @@ typedef int (*XqEvaluateFn)(const XqPosition *pos, XqColor perspective, void *us
 typedef bool (*XqSearchFn)(const XqPosition *pos, unsigned depth, XqMove *best_move, void *user);
 typedef int (*XqMoveScoreFn)(const XqPosition *pos, XqMove move, void *user);
 
+typedef struct XqTranspositionTable XqTranspositionTable;
+
+typedef struct XqTranspositionStats
+{
+    uint64_t probes;
+    uint64_t hits;
+    uint64_t cutoffs;
+    uint64_t stores;
+    uint64_t replacements;
+} XqTranspositionStats;
+
 typedef struct XqEngineAdapter
 {
     XqEvaluateFn static_evaluate;
     XqSearchFn search;
     void *user;
     XqMoveScoreFn score_move;
+    XqTranspositionTable *transposition_table;
 } XqEngineAdapter;
 
 typedef enum XqSearchScoreKind
@@ -62,6 +74,12 @@ typedef struct XqQuiescenceExplainResult
 } XqQuiescenceExplainResult;
 
 int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user);
+XqTranspositionTable *xq_transposition_table_create(void);
+void xq_transposition_table_clear(XqTranspositionTable *table);
+void xq_transposition_table_destroy(XqTranspositionTable *table);
+void xq_transposition_table_reset_stats(XqTranspositionTable *table);
+void xq_transposition_table_get_stats(const XqTranspositionTable *table,
+                                      XqTranspositionStats *stats);
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqMove *best_move);
 bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result);
 bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos, XqQuiescenceExplainResult *result);
