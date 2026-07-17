@@ -23,6 +23,7 @@ enum
 static void print_usage(const char *program)
 {
     printf("usage: %s [--depth N] [--fen FEN]\n", program);
+    printf("  N=0 directly explains quiescence search for the input position.\n");
 }
 
 /**
@@ -75,6 +76,27 @@ static bool parse_positive_int(const char *text, int *value)
 
     parsed = strtol(text, &end, 10);
     if (text == end || parsed <= 0 || parsed > INT_MAX)
+        return false;
+    while (*end != '\0')
+    {
+        if (!isspace((unsigned char)*end))
+            return false;
+        ++end;
+    }
+    *value = (int)parsed;
+    return true;
+}
+
+/**
+ * 带完整合法性检查的非负整数转换函数。
+ */
+static bool parse_nonnegative_int(const char *text, int *value)
+{
+    char *end;
+    long parsed;
+
+    parsed = strtol(text, &end, 10);
+    if (text == end || parsed < 0 || parsed > INT_MAX)
         return false;
     while (*end != '\0')
     {
@@ -162,7 +184,6 @@ static void print_help(void)
     printf("  fen         print current FEN\n");
     printf("  eval        print static evaluation\n");
     printf("  list        redraw the current one-ply explanation\n");
-    printf("  depth 0     automatically shows quiescence search\n");
     printf("  help / ?    print this help\n");
     printf("  quit / q    exit\n");
 }
@@ -323,7 +344,7 @@ int main(int argc, char **argv)
         if (strcmp(argv[arg], "--depth") == 0)
         {
             int parsed;
-            if (arg + 1 >= argc || !parse_positive_int(argv[arg + 1], &parsed))
+            if (arg + 1 >= argc || !parse_nonnegative_int(argv[arg + 1], &parsed))
             {
                 print_usage(argv[0]);
                 return EXIT_FAILURE;

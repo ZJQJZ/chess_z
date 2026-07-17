@@ -38,6 +38,7 @@ static const int legal_move_values[XQ_PIECE_TYPE_NB] = {
 enum
 {
     CAPTURE_ORDER_BASE = 100000,
+    XQ_MAX_QUIESCENCE_DEPTH = 500,
     XQ_MAX_PV_MOVES = 64,
     XQ_MATE_SCORE = 30000,
     XQ_MATE_THRESHOLD = 29000,
@@ -818,20 +819,26 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
 /**
  * 静态搜索函数，为了避免地平线效应，即恰好搜索到局面波动幅度大的策略树部分停止，对 negamax 搜索
  * 的叶子节点采用静态搜索。目前认为吃子、应将是比较明显让局势评分波动的着法，故次静态搜索囊括了这
- * 两类着法。depth 表示静态搜索内部深度，递归时逐层减一；ply 表示当前节点
- * 距离整次搜索根节点的层数，递归时逐层加一，用于计算将杀距离
+ * 两类着法。depth 表示静态搜索内部深度，递归时逐层减一，到达
+ * XQ_MAX_QUIESCENCE_DEPTH 后返回静态评估；ply 表示当前节点距离整次搜索根节点
+ * 的层数，递归时逐层加一，用于计算将杀距离
  */
 static int quiescence(const XqEngineAdapter *engine, XqPosition *pos,
                       int depth, int ply, int alpha, int beta,
                       SearchContext *context)
 {
     XqMoveList list;
-    bool in_check = xq_position_in_check(pos, pos->side_to_move);
+    bool in_check;
     int stand_pat;
     int i;
 
     if (search_enter_node(context))
         return 0;
+
+    if (depth <= -XQ_MAX_QUIESCENCE_DEPTH)
+        return static_evaluate(engine, pos, pos->side_to_move);
+
+    in_check = xq_position_in_check(pos, pos->side_to_move);
 
     if (!in_check)
     {

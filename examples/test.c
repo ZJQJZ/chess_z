@@ -91,7 +91,8 @@ int main()
 {
     // const char *chinese_fen = "1mxsjsxmc/9/cp7/4P1z1z/z4p3/4B2P1/B2z2B1B/4X4/M3S3C/3CJSXM1 b - -";
     // const char *chinese_fen = "4B3P/C8/2M1j1PMx/4z1cc1/9/9/9/3m5/4z4/3J5 r - -";
-    const char *chinese_fen = "4jsC2/4s4/4C4/9/9/9/9/9/c8/5J3 b - -";
+    // const char *chinese_fen = "4jsC2/4s4/4C4/9/9/9/9/9/c8/5J3 b - -";
+    const char *chinese_fen = "cmxsj1xmc/3p5/3s5/b1bP2b2/9/9/B1B3B1B/XPM3p2/3JC4/C2S1SX2 b - -";
     char english_fen[128];
     XqPosition pos;
 
