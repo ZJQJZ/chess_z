@@ -22,7 +22,7 @@ typedef struct XqBitboard
 } XqBitboard;
 
 /**
- * 创建一个不包含任何棋盘位置的空位棋盘
+ * @brief 创建一个不包含任何棋盘位置的空位棋盘
  *
  * @return lo 和 hi 均为 0 的 XqBitboard
  */
@@ -33,7 +33,7 @@ static inline XqBitboard xq_bb_empty(void)
 }
 
 /**
- * 看棋盘上是否没有棋子
+ * @brief 看棋盘上是否没有棋子
  *
  * @param bb 要检查的位棋盘
  * @return bb 中没有任何位置被设置时返回 true，否则返回 false
@@ -44,7 +44,7 @@ static inline bool xq_bb_is_empty(XqBitboard bb)
 }
 
 /**
- * 设置 *bb 上 sq 位置的棋子标记
+ * @brief 设置 bb 上 sq 位置的棋子标记
  *
  * @param bb 要修改的位棋盘，不能为 NULL
  * @param sq 要设置的棋盘位置，取值范围应为 0..89
@@ -58,7 +58,7 @@ static inline void xq_bb_set(XqBitboard *bb, XqSquare sq)
 }
 
 /**
- * 清除 bb 上 sq 位置的棋子标记
+ * @brief 清除 bb 上 sq 位置的棋子标记
  *
  * @param bb 要修改的位棋盘，不能为 NULL
  * @param sq 要清除的棋盘位置，取值范围应为 0..89
@@ -72,7 +72,7 @@ static inline void xq_bb_clear(XqBitboard *bb, XqSquare sq)
 }
 
 /**
- * 判断棋盘 bb 的 sq 位置是否有棋子
+ * @brief 判断棋盘 bb 的 sq 位置是否有棋子
  *
  * @param bb 要检查的位棋盘
  * @param sq 要检查的棋盘位置，取值范围应为 0..89
@@ -86,7 +86,8 @@ static inline bool xq_bb_test(XqBitboard bb, XqSquare sq)
 }
 
 /**
- * 棋盘编号从小到大第一个棋子出现的位置
+ * @brief 棋盘编号从小到大第一个棋子出现的位置
+ *
  * 从编号 0 开始查找位棋盘中第一个被设置的位置，优先检查 lo，
  * 再检查 hi；位棋盘为空时返回 XQ_NO_SQUARE
  * 实现会根据编译器预定义宏选择最高效的位扫描方式：MSVC 使用
@@ -146,7 +147,8 @@ static inline XqSquare xq_bb_first_square(XqBitboard bb)
 }
 
 /**
- * 返回一个棋盘中有多少棋子
+ * @brief 返回一个棋盘中有多少棋子
+ *
  * 根据编译器预定义宏选择对应的位计数实现
  * MSVC 使用 __popcnt64，GCC 和 Clang 使用 __builtin_popcountll
  * 其他编译器使用逐次清除最低有效位的通用实现
