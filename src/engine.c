@@ -125,11 +125,14 @@ static uint64_t monotonic_time_ms(void)
 }
 
 /**
- * 读取当前进程消耗的 CPU 时间，并将其转换为毫秒。
- * CPU 时间只统计进程实际占用处理器执行的时间，进程等待或休眠的时间通常
- * 不计入其中。转换为整数毫秒时会舍弃不足一毫秒的部分。
+ * @brief Reads the CPU time consumed by the current process and converts it to milliseconds.
  *
- * @return 当前进程自启动以来消耗的 CPU 毫秒数；读取失败时返回 0
+ * CPU time counts only the time during which the process is actively executing on the processor.
+ * Time spent waiting or sleeping is generally not included. Fractions of a millisecond are
+ * discarded when converting to integer milliseconds.
+ *
+ * @return The CPU time, in milliseconds, consumed by the current process since it started; returns
+ * 0 if the time cannot be obtained.
  */
 static uint64_t cpu_time_ms(void)
 {
