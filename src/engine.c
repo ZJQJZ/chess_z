@@ -229,9 +229,13 @@ static bool search_enter_node(SearchContext *context)
 }
 
 /**
- * 在堆上创建并初始化一张固定容量的置换表
- * 创建失败时返回 NULL；使用完毕后应调用
- * xq_transposition_table_destroy() 释放
+ * @brief  Creates and initializes a fixed-capacity transposition table on the heap.
+ *
+ * Returns null if creation fails. Call `xq_transposition_table_destroy()` to release the table when
+ * it is no longer needed.
+ *
+ * @return A pointer to the newly created transposition table on success; null if memory allocation
+ *         fails.
  */
 XqTranspositionTable *xq_transposition_table_create(void)
 {
