@@ -144,7 +144,7 @@ static uint64_t cpu_time_ms(void)
 }
 
 /**
- * Reads the current time according to the search timing mode.
+ * @brief      Reads the current time according to the search timing mode.
  *
  * @param mode Timing mode. `XQ_SEARCH_TIME_CPU` uses process CPU time; all other values use
  *             monotonic wall-clock time.
@@ -157,12 +157,13 @@ static uint64_t search_time_ms(XqSearchTimeMode mode)
 }
 
 /**
- * 根据搜索限制初始化一次内置搜索使用的上下文。
- * 函数会清零节点数和停止状态、规范化计时模式，并在时间限制非零时计算
- * 本次搜索的绝对截止时间；时间限制为零时关闭超时检查。
+ * @brief         Initializes the context used by a built-in search according to the search limits.
  *
- * @param context 要初始化的搜索上下文，必须非 NULL
- * @param limits  本次搜索的深度、时间、奖励和计时模式配置，必须非 NULL
+ * The function resets the node count and stop state, normalize the time mode, and calculates the
+ * absolute deadline when the time limit is nonzero. A zero time limit disables timeout checks.
+ *
+ * @param context Search context to initialize; must not be null.
+ * @param limits  Depth, time, bonus, and timing mode configurationl; must not be null.
  */
 static void search_context_init(SearchContext *context, const XqSearchLimits *limits)
 {
