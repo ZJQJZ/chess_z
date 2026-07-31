@@ -210,12 +210,15 @@ static bool search_check_time(SearchContext *context, bool force)
 }
 
 /**
- * 记录搜索进入一个新节点，并按节点间隔检查时间上限。
- * context 非空时先将节点计数加一，再调用非强制时间检查；解释搜索等未使用
- * 搜索上下文的调用可以传入 NULL，此时不计数也不检查时间。
+ * @brief         Records entry into a new search node and checks the time limit at node intervals.
  *
- * @param context 当前搜索上下文，可以为 NULL
- * @return        搜索已经停止或本次节点检查发现超时时返回 true，否则返回 false
+ * If context is not null, increments the node count and then performs a non-forced time check.
+ * Calls that do not use a search context, such as explanatory searches, may pass null; in that
+ * case, no nodes are counted and no time check is performed.
+ *
+ * @param context The current search context; may be null.
+ * @return        If the search has already stopped or this node check detects a timeout, returns
+ *                true; otherwise, returns false.
  */
 static bool search_enter_node(SearchContext *context)
 {
