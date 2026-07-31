@@ -159,11 +159,11 @@ static uint64_t search_time_ms(XqSearchTimeMode mode)
 /**
  * @brief         Initializes the context used by a built-in search according to the search limits.
  *
- * The function resets the node count and stop state, normalize the time mode, and calculates the
+ * The function resets the node count and stop state, normalizes the timing mode, and calculates the
  * absolute deadline when the time limit is nonzero. A zero time limit disables timeout checks.
  *
  * @param context Search context to initialize; must not be null.
- * @param limits  Depth, time, bonus, and timing mode configurationl; must not be null.
+ * @param limits  Depth, time, bonus, and timing mode configuration; must not be null.
  */
 static void search_context_init(SearchContext *context, const XqSearchLimits *limits)
 {
