@@ -184,14 +184,19 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
 }
 
 /**
- * 检查搜索是否已经停止或到达时间上限。
- * 非强制检查只在节点计数达到 1024 的整数倍时读取时钟，以降低频繁查询
- * 系统时钟的开销；强制检查则立即读取时钟。检测到超时后会将 stopped
- * 置为 true，后续调用会持续返回停止状态。
+ * @brief         Checks whether the search has already stopped or has reached its time limit.
  *
- * @param context 当前搜索上下文；为 NULL 时视为未停止且不执行时间检查
- * @param force   为 true 时立即检查时间，为 false 时按照节点间隔检查
- * @return        搜索已经停止或本次检查发现超时时返回 true，否则返回 false
+ * A non-forced check reads the clock only when the node count is a multiple of 1024, reducing the
+ * overhead of frequent system clock queries. A forced check reads the clock immediately. When a
+ * timeout is detected, `stopped` is set to true, and subsequent calls will continue to report that
+ * the search has stopped.
+ *
+ * @param context The current search context. If null, the search is considered active and no time
+ *                check is performed.
+ * @param force   If true, checks the time immediately; if false, checks only when the node count is
+ *                a multiple of 1024.
+ * @return        Returns true if the search has already stopped or if this check detects a timeout;
+ *                otherwise, returns false.
  */
 static bool search_check_time(SearchContext *context, bool force)
 {
