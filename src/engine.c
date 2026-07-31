@@ -81,7 +81,7 @@ struct XqTranspositionTable
 };
 
 /**
- * @brief Reads the current monotonic clock and converts it to milliseconds.
+ * @brief  Reads the current monotonic clock and converts it to milliseconds.
  *
  * The monotonic clock is unaffected by changes to the system date, time zone or manual clock
  * adjustments, making it suitable for measuring search duration and deadlines. Windows uses a
@@ -89,8 +89,8 @@ struct XqTranspositionTable
  * Any fractional millisecond is discarded during conversion.
  *
  * @return The number of milliseconds elapsed since a platform-specific fixed reference point, or 0
- * if the clock cannot be read. The value alone is meaningless; only the difference between two
- * calls is meaningful.
+ *         if the clock cannot be read. The value alone is meaningless; only the difference between
+ *         two calls is meaningful.
  */
 static uint64_t monotonic_time_ms(void)
 {
@@ -125,14 +125,14 @@ static uint64_t monotonic_time_ms(void)
 }
 
 /**
- * @brief Reads the CPU time consumed by the current process and converts it to milliseconds.
+ * @brief  Reads the CPU time consumed by the current process and converts it to milliseconds.
  *
  * CPU time counts only the time during which the process is actively executing on the processor.
  * Time spent waiting or sleeping is generally not included. Fractions of a millisecond are
  * discarded when converting to integer milliseconds.
  *
  * @return The CPU time, in milliseconds, consumed by the current process since it started; returns
- * 0 if the time cannot be obtained.
+ *         0 if the time cannot be obtained.
  */
 static uint64_t cpu_time_ms(void)
 {
@@ -144,11 +144,12 @@ static uint64_t cpu_time_ms(void)
 }
 
 /**
- * 根据搜索计时模式读取当前时间。
+ * Reads the current time according to the search timing mode.
  *
- * @param mode 计时模式；XQ_SEARCH_TIME_CPU 使用进程 CPU 时间，其他值使用
- *             单调墙钟时间
- * @return 所选时钟当前的毫秒数；底层时钟读取失败时返回 0
+ * @param mode Timing mode. `XQ_SEARCH_TIME_CPU` uses process CPU time; all other values use
+ *             monotonic wall-clock time.
+ * @return     The current time in milliseconds from the selected clock, or 0 if the underlying
+ *             clock cannot be read.
  */
 static uint64_t search_time_ms(XqSearchTimeMode mode)
 {
@@ -161,7 +162,7 @@ static uint64_t search_time_ms(XqSearchTimeMode mode)
  * 本次搜索的绝对截止时间；时间限制为零时关闭超时检查。
  *
  * @param context 要初始化的搜索上下文，必须非 NULL
- * @param limits 本次搜索的深度、时间、奖励和计时模式配置，必须非 NULL
+ * @param limits  本次搜索的深度、时间、奖励和计时模式配置，必须非 NULL
  */
 static void search_context_init(SearchContext *context, const XqSearchLimits *limits)
 {
@@ -188,8 +189,8 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
  * 置为 true，后续调用会持续返回停止状态。
  *
  * @param context 当前搜索上下文；为 NULL 时视为未停止且不执行时间检查
- * @param force 为 true 时立即检查时间，为 false 时按照节点间隔检查
- * @return 搜索已经停止或本次检查发现超时时返回 true，否则返回 false
+ * @param force   为 true 时立即检查时间，为 false 时按照节点间隔检查
+ * @return        搜索已经停止或本次检查发现超时时返回 true，否则返回 false
  */
 static bool search_check_time(SearchContext *context, bool force)
 {
@@ -208,7 +209,7 @@ static bool search_check_time(SearchContext *context, bool force)
  * 搜索上下文的调用可以传入 NULL，此时不计数也不检查时间。
  *
  * @param context 当前搜索上下文，可以为 NULL
- * @return 搜索已经停止或本次节点检查发现超时时返回 true，否则返回 false
+ * @return        搜索已经停止或本次节点检查发现超时时返回 true，否则返回 false
  */
 static bool search_enter_node(SearchContext *context)
 {
@@ -299,7 +300,7 @@ void xq_transposition_table_get_stats(const XqTranspositionTable *table,
  * 一层增加 70 分深度可信奖励。max_depth 为 0 时会规范化为最小深度 1。
  *
  * @param max_depth 迭代加深允许达到的最大搜索深度，0 等同于 1
- * @return 初始化完成的 XqSearchLimits 配置值
+ * @return          初始化完成的 XqSearchLimits 配置值
  */
 XqSearchLimits xq_search_limits_default(unsigned max_depth)
 {
@@ -378,17 +379,17 @@ static int score_from_tt(int score, int ply)
  * 仅当缓存深度足够且 EXACT 或边界结果可直接截断搜索时，恢复评分并返回 true
  * 返回 false 不一定表示未命中，此时输出的 hash move 仍可用于走法排序
  *
- * @param table 要探测的置换表，为 NULL 时直接返回 false
- * @param key 当前局面包含行棋方的完整 64 位哈希
- * @param depth 当前节点要求的剩余搜索深度
- * @param alpha 当前 alpha-beta 搜索窗口下界
- * @param beta 当前 alpha-beta 搜索窗口上界
- * @param ply 当前节点距离搜索根节点的层数，用于恢复将杀分数
- * @param score 可选输出参数；返回 true 时写入当前 ply 下可复用的评分
- * @param hash_move 可选输出参数；命中条目时写入缓存的最佳着法
+ * @param table         要探测的置换表，为 NULL 时直接返回 false
+ * @param key           当前局面包含行棋方的完整 64 位哈希
+ * @param depth         当前节点要求的剩余搜索深度
+ * @param alpha         当前 alpha-beta 搜索窗口下界
+ * @param beta          当前 alpha-beta 搜索窗口上界
+ * @param ply           当前节点距离搜索根节点的层数，用于恢复将杀分数
+ * @param score         可选输出参数；返回 true 时写入当前 ply 下可复用的评分
+ * @param hash_move     可选输出参数；命中条目时写入缓存的最佳着法
  * @param has_hash_move 可选输出参数；写入是否命中了可提供 hash move 的条目
- * @param score_kind 可选输出参数；命中条目时写入缓存评分的边界类型
- * @return 缓存评分可直接复用或截断搜索时返回 true，否则返回 false
+ * @param score_kind    可选输出参数；命中条目时写入缓存评分的边界类型
+ * @return              缓存评分可直接复用或截断搜索时返回 true，否则返回 false
  */
 static bool tt_probe(XqTranspositionTable *table, uint64_t key, unsigned depth, int alpha, int beta,
                      int ply, int *score, XqMove *hash_move, bool *has_hash_move,
@@ -440,10 +441,10 @@ static bool tt_probe(XqTranspositionTable *table, uint64_t key, unsigned depth, 
  * score_kind 和 alpha-beta 窗口。调用者还会用当前着法列表验证该着法，
  * 所以它只影响搜索顺序，不影响搜索结果的正确性
  *
- * @param table 要查询的置换表，为 NULL 时返回 false
- * @param key 当前局面包含行棋方的完整 64 位哈希
+ * @param table     要查询的置换表，为 NULL 时返回 false
+ * @param key       当前局面包含行棋方的完整 64 位哈希
  * @param hash_move 输出缓存的最佳着法，为 NULL 时返回 false
- * @return 找到匹配条目并写入 hash_move 时返回 true，否则返回 false
+ * @return          找到匹配条目并写入 hash_move 时返回 true，否则返回 false
  */
 static bool tt_get_hash_move(XqTranspositionTable *table, uint64_t key, XqMove *hash_move)
 {
@@ -469,9 +470,9 @@ static bool tt_get_hash_move(XqTranspositionTable *table, uint64_t key, XqMove *
  * 例如 depth=5、条目轮次为 7、当前轮次为 10 且类型为 EXACT 时：
  * age=3，保留分为 8 * 5 - 4 * 3 + 3 = 31
  *
- * @param entry 要评估保留价值的置换表条目，必须非 NULL
+ * @param entry              要评估保留价值的置换表条目，必须非 NULL
  * @param current_generation 置换表当前的最新轮次
- * @return 条目的保留分，越高表示越值得继续保留
+ * @return                   条目的保留分，越高表示越值得继续保留
  */
 static int tt_retention_score(const XqTranspositionEntry *entry, uint8_t current_generation)
 {
@@ -486,13 +487,13 @@ static int tt_retention_score(const XqTranspositionEntry *entry, uint8_t current
  * 根据深度、年龄和评分类型选择保留分最低的条目，并仅在新条目不更弱时替换
  * depth 为 0 的静态搜索节点不缓存，同时该值被保留为空条目标志
  *
- * @param table 要写入的置换表，为 NULL 时不执行任何操作
- * @param key 当前局面包含行棋方的完整 64 位哈希
- * @param depth 当前节点的剩余搜索深度，为 0 时不写入
- * @param score 当前 ply 下得到的搜索评分，写入前会归一化将杀分数
- * @param ply 当前节点距离搜索根节点的层数
+ * @param table      要写入的置换表，为 NULL 时不执行任何操作
+ * @param key        当前局面包含行棋方的完整 64 位哈希
+ * @param depth      当前节点的剩余搜索深度，为 0 时不写入
+ * @param score      当前 ply 下得到的搜索评分，写入前会归一化将杀分数
+ * @param ply        当前节点距离搜索根节点的层数
  * @param score_kind 评分类型，可为 EXACT、LOWER_BOUND 或 UPPER_BOUND
- * @param best_move 当前局面搜索得到的最佳着法
+ * @param best_move  当前局面搜索得到的最佳着法
  */
 static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, int score, int ply,
                      XqSearchScoreKind score_kind, XqMove best_move)
@@ -741,9 +742,9 @@ static void build_principal_variation(PrincipalVariation *pv, XqMove move,
  * 临时走子，结束前按相反顺序全部撤销，保证 pos 恢复原状
  *
  * @param table 用于查找后续 EXACT 条目的置换表，为 NULL 时输出空 PV
- * @param pos 主变化起点局面，必须非 NULL，函数返回前会恢复其内容
+ * @param pos   主变化起点局面，必须非 NULL，函数返回前会恢复其内容
  * @param depth 最多重建的剩余搜索深度
- * @param pv 输出的主变化路线，必须非 NULL，原有内容会被清空
+ * @param pv    输出的主变化路线，必须非 NULL，原有内容会被清空
  */
 static void build_pv_from_tt(XqTranspositionTable *table, XqPosition *pos, unsigned depth,
                              PrincipalVariation *pv)
@@ -1015,10 +1016,10 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
  * 的着法。completed_depth 为 0 的未完成着法不参与比较；如果没有任何着法
  * 完成搜索，则使用列表中的第一步作为保底结果。
  *
- * @param moves 根着法及其最后完整完成的评分和深度，必须非 NULL
- * @param count 根着法数量，必须大于 0
+ * @param moves       根着法及其最后完整完成的评分和深度，必须非 NULL
+ * @param count       根着法数量，必须大于 0
  * @param depth_bonus 每多完成一层加入修正评分的深度可信奖励
- * @return 按修正评分和稳定平分规则选出的根着法
+ * @return            按修正评分和稳定平分规则选出的根着法
  */
 static XqMove select_timed_root_move(const ScoredMove *moves, int count, int depth_bonus)
 {
@@ -1170,12 +1171,12 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, un
  * max_depth 为 0 时按 1 处理。若 engine 提供自定义 search 回调，则只把规范化
  * 后的最大深度传给该回调，时间限制和深度奖励由自定义搜索自行管理。
  *
- * @param engine 引擎适配器，可以为 NULL；未提供 search 时使用内置搜索
- * @param pos 要搜索的当前局面，内置搜索要求非 NULL，搜索结束后保持局面不变
- * @param limits 搜索深度、时间上限、深度奖励和计时模式配置，必须非 NULL
+ * @param engine    引擎适配器，可以为 NULL；未提供 search 时使用内置搜索
+ * @param pos       要搜索的当前局面，内置搜索要求非 NULL，搜索结束后保持局面不变
+ * @param limits    搜索深度、时间上限、深度奖励和计时模式配置，必须非 NULL
  * @param best_move 输出选出的最佳着法，必须非 NULL
- * @return 成功找到并写入最佳着法时返回 true；参数无效、无可搜索着法或
- *         自定义搜索失败时返回 false
+ * @return          成功找到并写入最佳着法时返回 true；参数无效、无可搜索着法或自定义搜索失败时返回
+ *                  false
  */
 bool xq_engine_find_best_move_with_limits(const XqEngineAdapter *engine, XqPosition *pos,
                                           const XqSearchLimits *limits, XqMove *best_move)
