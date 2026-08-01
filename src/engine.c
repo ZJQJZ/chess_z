@@ -257,8 +257,12 @@ XqTranspositionTable *xq_transposition_table_create(void)
 }
 
 /**
- * 清空置换表中的所有条目，并重置轮次和统计信息
- * table 为 NULL 时不执行任何操作
+ * @brief     Clears all entries in the transposition table and resets its generation and
+ *            statistics.
+ *
+ * Does nothing if table is null.
+ *
+ * @param The transposition table to clear; may be null.
  */
 void xq_transposition_table_clear(XqTranspositionTable *table)
 {
