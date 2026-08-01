@@ -262,7 +262,7 @@ XqTranspositionTable *xq_transposition_table_create(void)
  *
  * Does nothing if table is null.
  *
- * @param The transposition table to clear; may be null.
+ * @param table The transposition table to clear; may be null.
  */
 void xq_transposition_table_clear(XqTranspositionTable *table)
 {
