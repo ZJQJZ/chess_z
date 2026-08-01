@@ -257,8 +257,8 @@ XqTranspositionTable *xq_transposition_table_create(void)
 }
 
 /**
- * @brief     Clears all entries in the transposition table and resets its generation and
- *            statistics.
+ * @brief       Clears all entries in the transposition table and resets its generation and
+ *              statistics.
  *
  * Does nothing if table is null.
  *
