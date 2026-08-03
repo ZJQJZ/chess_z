@@ -81,7 +81,7 @@ struct XqTranspositionTable
 };
 
 /**
- * @brief  Reads the current monotonic clock and converts it to milliseconds.
+ * @brief Reads the current monotonic clock and converts it to milliseconds.
  *
  * The monotonic clock is unaffected by changes to the system date, time zone or manual clock
  * adjustments, making it suitable for measuring search duration and deadlines. Windows uses a
@@ -125,7 +125,7 @@ static uint64_t monotonic_time_ms(void)
 }
 
 /**
- * @brief  Reads the CPU time consumed by the current process and converts it to milliseconds.
+ * @brief Reads the CPU time consumed by the current process and converts it to milliseconds.
  *
  * CPU time counts only the time during which the process is actively executing on the processor.
  * Time spent waiting or sleeping is generally not included. Fractions of a millisecond are
@@ -144,12 +144,12 @@ static uint64_t cpu_time_ms(void)
 }
 
 /**
- * @brief      Reads the current time according to the search timing mode.
+ * @brief Reads the current time according to the search timing mode.
  *
- * @param mode Timing mode. `XQ_SEARCH_TIME_CPU` uses process CPU time; all other values use
- *             monotonic wall-clock time.
- * @return     The current time in milliseconds from the selected clock, or 0 if the underlying
- *             clock cannot be read.
+ * @param[in] mode Timing mode. `XQ_SEARCH_TIME_CPU` uses process CPU time; all other values use
+ *                 monotonic wall-clock time.
+ * @return         The current time in milliseconds from the selected clock, or 0 if the underlying
+ *                 clock cannot be read.
  */
 static uint64_t search_time_ms(XqSearchTimeMode mode)
 {
@@ -157,13 +157,13 @@ static uint64_t search_time_ms(XqSearchTimeMode mode)
 }
 
 /**
- * @brief         Initializes the context used by a built-in search according to the search limits.
+ * @brief Initializes the context used by a built-in search according to the search limits.
  *
  * The function resets the node count and stop state, normalizes the timing mode, and calculates the
  * absolute deadline when the time limit is nonzero. A zero time limit disables timeout checks.
  *
- * @param context Search context to initialize; must not be null.
- * @param limits  Depth, time, bonus, and timing mode configuration; must not be null.
+ * @param[out] context Search context to initialize; must not be null.
+ * @param[in]  limits  Depth, time, bonus, and timing mode configuration; must not be null.
  */
 static void search_context_init(SearchContext *context, const XqSearchLimits *limits)
 {
@@ -184,19 +184,19 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
 }
 
 /**
- * @brief         Checks whether the search has already stopped or has reached its time limit.
+ * @brief Checks whether the search has already stopped or has reached its time limit.
  *
  * A non-forced check reads the clock only when the node count is a multiple of 1024, reducing the
  * overhead of frequent system clock queries. A forced check reads the clock immediately. When a
  * timeout is detected, `stopped` is set to true, and subsequent calls will continue to report that
  * the search has stopped.
  *
- * @param context The current search context. If null, the search is considered active and no time
- *                check is performed.
- * @param force   If true, checks the time immediately; if false, checks only when the node count is
- *                a multiple of 1024.
- * @return        Returns true if the search has already stopped or if this check detects a timeout;
- *                otherwise, returns false.
+ * @param[in,out] context The current search context. If null, the search is considered active and
+ *                        no time check is performed.
+ * @param[in]     force   If true, checks the time immediately; if false, checks only when the node
+ *                        count is a multiple of 1024.
+ * @return                Returns true if the search has already stopped or if this check detects a
+ *                        timeout; otherwise, returns false.
  */
 static bool search_check_time(SearchContext *context, bool force)
 {
@@ -210,15 +210,15 @@ static bool search_check_time(SearchContext *context, bool force)
 }
 
 /**
- * @brief         Records entry into a new search node and checks the time limit at node intervals.
+ * @brief Records entry into a new search node and checks the time limit at node intervals.
  *
  * If context is not null, increments the node count and then performs a non-forced time check.
  * Calls that do not use a search context, such as explanatory searches, may pass null; in that
  * case, no nodes are counted and no time check is performed.
  *
- * @param context The current search context; may be null.
- * @return        If the search has already stopped or this node check detects a timeout, returns
- *                true; otherwise, returns false.
+ * @param[in,out] context The current search context; may be null.
+ * @return                If the search has already stopped or this node check detects a timeout,
+ *                        returns true; otherwise, returns false.
  */
 static bool search_enter_node(SearchContext *context)
 {
@@ -229,7 +229,7 @@ static bool search_enter_node(SearchContext *context)
 }
 
 /**
- * @brief  Creates and initializes a fixed-capacity transposition table on the heap.
+ * @brief Creates and initializes a fixed-capacity transposition table on the heap.
  *
  * Returns null if creation fails. Call `xq_transposition_table_destroy()` to release the table when
  * it is no longer needed.
@@ -257,12 +257,11 @@ XqTranspositionTable *xq_transposition_table_create(void)
 }
 
 /**
- * @brief       Clears all entries in the transposition table and resets its generation and
- *              statistics.
+ * @brief Clears all entries in the transposition table and resets its generation and statistics.
  *
  * Does nothing if table is null.
  *
- * @param table The transposition table to clear; may be null.
+ * @param[in,out] table The transposition table to clear; may be null.
  */
 void xq_transposition_table_clear(XqTranspositionTable *table)
 {
@@ -275,8 +274,12 @@ void xq_transposition_table_clear(XqTranspositionTable *table)
 }
 
 /**
- * 销毁置换表，释放桶数组和表对象占用的堆内存
- * table 为 NULL 时不执行任何操作
+ * @brief Destroys the transposition table and frees the heap memory used by its bucket array and
+ *        the table itself.
+ *
+ * Does nothing if `table` is null.
+ *
+ * @param[in] table The table whose bucket array and the table itself are both to be freed.
  */
 void xq_transposition_table_destroy(XqTranspositionTable *table)
 {
@@ -287,8 +290,11 @@ void xq_transposition_table_destroy(XqTranspositionTable *table)
 }
 
 /**
- * 将置换表的所有统计计数器重置为零
- * table 为 NULL 时不执行任何操作
+ * @brief Resets all transposition table statistics counters to 0.
+ *
+ * Does nothing if `table` is null.
+ *
+ * @param[in,out] table The transposition table all whose statistics counters are to be reset to 0.
  */
 void xq_transposition_table_reset_stats(XqTranspositionTable *table)
 {
@@ -297,8 +303,13 @@ void xq_transposition_table_reset_stats(XqTranspositionTable *table)
 }
 
 /**
- * 将置换表当前的统计计数复制到 *stats
- * table 为 NULL 时将 *stats 清零；stats 为 NULL 时不执行任何操作
+ * @brief Retrieves current statistics from the transposition table `table` and stores them in
+ *        `stats`.
+ *
+ * Does nothing if `stats` is null. Resets `stats` to zero if `table` is null.
+ *
+ * @param[in]  table The transposition table to retrieve from.
+ * @param[out] stats The output parameter used for receiving statistics from `table`.
  */
 void xq_transposition_table_get_stats(const XqTranspositionTable *table,
                                       XqTranspositionStats *stats)

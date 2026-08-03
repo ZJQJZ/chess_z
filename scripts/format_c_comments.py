@@ -19,7 +19,8 @@ TAB_SIZE = 8
 _TAG_RE = re.compile(
     r"^(?P<leader>[ \t]*\*[ \t]*)(?P<tag>"
     r"@brief\b|@return\b|"
-    r"@param(?:[ \t]*\[[^\]\r\n]+\])?[ \t]+\S+"
+    r"@param(?:[ \t]*\[(?P<param_direction>[^\]\r\n]+)\])?"
+    r"[ \t]+(?P<param_name>\S+)"
     r")(?P<separator>[ \t]*)(?P<body>.*)$"
 )
 _COMMENT_LINE_RE = re.compile(r"^[ \t]*\*(?P<after>.*)$")
@@ -185,10 +186,45 @@ def _format_doc_comment(
         for line in plain_lines
         if (match := _TAG_RE.match(line)) is not None
     ]
-    content_column = max(
+    parameter_name_column = max(
         (
-            display_width(match.group("leader") + match.group("tag")) + 1
+            display_width(
+                match.group("leader")
+                + "@param"
+                + (
+                    f"[{match.group('param_direction')}]"
+                    if match.group("param_direction") is not None
+                    else ""
+                )
+            )
+            + 1
             for match in tag_matches
+            if match.group("param_name") is not None
+        ),
+        default=0,
+    )
+
+    def render_tag_prefix(match: re.Match[str]) -> str:
+        leader = match.group("leader")
+        parameter_name = match.group("param_name")
+        if parameter_name is None:
+            return leader + match.group("tag")
+
+        direction = match.group("param_direction")
+        parameter_prefix = leader + "@param"
+        if direction is not None:
+            parameter_prefix += f"[{direction}]"
+        return (
+            parameter_prefix
+            + " " * (parameter_name_column - display_width(parameter_prefix))
+            + parameter_name
+        )
+
+    structured_content_column = max(
+        (
+            display_width(render_tag_prefix(match)) + 1
+            for match in tag_matches
+            if match.group("tag") != "@brief"
         ),
         default=0,
     )
@@ -226,7 +262,12 @@ def _format_doc_comment(
 
         leader = match.group("leader")
         tag = match.group("tag")
-        tag_prefix = leader + tag
+        tag_prefix = render_tag_prefix(match)
+        content_column = (
+            display_width(tag_prefix) + 1
+            if tag == "@brief"
+            else structured_content_column
+        )
         first_prefix = tag_prefix + " " * (
             content_column - display_width(tag_prefix)
         )
