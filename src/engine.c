@@ -146,10 +146,10 @@ static uint64_t cpu_time_ms(void)
 /**
  * @brief Reads the current time according to the search timing mode.
  *
- * @param[in] mode Timing mode. `XQ_SEARCH_TIME_CPU` uses process CPU time; all other values use
- *                 monotonic wall-clock time.
- * @return         The current time in milliseconds from the selected clock, or 0 if the underlying
- *                 clock cannot be read.
+ * @param mode Timing mode. `XQ_SEARCH_TIME_CPU` uses process CPU time; all other values use
+ *             monotonic wall-clock time.
+ * @return     The current time in milliseconds from the selected clock, or 0 if the underlying
+ *             clock cannot be read.
  */
 static uint64_t search_time_ms(XqSearchTimeMode mode)
 {
@@ -162,8 +162,8 @@ static uint64_t search_time_ms(XqSearchTimeMode mode)
  * The function resets the node count and stop state, normalizes the timing mode, and calculates the
  * absolute deadline when the time limit is nonzero. A zero time limit disables timeout checks.
  *
- * @param[out] context Search context to initialize; must not be null.
- * @param[in]  limits  Depth, time, bonus, and timing mode configuration; must not be null.
+ * @param context Search context to initialize; must not be null.
+ * @param limits  Depth, time, bonus, and timing mode configuration; must not be null.
  */
 static void search_context_init(SearchContext *context, const XqSearchLimits *limits)
 {
@@ -188,15 +188,15 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
  *
  * A non-forced check reads the clock only when the node count is a multiple of 1024, reducing the
  * overhead of frequent system clock queries. A forced check reads the clock immediately. When a
- * timeout is detected, `stopped` is set to true, and subsequent calls will continue to report that
- * the search has stopped.
+ * timeout is detected, `stopped` is set to true, and subsequent calls continue to report that the
+ * search has stopped.
  *
- * @param[in,out] context The current search context. If null, the search is considered active and
- *                        no time check is performed.
- * @param[in]     force   If true, checks the time immediately; if false, checks only when the node
- *                        count is a multiple of 1024.
- * @return                Returns true if the search has already stopped or if this check detects a
- *                        timeout; otherwise, returns false.
+ * @param context The current search context. If null, the search is considered active and no time
+ *                check is performed.
+ * @param force   If true, checks the time immediately; if false, checks only when the node count is
+ *                a multiple of 1024.
+ * @return        Returns true if the search has already stopped or if this check detects a timeout;
+ *                otherwise, returns false.
  */
 static bool search_check_time(SearchContext *context, bool force)
 {
@@ -216,9 +216,9 @@ static bool search_check_time(SearchContext *context, bool force)
  * Calls that do not use a search context, such as explanatory searches, may pass null; in that
  * case, no nodes are counted and no time check is performed.
  *
- * @param[in,out] context The current search context; may be null.
- * @return                If the search has already stopped or this node check detects a timeout,
- *                        returns true; otherwise, returns false.
+ * @param context The current search context; may be null.
+ * @return        If the search has already stopped or this node check detects a timeout, returns
+ *                true; otherwise, returns false.
  */
 static bool search_enter_node(SearchContext *context)
 {
@@ -261,7 +261,7 @@ XqTranspositionTable *xq_transposition_table_create(void)
  *
  * Does nothing if table is null.
  *
- * @param[in,out] table The transposition table to clear; may be null.
+ * @param table The transposition table to clear; may be null.
  */
 void xq_transposition_table_clear(XqTranspositionTable *table)
 {
@@ -279,7 +279,7 @@ void xq_transposition_table_clear(XqTranspositionTable *table)
  *
  * Does nothing if `table` is null.
  *
- * @param[in] table The table whose bucket array and the table itself are both to be freed.
+ * @param table The table whose bucket array and the table itself are both to be freed.
  */
 void xq_transposition_table_destroy(XqTranspositionTable *table)
 {
@@ -294,7 +294,7 @@ void xq_transposition_table_destroy(XqTranspositionTable *table)
  *
  * Does nothing if `table` is null.
  *
- * @param[in,out] table The transposition table all whose statistics counters are to be reset to 0.
+ * @param table The transposition table all whose statistics counters are to be reset to 0.
  */
 void xq_transposition_table_reset_stats(XqTranspositionTable *table)
 {
@@ -308,8 +308,8 @@ void xq_transposition_table_reset_stats(XqTranspositionTable *table)
  *
  * Does nothing if `stats` is null. Resets `stats` to zero if `table` is null.
  *
- * @param[in]  table The transposition table to retrieve from.
- * @param[out] stats The output parameter used for receiving statistics from `table`.
+ * @param table The transposition table to retrieve from.
+ * @param stats The output parameter used for receiving statistics from `table`.
  */
 void xq_transposition_table_get_stats(const XqTranspositionTable *table,
                                       XqTranspositionStats *stats)
@@ -323,12 +323,15 @@ void xq_transposition_table_get_stats(const XqTranspositionTable *table,
 }
 
 /**
- * 创建一份内置搜索的默认限制配置。
- * 默认配置将搜索时间限制为 3 秒，使用单调墙钟计时，并为根着法每多完成
- * 一层增加 70 分深度可信奖励。max_depth 为 0 时会规范化为最小深度 1。
+ * @brief Creates a default limit configuration for the built-in search.
  *
- * @param max_depth 迭代加深允许达到的最大搜索深度，0 等同于 1
- * @return          初始化完成的 XqSearchLimits 配置值
+ * The default configuration limits the search time to 3 seconds, uses a monotonic wall clock, and
+ * awards each root move a 70-point depth-confidence bonus for every additional completed ply.
+ * `max_depth` is normalized to the minimum depth of 1 if its input value is 0.
+ *
+ * @param max_depth Maximum search depth for iterative deepening search; normalized to 1 if set to
+ *                  0.
+ * @return          The normalized default limit configuration.
  */
 XqSearchLimits xq_search_limits_default(unsigned max_depth)
 {
@@ -342,9 +345,13 @@ XqSearchLimits xq_search_limits_default(unsigned max_depth)
 }
 
 /**
- * 开始新一轮迭代加深时递增置换表轮次
- * generation 为 uint8_t，达到上限后按无符号整数规则回绕
- * table 为 NULL 时不执行任何操作
+ * @brief Increments the transposition table generation at the start of a new iterative deepening
+ *        iteration.
+ *
+ * The `generation` field of `table` is a `uint8_t`, so it wraps around according to unsigned
+ * integer rules when it reaches its maximum value. Does nothing if `table` is null.
+ *
+ * @param table The transposition table whose generation is incremented; may be null.
  */
 static void tt_new_generation(XqTranspositionTable *table)
 {
@@ -353,12 +360,19 @@ static void tt_new_generation(XqTranspositionTable *table)
 }
 
 /**
- * 使用 key 的低位定位四路桶，再遍历桶并比较完整的 64 位 key
- * 不同 key 落入同一桶属于正常的桶索引碰撞，可由完整 key 区分
- * 不同局面仍可能产生完全相同的 64 位 key；与 Java HashMap 不同，
- * 这里没有额外保存并比较完整局面，因为这会显著增加条目大小、
- * 内存带宽和比较开销，当前实现接受这种概率极低的完整哈希碰撞
- * table 为空或桶内没有匹配条目时返回 NULL
+ * @brief Uses the low bits of `key` to index into the bucket array, then searches the four entries
+ *        in the selected bucket for a valid entry whose full 64-bit key matches `key`.
+ *
+ * Two keys with the same low-bit index but different full keys constitute a bucket-index collision
+ * and can be distinguished by comparing their full keys. An entry whose depth is zero is treated as
+ * an empty slot and does not match anything.
+ * Different positions may generate the same 64-bit Zobrist key. The transposition table does not
+ * store complete position data for secondary verification to avoid increasing entry size and
+ * memory-access overhead. It therefore accepts the extremely low probability of such a collision.
+ *
+ * @param table The transposition table to search; may be null.
+ * @param key   The full 64-bit position hash to look up.
+ * @return      A pointer to the matching entry, or null if no matching entry exists.
  */
 static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table, uint64_t key)
 {
