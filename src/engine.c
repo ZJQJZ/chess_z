@@ -390,10 +390,21 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table, uint64_t
 }
 
 /**
- * 将相对于当前搜索根节点的评分转换为适合写入置换表的评分
- * 将杀分数包含当前 ply，需要加减 ply 消除到达路径的影响，使同一局面
- * 从不同层数命中时仍能正确恢复将杀距离；普通局面评分保持不变
- * 读取条目时由 score_from_tt() 执行反向转换
+ * @brief Converts a score relative to the current search root into a form suitable for storage in
+ *        the transposition table.
+ *
+ * A mate score is relative to the search root, so its value depends on the current ply. The same
+ * position reached via different paths may have different scores because it occurs at different ply
+ * depths. Before storing the score in the transposition table, the function adds ply to a positive
+ * mate score or subtracts ply from a negative mate score, thereby eliminating the effect of the
+ * path length used to reach the current position. When the score is retrieved from the
+ * transposition table, `score_from_tt()` uses the current ply at the point of lookup to restore the
+ * mate score relative to the search root. Non-mate scores do not depend on ply and therefore remain
+ * unchanged.
+ *
+ * @param score Score obtained at the current search node.
+ * @param ply   Number of plies from the search root to the current node.
+ * @return      Normalized score suitable for storage in the transposition table.
  */
 static int score_to_tt(int score, int ply)
 {
@@ -405,7 +416,14 @@ static int score_to_tt(int score, int ply)
 }
 
 /**
- * score_to_tt() 的逆向转换，将置换表评分恢复为当前 ply 下的搜索评分
+ * @brief 将置换表中归一化后的评分恢复为当前搜索层级下的评分。
+ *
+ * 本函数是 score_to_tt() 的逆向转换。对于将杀分数，根据当前节点距离搜索根节点
+ * 的层数恢复将杀距离；普通局面评分保持不变。
+ *
+ * @param score 从置换表读取的归一化评分。
+ * @param ply   当前节点距离搜索根节点的层数。
+ * @return      当前 ply 下可供搜索使用的评分。
  */
 static int score_from_tt(int score, int ply)
 {
