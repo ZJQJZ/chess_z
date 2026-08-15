@@ -84,9 +84,10 @@ struct XqTranspositionTable
  * @brief Reads the current monotonic clock and converts it to milliseconds.
  *
  * The monotonic clock is unaffected by changes to the system date, time zone or manual clock
- * adjustments, making it suitable for measuring search duration and deadlines. Windows uses a
- * high-resolution performance counter, while other platforms use `clock_gettime(CLOCK_MONOTONIC)`.
- * Any fractional millisecond is discarded during conversion.
+ * adjustments, making it suitable for measuring search duration and deadlines.
+ *
+ * Windows uses a high-resolution performance counter, while other platforms use
+ * `clock_gettime(CLOCK_MONOTONIC)`. Any fractional millisecond is discarded during conversion.
  *
  * @return The number of milliseconds elapsed since a platform-specific fixed reference point, or 0
  *         if the clock cannot be read. The value alone is meaningless; only the difference between
@@ -116,8 +117,7 @@ static uint64_t monotonic_time_ms(void)
      * Similar to the `_WIN32` branch, this retrieves the elapsed time since an unspecified fixed
      * reference point. The result consists of the seconds stored in `now.tv_sec` plus the
      * nanoseconds stored in `now.tv_nsec`. The final return value discards any fractional
-     * millisecond.
-     */
+     * millisecond. */
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
         return 0;
     return (uint64_t)now.tv_sec * UINT64_C(1000) + (uint64_t)now.tv_nsec / UINT64_C(1000000);
@@ -327,6 +327,7 @@ void xq_transposition_table_get_stats(const XqTranspositionTable *table,
  *
  * The default configuration limits the search time to 3 seconds, uses a monotonic wall clock, and
  * awards each root move a 70-point depth-confidence bonus for every additional completed ply.
+ *
  * `max_depth` is normalized to the minimum depth of 1 if its input value is 0.
  *
  * @param max_depth Maximum search depth for iterative deepening search; normalized to 1 if set to
@@ -349,7 +350,9 @@ XqSearchLimits xq_search_limits_default(unsigned max_depth)
  *        iteration.
  *
  * The `generation` field of `table` is a `uint8_t`, so it wraps around according to unsigned
- * integer rules when it reaches its maximum value. Does nothing if `table` is null.
+ * integer rules when it reaches its maximum value.
+ *
+ * Does nothing if `table` is null.
  *
  * @param table The transposition table whose generation is incremented; may be null.
  */
@@ -366,6 +369,7 @@ static void tt_new_generation(XqTranspositionTable *table)
  * Two keys with the same low-bit index but different full keys constitute a bucket-index collision
  * and can be distinguished by comparing their full keys. An entry whose depth is zero is treated as
  * an empty slot and does not match anything.
+ *
  * Different positions may generate the same 64-bit Zobrist key. The transposition table does not
  * store complete position data for secondary verification to avoid increasing entry size and
  * memory-access overhead. It therefore accepts the extremely low probability of such a collision.
@@ -395,12 +399,15 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table, uint64_t
  *
  * A mate score is relative to the search root, so its value depends on the current ply. The same
  * position reached via different paths may have different scores because it occurs at different ply
- * depths. Before storing the score in the transposition table, the function adds ply to a positive
- * mate score or subtracts ply from a negative mate score, thereby eliminating the effect of the
- * path length used to reach the current position. When the score is retrieved from the
- * transposition table, `score_from_tt()` uses the current ply at the point of lookup to restore the
- * mate score relative to the search root. Non-mate scores do not depend on ply and therefore remain
- * unchanged.
+ * depths.
+ *
+ * Before storing the score in the transposition table, the function adds ply to a positive mate
+ * score or subtracts ply from a negative mate score, thereby eliminating the effect of the path
+ * length used to reach the current position. When the score is retrieved from the transposition
+ * table, `score_from_tt()` uses the current ply at the point of lookup to restore the mate score
+ * relative to the search root.
+ *
+ * Non-mate scores do not depend on ply and therefore remain unchanged.
  *
  * @param score Score obtained at the current search node.
  * @param ply   Number of plies from the search root to the current node.
@@ -416,14 +423,15 @@ static int score_to_tt(int score, int ply)
 }
 
 /**
- * @brief 将置换表中归一化后的评分恢复为当前搜索层级下的评分。
+ * @brief Restores a transposition-table score for the current search ply.
  *
- * 本函数是 score_to_tt() 的逆向转换。对于将杀分数，根据当前节点距离搜索根节点
- * 的层数恢复将杀距离；普通局面评分保持不变。
+ * This function is the inverse of `score_to_tt()`. For mate scores, it restores the mate distance
+ * according to the current node's distance from the search root. Ordinary position scores are left
+ * unchanged.
  *
- * @param score 从置换表读取的归一化评分。
- * @param ply   当前节点距离搜索根节点的层数。
- * @return      当前 ply 下可供搜索使用的评分。
+ * @param score Normalized score read from the transposition table.
+ * @param ply   Number of plies from the search root to the current node.
+ * @return      The score restored for use at the current ply.
  */
 static int score_from_tt(int score, int ply)
 {
@@ -435,21 +443,30 @@ static int score_from_tt(int score, int ply)
 }
 
 /**
- * 探测置换表并刷新命中条目的轮次，同时输出 hash move 和评分类型
- * 仅当缓存深度足够且 EXACT 或边界结果可直接截断搜索时，恢复评分并返回 true
- * 返回 false 不一定表示未命中，此时输出的 hash move 仍可用于走法排序
+ * @brief Probes the transposition table and refreshes the generation of a matching entry.
  *
- * @param table         要探测的置换表，为 NULL 时直接返回 false
- * @param key           当前局面包含行棋方的完整 64 位哈希
- * @param depth         当前节点要求的剩余搜索深度
- * @param alpha         当前 alpha-beta 搜索窗口下界
- * @param beta          当前 alpha-beta 搜索窗口上界
- * @param ply           当前节点距离搜索根节点的层数，用于恢复将杀分数
- * @param score         可选输出参数；返回 true 时写入当前 ply 下可复用的评分
- * @param hash_move     可选输出参数；命中条目时写入缓存的最佳着法
- * @param has_hash_move 可选输出参数；写入是否命中了可提供 hash move 的条目
- * @param score_kind    可选输出参数；命中条目时写入缓存评分的边界类型
- * @return              缓存评分可直接复用或截断搜索时返回 true，否则返回 false
+ * The function also returns the hash move and score kind when requested. It restores and accepts a
+ * cached score only when the stored depth is sufficient and the score is either exact or a bound
+ * that directly cuts off the current search.
+ *
+ * A false return value does not necessarily mean that the probe missed; a returned hash move may
+ * still be used for move ordering.
+ *
+ * @param table         Transposition table to probe; may be null, in which case the function
+ *                      returns false immediately.
+ * @param key           Full 64-bit hash of the current position, including the side to move.
+ * @param depth         Remaining search depth required at the current node.
+ * @param alpha         Lower bound of the current alpha-beta search window.
+ * @param beta          Upper bound of the current alpha-beta search window.
+ * @param ply           Number of plies from the search root, used to restore mate scores.
+ * @param score         Optional output; receives the reusable score at the current ply when the
+ *                      function returns true.
+ * @param hash_move     Optional output; receives the cached best move when an entry matches.
+ * @param has_hash_move Optional output; receives whether a matching entry supplied a hash move.
+ * @param score_kind    Optional output; receives the cached score's bound kind when an entry
+ *                      matches.
+ * @return              True if the cached score can be reused or can cut off the search; false
+ *                      otherwise.
  */
 static bool tt_probe(XqTranspositionTable *table, uint64_t key, unsigned depth, int alpha, int beta,
                      int ply, int *score, XqMove *hash_move, bool *has_hash_move,
@@ -495,16 +512,21 @@ static bool tt_probe(XqTranspositionTable *table, uint64_t key, unsigned depth, 
 }
 
 /**
- * 从置换表获取当前局面的 hash move，并将命中条目刷新为当前轮次
- * 缓存深度不足或评分边界无法截断时，score 不能替代当前搜索，但
- * best_move 仍可作为有价值的排序提示，因此本函数不检查 depth、
- * score_kind 和 alpha-beta 窗口。调用者还会用当前着法列表验证该着法，
- * 所以它只影响搜索顺序，不影响搜索结果的正确性
+ * @brief Retrieves the hash move for the current position from the transposition table.
  *
- * @param table     要查询的置换表，为 NULL 时返回 false
- * @param key       当前局面包含行棋方的完整 64 位哈希
- * @param hash_move 输出缓存的最佳着法，为 NULL 时返回 false
- * @return          找到匹配条目并写入 hash_move 时返回 true，否则返回 false
+ * A matching entry is refreshed to the current generation. Even when the cached depth is
+ * insufficient or its score bound cannot produce a cutoff, `best_move` remains a useful ordering
+ * hint. Consequently, this function does not inspect the stored depth, score kind, or alpha-beta
+ * window.
+ *
+ * The caller validates the move against the current move list, so the hint affects only search
+ * order, not correctness.
+ *
+ * @param table     Transposition table to query; may be null, in which case the function returns
+ *                  false.
+ * @param key       Full 64-bit hash of the current position, including the side to move.
+ * @param hash_move Output that receives the cached best move; must not be null.
+ * @return          True if a matching entry was found and written to `hash_move`; false otherwise.
  */
 static bool tt_get_hash_move(XqTranspositionTable *table, uint64_t key, XqMove *hash_move)
 {
@@ -525,14 +547,17 @@ static bool tt_get_hash_move(XqTranspositionTable *table, uint64_t key, XqMove *
 }
 
 /**
- * 计算置换表条目的保留分，分数越低越容易在桶冲突时被淘汰
- * 公式为 8 * depth - 4 * age + type_bonus，其中 EXACT 奖励 3 分
- * 例如 depth=5、条目轮次为 7、当前轮次为 10 且类型为 EXACT 时：
- * age=3，保留分为 8 * 5 - 4 * 3 + 3 = 31
+ * @brief Computes the retention score of a transposition-table entry.
  *
- * @param entry              要评估保留价值的置换表条目，必须非 NULL
- * @param current_generation 置换表当前的最新轮次
- * @return                   条目的保留分，越高表示越值得继续保留
+ * Entries with lower scores are more likely to be evicted after a bucket collision. The formula is
+ * `8 * depth - 4 * age + type_bonus`, where an exact entry receives a bonus of 3. For example, an
+ * exact entry of depth 5 from generation 7 has age 3 in generation 10, giving a retention score of
+ * `8 * 5 - 4 * 3 + 3 = 31`.
+ *
+ * @param entry              Transposition-table entry to evaluate; must not be null.
+ * @param current_generation Current generation of the transposition table.
+ * @return                   The entry's retention score; a higher value makes the entry more
+ *                           desirable to retain.
  */
 static int tt_retention_score(const XqTranspositionEntry *entry, uint8_t current_generation)
 {
@@ -543,17 +568,22 @@ static int tt_retention_score(const XqTranspositionEntry *entry, uint8_t current
 }
 
 /**
- * 将搜索结果写入置换表。优先使用空槽或更新相同 key 的条目；桶已满时，
- * 根据深度、年龄和评分类型选择保留分最低的条目，并仅在新条目不更弱时替换
- * depth 为 0 的静态搜索节点不缓存，同时该值被保留为空条目标志
+ * @brief Stores a search result in the transposition table.
  *
- * @param table      要写入的置换表，为 NULL 时不执行任何操作
- * @param key        当前局面包含行棋方的完整 64 位哈希
- * @param depth      当前节点的剩余搜索深度，为 0 时不写入
- * @param score      当前 ply 下得到的搜索评分，写入前会归一化将杀分数
- * @param ply        当前节点距离搜索根节点的层数
- * @param score_kind 评分类型，可为 EXACT、LOWER_BOUND 或 UPPER_BOUND
- * @param best_move  当前局面搜索得到的最佳着法
+ * The function prefers an empty slot or an entry with the same key. When the bucket is full, it
+ * chooses the entry with the lowest retention score based on depth, age, and score kind, and
+ * replaces it only if the incoming entry is not weaker.
+ *
+ * Quiescence nodes at depth zero are not cached because zero is reserved as the empty-entry marker.
+ *
+ * @param table      Transposition table in which to store the result; may be null, in which case
+ *                   the function does nothing.
+ * @param key        Full 64-bit hash of the current position, including the side to move.
+ * @param depth      Remaining search depth at the current node; a value of zero is not stored.
+ * @param score      Search score at the current ply; mate scores are normalized before storage.
+ * @param ply        Number of plies from the search root to the current node.
+ * @param score_kind Score kind: exact, lower bound, or upper bound.
+ * @param best_move  Best move found while searching the current position.
  */
 static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, int score, int ply,
                      XqSearchScoreKind score_kind, XqMove best_move)
@@ -620,7 +650,11 @@ static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, 
 }
 
 /**
- * 计算 color 方所有合法着法的机动性价值。
+ * @brief Computes the mobility value of all legal moves available to one side.
+ *
+ * @param pos   Position whose legal moves are evaluated; must not be null.
+ * @param color Side for which to generate and score legal moves.
+ * @return      Sum of the piece-specific mobility values for all generated legal moves.
  */
 static int evaluate_legal_moves(const XqPosition *pos, XqColor color)
 {
@@ -637,7 +671,17 @@ static int evaluate_legal_moves(const XqPosition *pos, XqColor color)
 }
 
 /**
- * 默认静态评估函数，基于材料和合法着法机动性，返回 perspective 方的局面评分。
+ * @brief Evaluates a position from the requested side's perspective using the built-in evaluator.
+ *
+ * The evaluator assigns fixed values to each piece type and subtracts the opponent's total material
+ * from the perspective side's total material.
+ *
+ * Legal-move mobility support is present but currently disabled.
+ *
+ * @param pos         Position to evaluate; must not be null.
+ * @param perspective Side for which a positive score is favorable.
+ * @param user        Unused user-data pointer, accepted for compatibility with `XqEvaluateFn`.
+ * @return            Static position score from `perspective`'s point of view.
  */
 int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user)
 {
@@ -658,9 +702,15 @@ int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective
 }
 
 /**
- * 静态评估函数
- * 根据输入的引擎适配器，计算 perspective 方在 *pos 下的局面评分
- * 如果输入的引擎适配器为空，则直接用 xq_engine_default_static_evaluate 函数评分
+ * @brief Evaluates a position through the configured engine adapter.
+ *
+ * If `engine` provides a custom static evaluator, the function invokes it with the adapter's user
+ * data. Otherwise, it falls back to `xq_engine_default_static_evaluate()`.
+ *
+ * @param engine      Engine adapter that may provide a custom evaluator; may be null.
+ * @param pos         Position to evaluate; must not be null.
+ * @param perspective Side for which a positive score is favorable.
+ * @return            Static position score from `perspective`'s point of view.
  */
 static int static_evaluate(const XqEngineAdapter *engine, const XqPosition *pos,
                            XqColor perspective)
@@ -671,20 +721,29 @@ static int static_evaluate(const XqEngineAdapter *engine, const XqPosition *pos,
 }
 
 /**
- * 返回走法的排序分数，分数越高越优先搜索。
- * 引擎未提供自定义评分函数时，使用 MVV-LVA 将吃子着法排在普通着法之前。
+ * @brief Computes a move-ordering score, with higher-scoring moves searched first.
  *
- * 默认公式为：
- *   CAPTURE_ORDER_BASE + 被吃棋子的价值 * 16 - 走子棋子的价值
+ * If the engine does not provide a custom scoring function, the default implementation uses an
+ * MVV-LVA-style formula to place captures before quiet moves:
  *
- * CAPTURE_ORDER_BASE 保证吃子着法整体排在普通着法之前；被吃棋子的价值
- * 乘以 16，使吃价值更高棋子的着法通常更靠前；减去走子棋子的价值，则在
- * 吃相同棋子时倾向于优先使用价值更低的棋子。例如兵吃车的排序分数高于
- * 车吃兵，兵吃炮的排序分数也高于车吃炮。
+ * `CAPTURE_ORDER_BASE + captured_piece_value * 16 - moving_piece_value`
  *
- * 这里的 16 是经验权重，并不保证严格的字典序 MVV-LVA。整个公式也不是
- * 对走后局面的真实评价，只是用于猜测哪些着法更可能较好并尽早触发剪枝；
- * 它只影响搜索效率，不影响完整 Alpha-Beta 搜索的正确结果。
+ * `CAPTURE_ORDER_BASE` ensures that captures as a group precede quiet moves. Multiplying the
+ * captured piece's value by 16 generally prioritizes more valuable victims, while subtracting the
+ * moving piece's value favors less valuable attackers when the victim is the same. For example, a
+ * pawn capturing a rook is ordered before a rook capturing a pawn, and a pawn capturing a cannon is
+ * ordered before a rook capturing a cannon.
+ *
+ * The factor 16 is an empirical weight and does not guarantee strict lexicographic MVV-LVA order.
+ * This formula is not an evaluation of the resulting position; it only predicts promising moves so
+ * that cutoffs occur earlier. It affects search efficiency but not the result of a complete
+ * alpha-beta search.
+ *
+ * @param engine Engine adapter that may provide a custom move-scoring callback; may be null.
+ * @param pos    Position in which `move` is being ordered; must not be null when a custom callback
+ *               needs it.
+ * @param move   Move for which to compute an ordering score.
+ * @return       Ordering score; higher values receive higher search priority.
  */
 static int move_order_score(const XqEngineAdapter *engine, const XqPosition *pos, XqMove move)
 {
@@ -699,7 +758,14 @@ static int move_order_score(const XqEngineAdapter *engine, const XqPosition *pos
 }
 
 /**
- * 预先计算每个走法的排序分数，并通过稳定插入排序按分数降序排列。
+ * @brief Sorts a move list by descending move-ordering score.
+ *
+ * Scores are computed once per move, and stable insertion sort preserves the relative order of
+ * moves with equal scores.
+ *
+ * @param engine Engine adapter used to score moves; may be null.
+ * @param pos    Position in which the moves are being ordered; must not be null.
+ * @param list   Move list to reorder in place; must not be null.
  */
 static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list)
 {
@@ -726,7 +792,12 @@ static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, Xq
 }
 
 /**
- * 按搜索分数稳定降序排列根着法。同分着法保留上一轮的相对顺序。
+ * @brief Sorts root moves stably by descending search score.
+ *
+ * Moves with equal scores retain their relative order from the previous iteration.
+ *
+ * @param moves Root-move array to reorder in place; must not be null.
+ * @param count Number of initialized entries in `moves`.
  */
 static void order_root_moves(ScoredMove *moves, int count)
 {
@@ -747,7 +818,13 @@ static void order_root_moves(ScoredMove *moves, int count)
 }
 
 /**
- * 判断两个走法是否相同。
+ * @brief Tests whether two moves have the same source and destination squares.
+ *
+ * The cached piece and captured-piece fields are intentionally ignored.
+ *
+ * @param a First move to compare.
+ * @param b Second move to compare.
+ * @return  True if both moves have identical source and destination squares; false otherwise.
  */
 static bool moves_equal(XqMove a, XqMove b)
 {
@@ -755,7 +832,11 @@ static bool moves_equal(XqMove a, XqMove b)
 }
 
 /**
- * 如果 list 中存在 move，则将它稳定移动到首位，并保持其他走法的相对顺序。
+ * @brief Moves a matching move to the front of a move list while preserving all other order.
+ *
+ * @param list Move list to modify in place; must not be null.
+ * @param move Move to prioritize, matched by source and destination squares.
+ * @return     True if the move was found and moved to the front; false otherwise.
  */
 static bool prioritize_move(XqMoveList *list, XqMove move)
 {
@@ -779,7 +860,14 @@ static bool prioritize_move(XqMoveList *list, XqMove move)
 }
 
 /**
- * 用 move 和它的子节点主变化路线构造当前节点的主变化路线。
+ * @brief Builds the current node's principal variation from a move and its child's variation.
+ *
+ * The child variation is truncated when necessary so the resulting line fits within
+ * `XQ_MAX_PV_MOVES`.
+ *
+ * @param pv       Output principal variation; must not be null.
+ * @param move     Best move at the current node, placed at the start of the variation.
+ * @param child_pv Child node's principal variation; may be null.
  */
 static void build_principal_variation(PrincipalVariation *pv, XqMove move,
                                       const PrincipalVariation *child_pv)
@@ -797,14 +885,19 @@ static void build_principal_variation(PrincipalVariation *pv, XqMove move,
 }
 
 /**
- * 沿足够深的 EXACT 条目重建主变化路线。每一步都从当前局面的伪合法着法
- * 中取出完整 XqMove，避免直接使用陈旧的 piece/captured 字段。重建期间会
- * 临时走子，结束前按相反顺序全部撤销，保证 pos 恢复原状
+ * @brief Reconstructs a principal variation from sufficiently deep exact table entries.
  *
- * @param table 用于查找后续 EXACT 条目的置换表，为 NULL 时输出空 PV
- * @param pos   主变化起点局面，必须非 NULL，函数返回前会恢复其内容
- * @param depth 最多重建的剩余搜索深度
- * @param pv    输出的主变化路线，必须非 NULL，原有内容会被清空
+ * At each step, the function obtains a complete `XqMove` from the current position's pseudo-legal
+ * move list instead of trusting potentially stale `piece` and `captured` fields in the cached move.
+ * It temporarily makes each move while reconstructing the line, then unmakes all moves in reverse
+ * order before returning so that `pos` is restored.
+ *
+ * @param table Transposition table used to find subsequent exact entries; may be null, in which
+ *              case an empty variation is produced.
+ * @param pos   Position at the start of the principal variation; must not be null and is restored
+ *              before the function returns.
+ * @param depth Maximum remaining search depth to reconstruct.
+ * @param pv    Output principal variation; must not be null and is cleared before reconstruction.
  */
 static void build_pv_from_tt(XqTranspositionTable *table, XqPosition *pos, unsigned depth,
                              PrincipalVariation *pv)
@@ -842,7 +935,16 @@ static void build_pv_from_tt(XqTranspositionTable *table, XqPosition *pos, unsig
 }
 
 /**
- * 逻辑类似 order_moves，只不过多谢带了排序所需要的积分
+ * @brief Orders moves for an explanation result and retains their ordering scores.
+ *
+ * This follows the same stable descending ordering as `order_moves()`, while also writing the score
+ * associated with each reordered move to the parallel `scores` array.
+ *
+ * @param engine Engine adapter used to score moves; may be null.
+ * @param pos    Position in which the moves are being ordered; must not be null.
+ * @param list   Move list to reorder in place; must not be null.
+ * @param scores Output array that receives one ordering score per reordered move; must have room
+ *               for at least `list->count` entries.
  */
 static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosition *pos,
                                     XqMoveList *list, int *scores)
@@ -873,11 +975,31 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
 }
 
 /**
- * 静态搜索函数，为了避免地平线效应，即恰好搜索到局面波动幅度大的策略树部分停止，对 negamax 搜索
- * 的叶子节点采用静态搜索。目前认为吃子、应将是比较明显让局势评分波动的着法，故次静态搜索囊括了这
- * 两类着法。depth 表示静态搜索内部深度，递归时逐层减一，到达
- * XQ_MAX_QUIESCENCE_DEPTH 后返回静态评估；ply 表示当前节点距离整次搜索根节点
- * 的层数，递归时逐层加一，用于计算将杀距离
+ * @brief Performs quiescence search at a negamax leaf.
+ *
+ * Quiescence search reduces the horizon effect, which occurs when the normal search stops in a
+ * tactically unstable part of the game tree. Captures and check evasions are currently treated as
+ * the moves most likely to cause large score swings, so those are the continuations searched here.
+ *
+ * `depth` is the internal quiescence depth. It decreases by one at each recursive call, and the
+ * function falls back to static evaluation after `XQ_MAX_QUIESCENCE_DEPTH` plies. `ply` is the
+ * current node's distance from the root of the full search. It increases at each recursive call and
+ * is used to encode mate distance.
+ *
+ * When the side to move is not in check, the static evaluation is used as the stand-pat score and
+ * only captures are searched. When the side to move is in check, stand pat is not allowed and every
+ * pseudo-legal evasion is searched. The function uses fail-hard alpha-beta semantics and therefore
+ * returns `beta` on a beta cutoff.
+ *
+ * @param engine  Engine adapter used for static evaluation and move ordering; may be null.
+ * @param pos     Current position; must not be null and is restored before the function returns.
+ * @param depth   Internal quiescence depth, decreasing from zero into negative values.
+ * @param ply     Number of plies from the root of the full search to the current node.
+ * @param alpha   Lower bound of the current alpha-beta search window.
+ * @param beta    Upper bound of the current alpha-beta search window.
+ * @param context Search context used for node counting and time control; may be null.
+ * @return        Quiescence score from the side-to-move perspective, or zero if the search is
+ *                stopped by the time limit.
  */
 static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth, int ply, int alpha,
                       int beta, SearchContext *context)
@@ -934,12 +1056,13 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
 }
 
 /**
- * 本象棋引擎的核心：alpha-beta 剪枝后的 Minimax 搜索，并采用了取负最大化的代码简化的写法
+ * @brief Searches a position with negamax and alpha-beta pruning.
  *
- * 首先，Minimax 搜索不再赘述，它就是基本的零和博弈游戏的对某一方最优局面评分的搜索函数，在
- * 己方局面中，搜索最优的走法，而在对方的局面中，搜索最差（对对方最优，即不把对方当傻子）走法
+ * Minimax is the standard search for the optimal score of one side in a zero-sum game. It selects
+ * the best move on that side's turn and the worst move on the opponent's turn, where "worst" means
+ * optimal for an opponent who is assumed to play correctly.
  *
- * 然后，在深入 alpha-beta 剪枝之前，先看这个例子：
+ * Consider the following tree before examining alpha-beta pruning in detail:
  *
  * MAX :       (1:>=x)
  *             /     \
@@ -947,26 +1070,50 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  *                   /           \
  * MAX :          (4:y)      (5:!(<=x),!(>=y))
  *
- * 假设这个局面树中，节点 2 评分为 x，节点 4 评分为 y，那么节点 1 的评分根据节点 2 就可知
- * 大于等于 x，于是如果节点 3 的评分小于等于 x，也不会影响已经计算的结果，记 !(exp) 的含义
- * 为如果节点的分值满足 exp，则不影响目前已计算结果，则为节点 3 标记一个 !(<=x)
- * 再根据节点 4 的评分得到节点 3 的评分 <= y，结合 3 的 !(<=x)，可以知道 5 的评分只要满足
- * <=x 或 >=y 就不会影响目前结果，于是我们就得到了一个计算 5 时的 alpha, beta 的例子，分别
- * 是 x, y
+ * Suppose node 2 has score `x` and node 4 has score `y`. Node 2 establishes that node 1 has a score
+ * of at least `x`; consequently, node 3 cannot change the result if its score is at most `x`. In
+ * the diagram, `!(expression)` means that satisfying `expression` cannot affect the result already
+ * found, so node 3 is marked `!(<=x)`. Node 4 also establishes that node 3 has a score no greater
+ * than `y`. Combining this with `!(<=x)` shows that node 5 cannot affect the result if its score is
+ * either at most `x` or at least `y`. Thus the alpha and beta values used to search node 5 are `x`
+ * and `y`, respectively.
  *
- * 接下来详细说一下计算 MAX 层节点评分时的 alpha-beta 剪枝逻辑，MIN 层同理，只是符号相反：
- * 因为计算 MAX 层节点过程中，或者说计算完某个该 MAX 层节点的子节点后，只能以 >=x 的方式
- * 更新父节点（比如上边那个例子中的 (2) 节点，在计算得到评分 x 后，父节点的范围变成 >= x）
- * 所以，只有计算完某个子节点让父节点评分值 >= beta 时，才跳过该 MAX 层剩余子节点的计算，即剪枝
- * 另外，当计算子节点的评分落入到了 (alpha, beta) 中，在以 >=x 的方式更新父节点后，得到父节点
- * 评分可能出现的范围与 (alpha, beta) 的交集包含于 (alpha, beta)，所以我们可以更新 alpha
- * 值为刚计算的子节点的评分
+ * More specifically, while evaluating a MAX node, each completed child can only raise the known
+ * lower bound of its parent. For example, after node 2 produces `x`, node 1 is known to be at least
+ * `x`. The remaining children of a MAX node can therefore be skipped only after one child raises
+ * the parent score to at least `beta`. This is the beta cutoff. If a child's score instead falls
+ * inside
+ * `(alpha, beta)`, the intersection between the parent's newly established range and the search
+ * window remains inside `(alpha, beta)`, so `alpha` can be raised to that child's score. The logic
+ * for a MIN node is symmetric with signs reversed.
  *
- * 最后，说下取负最大化的代码简化：通过对对手的局势评分取负，就将 Minimax 搜索转化为 "Maxmax
- * 搜索"，起到简化代码的作用
+ * Negamax simplifies the minimax implementation by negating the opponent's position score, thereby
+ * expressing both sides as maximizers with the same code path.
  *
- * 总结：相比 Minimax，alpha-beta 通过 alpha、beta 两个参数剪枝来提升性能；代价是当局面的
- * 真实评分落在窗口外时，返值可能不再是精确分数，而只是一个足以支持剪枝和决策的上界或下界。
+ * Compared with unpruned minimax, alpha-beta uses the `alpha` and `beta` bounds to skip irrelevant
+ * branches. The tradeoff is that when the true score lies outside the search window, the returned
+ * value may be only an upper or lower bound sufficient for pruning and decision-making rather than
+ * an exact score.
+ *
+ * The function probes the transposition table before generating moves, orders a valid hash move and
+ * the previous iteration's principal-variation move first, and stores the resulting exact score or
+ * bound after the node has been searched.
+ *
+ * @param engine        Engine adapter used for static evaluation and move ordering; may be null.
+ * @param table         Transposition table used for probing, move ordering, and storage; may be
+ *                      null.
+ * @param pos           Current position; must not be null and is restored before the function
+ *                      returns.
+ * @param depth         Remaining normal-search depth. At zero, quiescence search is entered.
+ * @param ply           Number of plies from the search root to the current node.
+ * @param alpha         Lower bound of the current alpha-beta search window.
+ * @param beta          Upper bound of the current alpha-beta search window.
+ * @param pv_hint       Optional principal-variation moves from the previous iteration.
+ * @param pv_hint_count Number of valid moves available in `pv_hint`.
+ * @param pv_out        Optional output for the best principal variation found at this node.
+ * @param context       Search context used for node counting and time control; may be null.
+ * @return              Search score from the side-to-move perspective, or zero if the search is
+ *                      stopped by the time limit.
  */
 static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, XqPosition *pos,
                    unsigned depth, int ply, int alpha, int beta, const XqMove *pv_hint,
@@ -1011,10 +1158,11 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
         return -XQ_MATE_SCORE + ply;
     order_moves(engine, pos, &list);
 
-    /* 例如当前要求 depth=6、窗口为 [50, 100]，TT 中旧条目是 depth=8、
-     * LOWER_BOUND=80、best_move=A。因为 80<beta，缓存不能截断搜索，但仍
-     * 提供 hash_move=A；若上一轮完整 PV 的首着是 B，则 pv_hint[0]=B，
-     * 此时 hash_move 与 pv_hint[0] 不相等。 */
+    /* For example, suppose the requested depth is 6, the window is [50, 100], and the table
+     * contains an older entry with depth=8, LOWER_BOUND=80, and best_move=A. Because 80 < beta,
+     * the cached score cannot produce a cutoff, but the entry still supplies hash_move=A. If the
+     * first move of the previous iteration's complete PV is B, then pv_hint[0]=B and the hash move
+     * differs from the PV move. */
     if (has_hash_move)
         (void)prioritize_move(&list, hash_move);
     if (pv_hint != NULL && pv_hint_count > 0)
@@ -1070,16 +1218,20 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
 }
 
 /**
- * 在搜索超时后，根据根着法最后完整完成的评分和深度选择返回着法。
- * 每个候选的修正评分为 score + completed_depth * depth_bonus；修正评分
- * 相同时优先选择完成深度更高的着法，评分和深度都相同时保留列表中更靠前
- * 的着法。completed_depth 为 0 的未完成着法不参与比较；如果没有任何着法
- * 完成搜索，则使用列表中的第一步作为保底结果。
+ * @brief Selects a root move after the search has timed out.
  *
- * @param moves       根着法及其最后完整完成的评分和深度，必须非 NULL
- * @param count       根着法数量，必须大于 0
- * @param depth_bonus 每多完成一层加入修正评分的深度可信奖励
- * @return            按修正评分和稳定平分规则选出的根着法
+ * Each candidate receives an adjusted score of
+ * `score + completed_depth * depth_bonus`. Ties in adjusted score favor the move searched to a
+ * greater completed depth. If both score and depth are tied, the earlier move in the list is kept.
+ *
+ * Moves with a `completed_depth` of zero do not participate. If no move completed a search, the
+ * first move in the list is used as a fallback.
+ *
+ * @param moves       Root moves and their most recently completed scores and depths; must not be
+ *                    null.
+ * @param count       Number of root moves; must be greater than zero.
+ * @param depth_bonus Confidence bonus added for each completed ply of search.
+ * @return            Root move selected by adjusted score and the stable tie-breaking rules.
  */
 static XqMove select_timed_root_move(const ScoredMove *moves, int count, int depth_bonus)
 {
@@ -1107,8 +1259,23 @@ static XqMove select_timed_root_move(const ScoredMove *moves, int count, int dep
 }
 
 /**
- * 内部搜索算法。从深度 1 迭代搜索到 depth，并使用上一轮全部根着法的
- * 评分顺序指导下一轮搜索。
+ * @brief Runs the built-in iterative-deepening search.
+ *
+ * The function searches from depth 1 through the requested maximum depth. Scores from all root
+ * moves in the previous completed iteration determine their ordering in the next iteration, while
+ * the previous principal variation supplies an additional ordering hint.
+ *
+ * If the time limit expires during an iteration, the function selects among the root moves whose
+ * searches completed.
+ *
+ * @param engine    Engine adapter used for evaluation, move ordering, and optional transposition
+ *                  table access; may be null.
+ * @param pos       Position to search; must not be null and is restored before the function
+ *                  returns.
+ * @param limits    Depth, time, depth-bonus, and clock-mode configuration; must not be null.
+ * @param best_move Output that receives the selected move; must not be null.
+ * @return          True if at least one root move exists and a move is selected; false if the
+ *                  position is invalid for searching or contains no pseudo-legal moves.
  */
 static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
                            const XqSearchLimits *limits, XqMove *best_move)
@@ -1211,7 +1378,20 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
 }
 
 /**
- * 引擎搜索算法，引擎为空或引擎搜索函数的话调用 builtin_search
+ * @brief Finds the best move using a custom search callback or the built-in search.
+ *
+ * The requested depth is converted to default search limits. If `engine` provides a custom search
+ * callback, that callback is invoked directly.
+ *
+ * Otherwise, `builtin_search()` is used.
+ *
+ * @param engine    Engine adapter that may provide a custom search callback; may be null.
+ * @param pos       Position to search. The built-in search requires a non-null position and
+ *                  restores it before returning.
+ * @param depth     Requested maximum search depth. The built-in search treats zero as one.
+ * @param best_move Output that receives the selected move; must not be null.
+ * @return          True if a best move was found and written; false on invalid input, when no move
+ *                  is available, or when the custom search callback fails.
  */
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth,
                               XqMove *best_move)
@@ -1226,17 +1406,23 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, un
 }
 
 /**
- * 按指定深度、时间和深度奖励限制为当前局面寻找最佳着法。
- * 内置搜索会执行迭代加深并在超时时使用 limits 中的深度奖励选择结果；
- * max_depth 为 0 时按 1 处理。若 engine 提供自定义 search 回调，则只把规范化
- * 后的最大深度传给该回调，时间限制和深度奖励由自定义搜索自行管理。
+ * @brief Finds the best move under explicit depth and time limits.
  *
- * @param engine    引擎适配器，可以为 NULL；未提供 search 时使用内置搜索
- * @param pos       要搜索的当前局面，内置搜索要求非 NULL，搜索结束后保持局面不变
- * @param limits    搜索深度、时间上限、深度奖励和计时模式配置，必须非 NULL
- * @param best_move 输出选出的最佳着法，必须非 NULL
- * @return          成功找到并写入最佳着法时返回 true；参数无效、无可搜索着法或自定义搜索失败时返回
- *                  false
+ * The built-in search performs iterative deepening and uses the depth bonus in `limits` to choose a
+ * result after a timeout. A `max_depth` of zero is normalized to one.
+ *
+ * If `engine` provides a custom search callback, only the normalized maximum depth is passed to it;
+ * the custom search remains responsible for its own time limit and depth bonus policy.
+ *
+ * @param engine    Engine adapter; may be null. The built-in search is used when no custom search
+ *                  callback is provided.
+ * @param pos       Position to search. The built-in search requires a non-null position and leaves
+ *                  it unchanged after the search.
+ * @param limits    Search depth, time limit, depth bonus, and clock-mode configuration; must not be
+ *                  null.
+ * @param best_move Output that receives the selected move; must not be null.
+ * @return          True if a best move was found and written; false on invalid input, when no move
+ *                  is available, or when the custom search callback fails.
  */
 bool xq_engine_find_best_move_with_limits(const XqEngineAdapter *engine, XqPosition *pos,
                                           const XqSearchLimits *limits, XqMove *best_move)
@@ -1254,7 +1440,21 @@ bool xq_engine_find_best_move_with_limits(const XqEngineAdapter *engine, XqPosit
 }
 
 /**
- * 带有解释信息的引擎搜索算法，引擎为空或引擎搜索函数为空的话调用 builtin_search
+ * @brief Explains one ply of the normal search at the current position.
+ *
+ * Moves are visited in search order. For each visited move, the result records the alpha value
+ * before the move, beta, recursive score, ordering score, bound kind, and whether the move became
+ * best or caused a cutoff. The recursive searches do not use a transposition table or time limit.
+ *
+ * The adapter's custom search callback is not invoked; only its evaluation and move-ordering
+ * callbacks are relevant.
+ *
+ * @param engine Engine adapter used for evaluation and move ordering; may be null.
+ * @param pos    Position to explain; must not be null and is restored before the function returns.
+ * @param depth  Remaining normal-search depth; zero is normalized to one.
+ * @param result Output explanation structure; must not be null and is initialized by the function.
+ * @return       True if at least one move was explained; false on invalid input or when no move is
+ *               available.
  */
 bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos,
                                       unsigned depth, XqExplainResult *result)
@@ -1328,8 +1528,19 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
 }
 
 /**
- * 解释当前局面的一层静态搜索：先展示 stand pat，再展示静态搜索实际会继续看的吃子/应将着法。
- * 每个着法的 score 仍由递归 quiescence 计算，避免解释结果和真实搜索结果不一致。
+ * @brief Explains one ply of quiescence search at the current position.
+ *
+ * The result first exposes the stand-pat evaluation when it is legal, then records the captures or
+ * check evasions that quiescence search actually examines.
+ *
+ * Each move's score is still computed by a recursive call to `quiescence()` so that the explanation
+ * remains consistent with the real search.
+ *
+ * @param engine Engine adapter used for static evaluation and move ordering; may be null.
+ * @param pos    Position to explain; must not be null and is restored before the function returns.
+ * @param result Output explanation structure; must not be null and is initialized by the function.
+ * @return       True when an explanation is produced; false if `pos` or `result` is null or the
+ *               side to move has no king.
  */
 bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos,
                                           XqQuiescenceExplainResult *result)
