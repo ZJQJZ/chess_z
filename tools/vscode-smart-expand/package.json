@@ -1,0 +1,125 @@
+{
+  "name": "smart-expand",
+  "displayName": "Smart Expand Selection",
+  "description": "Expand selections through words, wrappers, sentences, lines, and paragraphs.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onCommand:smartExpand.expand",
+    "onCommand:smartExpand.shrink"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "smartExpand.expand",
+        "title": "Expand Selection",
+        "category": "Smart Expand"
+      },
+      {
+        "command": "smartExpand.shrink",
+        "title": "Shrink Selection",
+        "category": "Smart Expand"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "smartExpand.expand",
+        "key": "ctrl+q",
+        "mac": "ctrl+q",
+        "when": "editorTextFocus && !inDebugRepl"
+      },
+      {
+        "command": "smartExpand.shrink",
+        "key": "ctrl+shift+q",
+        "mac": "ctrl+shift+q",
+        "when": "editorTextFocus && !inDebugRepl"
+      }
+    ],
+    "configuration": {
+      "title": "Smart Expand",
+      "properties": {
+        "smartExpand.includeLine": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include the complete physical line as an expansion level."
+        },
+        "smartExpand.wrapperPairs": {
+          "type": "array",
+          "default": [
+            ["(", ")"],
+            ["[", "]"],
+            ["{", "}"],
+            ["<", ">"],
+            ["（", "）"],
+            ["［", "］"],
+            ["｛", "｝"],
+            ["＜", "＞"],
+            ["【", "】"],
+            ["〔", "〕"],
+            ["〖", "〗"],
+            ["〘", "〙"],
+            ["〚", "〛"],
+            ["〈", "〉"],
+            ["《", "》"],
+            ["\"", "\""],
+            ["'", "'"],
+            ["“", "”"],
+            ["‘", "’"],
+            ["„", "“"],
+            ["‚", "‘"],
+            ["«", "»"],
+            ["‹", "›"],
+            ["「", "」"],
+            ["『", "』"],
+            ["〝", "〞"],
+            ["＂", "＂"],
+            ["＇", "＇"],
+            ["`", "`"],
+            ["```", "```"],
+            ["'''", "'''"],
+            ["\"\"\"", "\"\"\""]
+          ],
+          "description": "Complete list of wrapper pairs. Each entry is [opening, closing].",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "smartExpand.enableMarkdownPairs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Recognize **, __, and ~~ as wrapper pairs."
+        },
+        "smartExpand.sentenceTerminators": {
+          "type": "string",
+          "default": ".!?。！？；;…",
+          "description": "Characters that terminate sentences."
+        },
+        "smartExpand.maxParseCharacters": {
+          "type": "integer",
+          "default": 1000000,
+          "minimum": 1000,
+          "description": "Maximum paragraph length for sentence and wrapper parsing."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
