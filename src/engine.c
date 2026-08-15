@@ -188,8 +188,8 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
  *
  * A non-forced check reads the clock only when the node count is a multiple of 1024, reducing the
  * overhead of frequent system clock queries. A forced check reads the clock immediately. When a
- * timeout is detected, `stopped` is set to true, and subsequent calls will continue to report that
- * the search has stopped.
+ * timeout is detected, `stopped` is set to true, and subsequent calls continue to report that the
+ * search has stopped.
  *
  * @param context The current search context. If null, the search is considered active and no time
  *                check is performed.
@@ -323,12 +323,15 @@ void xq_transposition_table_get_stats(const XqTranspositionTable *table,
 }
 
 /**
- * 创建一份内置搜索的默认限制配置。
- * 默认配置将搜索时间限制为 3 秒，使用单调墙钟计时，并为根着法每多完成
- * 一层增加 70 分深度可信奖励。max_depth 为 0 时会规范化为最小深度 1。
+ * @brief Creates a default limit configuration for the built-in search.
  *
- * @param max_depth 迭代加深允许达到的最大搜索深度，0 等同于 1
- * @return          初始化完成的 XqSearchLimits 配置值
+ * The default configuration limits the search time to 3 seconds, uses a monotonic wall clock, and
+ * awards each root move a 70-point depth-confidence bonus for every additional completed ply.
+ * `max_depth` is normalized to the minimum depth of 1 if its input value is 0.
+ *
+ * @param max_depth Maximum search depth for iterative deepening search; normalized to 1 if set to
+ *                  0.
+ * @return          The normalized default limit configuration.
  */
 XqSearchLimits xq_search_limits_default(unsigned max_depth)
 {
@@ -342,9 +345,13 @@ XqSearchLimits xq_search_limits_default(unsigned max_depth)
 }
 
 /**
- * 开始新一轮迭代加深时递增置换表轮次
- * generation 为 uint8_t，达到上限后按无符号整数规则回绕
- * table 为 NULL 时不执行任何操作
+ * @brief Increments the transposition table generation at the start of a new iterative deepening
+ *        iteration.
+ *
+ * The `generation` field of `table` is a `uint8_t`, so it wraps around according to unsigned
+ * integer rules when it reaches its maximum value. Does nothing if `table` is null.
+ *
+ * @param table The transposition table whose generation is incremented; may be null.
  */
 static void tt_new_generation(XqTranspositionTable *table)
 {
@@ -353,12 +360,19 @@ static void tt_new_generation(XqTranspositionTable *table)
 }
 
 /**
- * 使用 key 的低位定位四路桶，再遍历桶并比较完整的 64 位 key
- * 不同 key 落入同一桶属于正常的桶索引碰撞，可由完整 key 区分
- * 不同局面仍可能产生完全相同的 64 位 key；与 Java HashMap 不同，
- * 这里没有额外保存并比较完整局面，因为这会显著增加条目大小、
- * 内存带宽和比较开销，当前实现接受这种概率极低的完整哈希碰撞
- * table 为空或桶内没有匹配条目时返回 NULL
+ * @brief Uses the low bits of `key` to index into the bucket array, then searches the four entries
+ *        in the selected bucket for a valid entry whose full 64-bit key matches `key`.
+ *
+ * Two keys with the same low-bit index but different full keys constitute a bucket-index collision
+ * and can be distinguished by comparing their full keys. An entry whose depth is zero is treated as
+ * an empty slot and does not match anything.
+ * Different positions may generate the same 64-bit Zobrist key. The transposition table does not
+ * store complete position data for secondary verification to avoid increasing entry size and
+ * memory-access overhead. It therefore accepts the extremely low probability of such a collision.
+ *
+ * @param table The transposition table to search; may be null.
+ * @param key   The full 64-bit position hash to look up.
+ * @return      A pointer to the matching entry, or null if no matching entry exists.
  */
 static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table, uint64_t key)
 {
@@ -376,10 +390,21 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table, uint64_t
 }
 
 /**
- * 将相对于当前搜索根节点的评分转换为适合写入置换表的评分
- * 将杀分数包含当前 ply，需要加减 ply 消除到达路径的影响，使同一局面
- * 从不同层数命中时仍能正确恢复将杀距离；普通局面评分保持不变
- * 读取条目时由 score_from_tt() 执行反向转换
+ * @brief Converts a score relative to the current search root into a form suitable for storage in
+ *        the transposition table.
+ *
+ * A mate score is relative to the search root, so its value depends on the current ply. The same
+ * position reached via different paths may have different scores because it occurs at different ply
+ * depths. Before storing the score in the transposition table, the function adds ply to a positive
+ * mate score or subtracts ply from a negative mate score, thereby eliminating the effect of the
+ * path length used to reach the current position. When the score is retrieved from the
+ * transposition table, `score_from_tt()` uses the current ply at the point of lookup to restore the
+ * mate score relative to the search root. Non-mate scores do not depend on ply and therefore remain
+ * unchanged.
+ *
+ * @param score Score obtained at the current search node.
+ * @param ply   Number of plies from the search root to the current node.
+ * @return      Normalized score suitable for storage in the transposition table.
  */
 static int score_to_tt(int score, int ply)
 {
@@ -391,7 +416,14 @@ static int score_to_tt(int score, int ply)
 }
 
 /**
- * score_to_tt() 的逆向转换，将置换表评分恢复为当前 ply 下的搜索评分
+ * @brief 将置换表中归一化后的评分恢复为当前搜索层级下的评分。
+ *
+ * 本函数是 score_to_tt() 的逆向转换。对于将杀分数，根据当前节点距离搜索根节点
+ * 的层数恢复将杀距离；普通局面评分保持不变。
+ *
+ * @param score 从置换表读取的归一化评分。
+ * @param ply   当前节点距离搜索根节点的层数。
+ * @return      当前 ply 下可供搜索使用的评分。
  */
 static int score_from_tt(int score, int ply)
 {
