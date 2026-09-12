@@ -323,9 +323,9 @@ def _find_doc_comments(source: str) -> list[tuple[int, int]]:
                 is_documentation = index + 2 < len(source) and source[index + 2] == "*"
                 end = source.find("*/", index + 2)
                 if end == -1:
+                    line_number = len(re.findall(r"\r\n|\n|\r", source[:index])) + 1
                     raise FormatError(
-                        f"unterminated block comment at line "
-                        f"{len(re.findall(r'\r\n|\n|\r', source[:index])) + 1}"
+                        f"unterminated block comment at line {line_number}"
                     )
                 if is_documentation:
                     ranges.append((index, end + 2))
