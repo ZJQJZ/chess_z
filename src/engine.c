@@ -128,6 +128,7 @@ static uint64_t monotonic_time_ms(void)
  * @brief Reads the CPU time consumed by the current process and converts it to milliseconds.
  *
  * CPU time counts only the time during which the process is actively executing on the processor.
+ *
  * Time spent waiting or sleeping is generally not included. Fractions of a millisecond are
  * discarded when converting to integer milliseconds.
  *
@@ -145,6 +146,11 @@ static uint64_t cpu_time_ms(void)
 
 /**
  * @brief Reads the current time according to the search timing mode.
+ *
+ * Two modes support different search budgets: monotonic wall-clock time limits how long the user
+ * waits, while CPU time budgets processor work, generally excluding time spent waiting or
+ * descheduled. Wall-clock mode suits interactive play; CPU mode helps compare computation costs but
+ * does not guarantee a real-time response deadline.
  *
  * @param mode Timing mode. `XQ_SEARCH_TIME_CPU` uses process CPU time; all other values use
  *             monotonic wall-clock time.
