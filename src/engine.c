@@ -89,11 +89,11 @@ struct XqTranspositionTable
  * Windows uses a high-resolution performance counter, while other platforms use
  * `clock_gettime(CLOCK_MONOTONIC)`. Any fractional millisecond is discarded during conversion.
  *
- * @return The number of milliseconds elapsed since a platform-specific fixed reference point, or 0
- *         if the clock cannot be read. The value alone is meaningless; only the difference between
- *         two calls is meaningful.
+ * @return Milliseconds elapsed since a platform-specific fixed reference point, or -1 if the clock
+ *         cannot be read. This is not calendar time; use it to measure elapsed time or compare
+ *         deadlines based on the same clock.
  */
-static uint64_t monotonic_time_ms(void)
+static int64_t monotonic_time_ms(void)
 {
 #ifdef _WIN32
     LARGE_INTEGER counter;
@@ -108,8 +108,8 @@ static uint64_t monotonic_time_ms(void)
      */
     if (!QueryPerformanceFrequency(&frequency) || !QueryPerformanceCounter(&counter) ||
         frequency.QuadPart <= 0)
-        return 0;
-    return (uint64_t)((long double)counter.QuadPart * 1000.0L / (long double)frequency.QuadPart);
+        return -1;
+    return (int64_t)((long double)counter.QuadPart * 1000.0L / (long double)frequency.QuadPart);
 #else
     struct timespec now;
 
@@ -119,8 +119,8 @@ static uint64_t monotonic_time_ms(void)
      * nanoseconds stored in `now.tv_nsec`. The final return value discards any fractional
      * millisecond. */
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-        return 0;
-    return (uint64_t)now.tv_sec * UINT64_C(1000) + (uint64_t)now.tv_nsec / UINT64_C(1000000);
+        return -1;
+    return (int64_t)now.tv_sec * INT64_C(1000) + (int64_t)now.tv_nsec / INT64_C(1000000);
 #endif
 }
 
@@ -132,15 +132,15 @@ static uint64_t monotonic_time_ms(void)
  * discarded when converting to integer milliseconds.
  *
  * @return The CPU time, in milliseconds, consumed by the current process since it started; returns
- *         0 if the time cannot be obtained.
+ *         -1 if the time cannot be obtained. A zero reading is valid.
  */
-static uint64_t cpu_time_ms(void)
+static int64_t cpu_time_ms(void)
 {
     clock_t now = clock();
 
     if (now == (clock_t)-1)
-        return 0;
-    return (uint64_t)((double)now * 1000.0 / (double)CLOCKS_PER_SEC);
+        return -1;
+    return (int64_t)((double)now * 1000.0 / (double)CLOCKS_PER_SEC);
 }
 
 /**
@@ -153,10 +153,10 @@ static uint64_t cpu_time_ms(void)
  *
  * @param mode Timing mode. `XQ_SEARCH_TIME_CPU` uses process CPU time; all other values use
  *             monotonic wall-clock time.
- * @return     The current time in milliseconds from the selected clock, or 0 if the underlying
+ * @return     The current time in milliseconds from the selected clock, or -1 if the underlying
  *             clock cannot be read.
  */
-static uint64_t search_time_ms(XqSearchTimeMode mode)
+static int64_t search_time_ms(XqSearchTimeMode mode)
 {
     return mode == XQ_SEARCH_TIME_CPU ? cpu_time_ms() : monotonic_time_ms();
 }
@@ -167,12 +167,14 @@ static uint64_t search_time_ms(XqSearchTimeMode mode)
  * The function resets the node count and stop state, normalizes the timing mode, and calculates the
  * absolute deadline when the time limit is nonzero. A zero time limit disables timeout checks.
  *
+ * If the clock cannot be read for a timed search, the search is marked as stopped.
+ *
  * @param context Search context to initialize; must not be null.
  * @param limits  Depth, time, bonus, and timing mode configuration; must not be null.
  */
 static void search_context_init(SearchContext *context, const XqSearchLimits *limits)
 {
-    uint64_t now;
+    int64_t now;
 
     memset(context, 0, sizeof(*context));
     context->time_mode =
@@ -182,10 +184,15 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
 
     now = search_time_ms(context->time_mode);
     context->time_limited = true;
-    if (UINT64_MAX - now < limits->time_limit_ms)
+    if (now < 0)
+    {
+        context->stopped = true;
+        return;
+    }
+    if (UINT64_MAX - (uint64_t)now < limits->time_limit_ms)
         context->deadline_ms = UINT64_MAX;
     else
-        context->deadline_ms = now + limits->time_limit_ms;
+        context->deadline_ms = (uint64_t)now + limits->time_limit_ms;
 }
 
 /**
@@ -193,23 +200,26 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
  *
  * A non-forced check reads the clock only when the node count is a multiple of 1024, reducing the
  * overhead of frequent system clock queries. A forced check reads the clock immediately. When a
- * timeout is detected, `stopped` is set to true, and subsequent calls continue to report that the
- * search has stopped.
+ * timeout or clock read failure is detected, `stopped` is set to true, and subsequent calls
+ * continue to report that the search has stopped.
  *
  * @param context The current search context. If null, the search is considered active and no time
  *                check is performed.
  * @param force   If true, checks the time immediately; if false, checks only when the node count is
  *                a multiple of 1024.
- * @return        Returns true if the search has already stopped or if this check detects a timeout;
- *                otherwise, returns false.
+ * @return        Returns true if the search has already stopped, the time limit is reached, or the
+ *                clock cannot be read; otherwise, returns false.
  */
 static bool search_check_time(SearchContext *context, bool force)
 {
+    int64_t now;
+
     if (context == NULL || context->stopped || !context->time_limited)
         return context != NULL && context->stopped;
     if (!force && (context->nodes & UINT64_C(1023)) != 0)
         return false;
-    if (search_time_ms(context->time_mode) >= context->deadline_ms)
+    now = search_time_ms(context->time_mode);
+    if (now < 0 || (uint64_t)now >= context->deadline_ms)
         context->stopped = true;
     return context->stopped;
 }
