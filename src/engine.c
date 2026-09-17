@@ -1164,9 +1164,9 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
     order_moves(engine, pos, &list);
 
     /* For example, suppose the requested depth is 6, the window is [50, 100], and the table
-     * contains an older entry with depth=8, LOWER_BOUND=80, and best_move=A. Because 80 < beta,
-     * the cached score cannot produce a cutoff, but the entry still supplies hash_move=A. If the
-     * first move of the previous iteration's complete PV is B, then pv_hint[0]=B and the hash move
+     * contains an older entry with depth=8, LOWER_BOUND=80, and best_move=A. Because 80 < beta, the
+     * cached score cannot produce a cutoff, but the entry still supplies hash_move=A. If the first
+     * move of the previous iteration's complete PV is B, then pv_hint[0]=B and the hash move
      * differs from the PV move. */
     if (has_hash_move)
         (void)prioritize_move(&list, hash_move);
