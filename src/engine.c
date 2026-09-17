@@ -125,14 +125,17 @@ static int64_t monotonic_time_ms(void)
 }
 
 /**
- * @brief Reads the CPU time consumed by the current process and converts it to milliseconds.
+ * @brief Reads `clock()` and converts its result to integer milliseconds.
  *
- * CPU time counts only the time during which the process is actively executing on the processor.
- * Time spent waiting or sleeping is generally not included. Fractions of a millisecond are
- * discarded when converting to integer milliseconds.
+ * On implementations conforming to ISO C, `clock()` reports processor time consumed by the process
+ * since an implementation-defined reference point associated with process startup. Time spent
+ * sleeping or waiting without using the CPU is excluded. The Microsoft C runtime instead reports
+ * elapsed wall-clock time since process startup, including time spent sleeping or waiting.
  *
- * @return The CPU time, in milliseconds, consumed by the current process since it started; returns
- *         -1 if the time cannot be obtained. A zero reading is valid.
+ * Fractional milliseconds are discarded during conversion.
+ *
+ * @return The `clock()` reading converted to milliseconds, or `-1` if `clock()` returns `(clock_t)-1`.
+ *         A reading of `0` is valid.
  */
 static int64_t cpu_time_ms(void)
 {
