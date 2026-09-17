@@ -128,7 +128,6 @@ static uint64_t monotonic_time_ms(void)
  * @brief Reads the CPU time consumed by the current process and converts it to milliseconds.
  *
  * CPU time counts only the time during which the process is actively executing on the processor.
- *
  * Time spent waiting or sleeping is generally not included. Fractions of a millisecond are
  * discarded when converting to integer milliseconds.
  *
@@ -1226,9 +1225,9 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
 /**
  * @brief Selects a root move after the search has timed out.
  *
- * Each candidate receives an adjusted score of
- * `score + completed_depth * depth_bonus`. Ties in adjusted score favor the move searched to a
- * greater completed depth. If both score and depth are tied, the earlier move in the list is kept.
+ * Each candidate receives an adjusted score of `score + completed_depth * depth_bonus`. Ties in
+ * adjusted score favor the move searched to a greater completed depth. If both score and depth are
+ * tied, the earlier move in the list is kept.
  *
  * Moves with a `completed_depth` of zero do not participate. If no move completed a search, the
  * first move in the list is used as a fallback.
