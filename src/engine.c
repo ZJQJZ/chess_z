@@ -1104,6 +1104,19 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  * the previous iteration's principal-variation move first, and stores the resulting exact score or
  * bound after the node has been searched.
  *
+ * Time control is shared across recursive calls, including quiescence search, through `context`.
+ * On entry, `search_enter_node()` counts the node and checks for a stop request. With a time limit
+ * enabled, it reads the configured clock every 1024 nodes and sets `context->stopped` when the
+ * deadline is reached. These periodic checks do not guarantee an exact cutoff at the deadline.
+ * A null context disables node counting and time checks; a context with no time limit still counts
+ * nodes and honors an existing stop request.
+ *
+ * After each recursive child search, the move is undone before checking `context->stopped`. If
+ * stopped, the function returns zero immediately, without using the child's score or storing the
+ * interrupted node in the transposition table. The zero is an interruption placeholder, not a
+ * draw evaluation: callers must check `context->stopped` and discard the score and any partial
+ * `pv_out`. The root search then selects a move from previously completed search results.
+ *
  * @param engine        Engine adapter used for static evaluation and move ordering; may be null.
  * @param table         Transposition table used for probing, move ordering, and storage; may be
  *                      null.
