@@ -134,8 +134,8 @@ static int64_t monotonic_time_ms(void)
  *
  * Fractional milliseconds are discarded during conversion.
  *
- * @return The `clock()` reading converted to milliseconds, or `-1` if `clock()` returns `(clock_t)-1`.
- *         A reading of `0` is valid.
+ * @return The `clock()` reading converted to milliseconds, or `-1` if `clock()` returns
+ *         `(clock_t)-1`. A reading of `0` is valid.
  */
 static int64_t cpu_time_ms(void)
 {
