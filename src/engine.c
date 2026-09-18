@@ -738,10 +738,10 @@ static int static_evaluate(const XqEngineAdapter *engine, const XqPosition *pos,
 }
 
 /**
- * @brief Computes a move-ordering score, with higher-scoring moves searched first.
+ * @brief Computes a move-ordering score using the built-in scoring function.
  *
- * If the engine does not provide a custom scoring function, the default implementation uses an
- * MVV-LVA-style formula to place captures before quiet moves:
+ * Quiet moves receive a score of `0`. Captures use an MVV-LVA-style formula to place them before
+ * quiet moves:
  *
  * `CAPTURE_ORDER_BASE + captured_piece_value * 16 - moving_piece_value`
  *
@@ -756,9 +756,32 @@ static int static_evaluate(const XqEngineAdapter *engine, const XqPosition *pos,
  * that cutoffs occur earlier. It affects search efficiency but not the result of a complete
  * alpha-beta search.
  *
- * @param engine Engine adapter that may provide a custom move-scoring callback; may be null.
- * @param pos    Position in which `move` is being ordered; must not be null when a custom callback
- *               needs it.
+ * @param pos  Unused position pointer, accepted for compatibility with `XqMoveScoreFn`.
+ * @param move Move for which to compute an ordering score.
+ * @param user Unused user-data pointer, accepted for compatibility with `XqMoveScoreFn`.
+ * @return     Ordering score; higher values receive higher search priority.
+ */
+int xq_engine_default_move_order_score(const XqPosition *pos, XqMove move, void *user)
+{
+    (void)pos;
+    (void)user;
+
+    if (move.captured == XQ_EMPTY_PIECE)
+        return 0;
+
+    return CAPTURE_ORDER_BASE + piece_values[xq_piece_type(move.captured)] * 16 -
+           piece_values[xq_piece_type(move.piece)];
+}
+
+/**
+ * @brief Computes a move-ordering score through the configured engine adapter.
+ *
+ * If `engine` provides a custom move-scoring callback, the function invokes it with the adapter's
+ * user data. Otherwise, it falls back to `xq_engine_default_move_order_score()`.
+ *
+ * @param engine Engine adapter that may provide a custom move-scoring callback; may be `NULL`.
+ * @param pos    Position in which `move` is being ordered; must not be `NULL` when a custom
+ *               callback needs it.
  * @param move   Move for which to compute an ordering score.
  * @return       Ordering score; higher values receive higher search priority.
  */
@@ -766,12 +789,7 @@ static int move_order_score(const XqEngineAdapter *engine, const XqPosition *pos
 {
     if (engine != NULL && engine->score_move != NULL)
         return engine->score_move(pos, move, engine->user);
-
-    if (move.captured == XQ_EMPTY_PIECE)
-        return 0;
-
-    return CAPTURE_ORDER_BASE + piece_values[xq_piece_type(move.captured)] * 16 -
-           piece_values[xq_piece_type(move.piece)];
+    return xq_engine_default_move_order_score(pos, move, NULL);
 }
 
 /**

@@ -90,6 +90,7 @@ typedef struct XqQuiescenceExplainResult
 } XqQuiescenceExplainResult;
 
 int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user);
+int xq_engine_default_move_order_score(const XqPosition *pos, XqMove move, void *user);
 XqTranspositionTable *xq_transposition_table_create(void);
 void xq_transposition_table_clear(XqTranspositionTable *table);
 void xq_transposition_table_destroy(XqTranspositionTable *table);
