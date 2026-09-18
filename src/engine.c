@@ -635,18 +635,17 @@ static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, 
             target = entry;
             break;
         }
+
+        retention = tt_retention_score(entry, table->generation);
         if (entry->key == key)
         {
-            retention = tt_retention_score(entry, table->generation);
             entry->generation = table->generation;
-            if (incoming_score >= retention)
-                target = entry;
-            else
+            if (incoming_score < retention)
                 return;
+            target = entry;
             break;
         }
 
-        retention = tt_retention_score(entry, table->generation);
         if (retention < weakest_score)
         {
             weakest_score = retention;
