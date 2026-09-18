@@ -939,13 +939,13 @@ static void build_pv_from_tt(XqTranspositionTable *table, XqPosition *pos, unsig
 {
     unsigned remaining = depth;
     int made_count = 0;
-    int i;
 
     pv->count = 0;
     while (remaining > 0 && pv->count < XQ_MAX_PV_MOVES)
     {
         XqTranspositionEntry *entry = tt_find_entry(table, xq_position_hash(pos));
         XqMoveList list;
+        int i;
 
         if (entry == NULL || entry->score_kind != XQ_SEARCH_SCORE_EXACT ||
             (unsigned)entry->depth < remaining)
@@ -965,7 +965,7 @@ static void build_pv_from_tt(XqTranspositionTable *table, XqPosition *pos, unsig
         --remaining;
     }
 
-    for (i = made_count - 1; i >= 0; --i)
+    for (int i = made_count - 1; i >= 0; --i)
         xq_position_unmake_move(pos, pv->moves[i]);
 }
 
