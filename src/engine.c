@@ -922,10 +922,20 @@ static void build_principal_variation(PrincipalVariation *pv, XqMove move,
 /**
  * @brief Reconstructs a principal variation from sufficiently deep exact table entries.
  *
- * At each step, the function obtains a complete `XqMove` from the current position's pseudo-legal
- * move list instead of trusting potentially stale `piece` and `captured` fields in the cached move.
- * It temporarily makes each move while reconstructing the line, then unmakes all moves in reverse
- * order before returning so that `pos` is restored.
+ * At each step, the function matches the cached best move by source and destination against the
+ * current position's pseudo-legal move list, then uses the complete `XqMove` from that list. For an
+ * identical position and a correctly stored entry, the move should be present and its `piece` and
+ * `captured` fields should agree; cache age alone does not invalidate those fields.
+ *
+ * A missing move is unexpected and may indicate a full 64-bit hash collision, incorrect hash
+ * updates during move making or unmaking, inconsistent move generation, or an incorrectly stored or
+ * corrupted entry. A bucket-index collision alone cannot explain it because lookup also checks the
+ * full key. As a defensive measure, reconstruction stops at the first unmatched move and keeps the
+ * prefix already collected. Matching a pseudo-legal move does not verify that the moving side's
+ * king remains safe, nor does it rule out a full hash collision.
+ *
+ * The function temporarily makes each move while reconstructing the line, then unmakes all moves
+ * in reverse order before returning so that `pos` is restored.
  *
  * @param table Transposition table used to find subsequent exact entries; may be null, in which
  *              case an empty variation is produced.
