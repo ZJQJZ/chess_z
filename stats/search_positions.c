@@ -89,6 +89,9 @@ int main(int argc, char **argv)
     XqEngineAdapter engine;
     XqSearchLimits limits = xq_search_limits_default();
 
+    limits.max_depth = 6;
+    limits.time_limit_ms = 0;
+
     if (argc > 2)
     {
         fprintf(stderr, "usage: %s [fen_file]\n", argv[0]);
