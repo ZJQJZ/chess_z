@@ -1057,6 +1057,10 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
     if (search_enter_node(context))
         return 0;
 
+    xq_generate_pseudo_legal(pos, &list);
+    if (list.count == 0)
+        return -XQ_MATE_SCORE + ply;
+
     if (depth <= -XQ_MAX_QUIESCENCE_DEPTH)
         return static_evaluate(engine, pos, pos->side_to_move);
 
@@ -1071,9 +1075,6 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
             alpha = stand_pat;
     }
 
-    xq_generate_pseudo_legal(pos, &list);
-    if (in_check && list.count == 0)
-        return -XQ_MATE_SCORE + ply;
     order_moves(engine, pos, &list);
 
     for (i = 0; i < list.count; ++i)
@@ -1629,6 +1630,13 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
         return false;
 
     result->in_check = xq_position_in_check(pos, pos->side_to_move);
+    xq_generate_pseudo_legal(pos, &list);
+    if (list.count == 0)
+    {
+        result->final_score = -XQ_MATE_SCORE;
+        return true;
+    }
+
     if (!result->in_check)
     {
         result->stand_pat_used = true;
@@ -1644,12 +1652,6 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
         result->alpha_after_stand_pat = alpha;
     }
 
-    xq_generate_pseudo_legal(pos, &list);
-    if (result->in_check && list.count == 0)
-    {
-        result->final_score = -30000;
-        return true;
-    }
     order_moves_for_explain(engine, pos, &list, order_scores);
 
     for (i = 0; i < list.count; ++i)
