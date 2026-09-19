@@ -13,8 +13,7 @@ enum
     WINDOW_HEIGHT = 680,
     BOARD_LEFT = 70,
     BOARD_TOP = 55,
-    CELL_SIZE = 60,
-    ENGINE_DEPTH = 5
+    CELL_SIZE = 60
 };
 
 static Vector2 square_center(XqSquare sq)
@@ -182,7 +181,7 @@ int main(void)
                     {
                         XqMove best;
                         snprintf(status, sizeof(status), "Black is thinking...");
-                        if (xq_engine_find_best_move(&engine, &pos, ENGINE_DEPTH, &best))
+                        if (xq_engine_find_best_move(&engine, &pos, NULL, &best))
                         {
                             XqMoveList replies;
                             char move_text[8];

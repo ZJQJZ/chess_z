@@ -140,7 +140,7 @@ static void test_engine_adapter(void) {
     XqMove best;
 
     xq_position_startpos(&pos);
-    assert(xq_engine_find_best_move(NULL, &pos, 1, &best));
+    assert(xq_engine_find_best_move(NULL, &pos, NULL, &best));
     assert(best.from < XQ_SQUARES);
     assert(best.to < XQ_SQUARES);
 }
@@ -189,7 +189,7 @@ static void test_default_move_ordering(void) {
     };
 
     xq_position_startpos(&pos);
-    assert(xq_engine_find_best_move(&engine, &pos, 1, &best));
+    assert(xq_engine_find_best_move(&engine, &pos, NULL, &best));
     assert(best.captured != XQ_EMPTY_PIECE);
 }
 
@@ -198,7 +198,7 @@ static void test_quiescence_avoids_bad_capture(void) {
     XqMove best;
 
     assert(xq_position_from_fen(&pos, "4k4/9/9/9/4p4/9/9/r8/c8/R3K4 r - -"));
-    assert(xq_engine_find_best_move(NULL, &pos, 1, &best));
+    assert(xq_engine_find_best_move(NULL, &pos, NULL, &best));
     assert(best.captured == XQ_EMPTY_PIECE);
 }
 
@@ -216,7 +216,7 @@ static void test_custom_move_ordering(void) {
 
     xq_position_startpos(&pos);
     xq_generate_legal(&pos, &legal);
-    assert(xq_engine_find_best_move(&engine, &pos, 1, &best));
+    assert(xq_engine_find_best_move(&engine, &pos, NULL, &best));
     assert(best.from == (uint8_t)xq_square_make(0, 0));
     assert(best.to == (uint8_t)xq_square_make(0, 1));
     assert(score_calls >= legal.count);
@@ -227,14 +227,17 @@ static void test_explain_search_one_ply(void) {
     XqMove best;
     XqExplainResult result;
 
-    xq_position_startpos(&pos);
+    /* An immediate king capture is best at both one ply and the default search depth. */
+    assert(xq_position_from_fen(&pos, "4k4/9/9/9/9/9/9/9/9/4K4 r - -"));
     assert(xq_engine_explain_search_one_ply(NULL, &pos, 1, &result));
     assert(result.count > 0);
     assert(result.best_index >= 0);
     assert(result.best_index < result.count);
     assert(result.moves[result.best_index].is_best);
 
-    assert(xq_engine_find_best_move(NULL, &pos, 1, &best));
+    assert(xq_engine_find_best_move(NULL, &pos, NULL, &best));
+    assert(best.captured != XQ_EMPTY_PIECE);
+    assert(xq_piece_type(best.captured) == XQ_KING);
     assert(result.moves[result.best_index].move.from == best.from);
     assert(result.moves[result.best_index].move.to == best.to);
 

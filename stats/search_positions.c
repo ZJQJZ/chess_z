@@ -9,7 +9,6 @@
 #include <string.h>
 #include <time.h>
 
-#define SEARCH_DEPTH 6u
 #define LINE_BUFFER_SIZE 256u
 
 static const char *default_input_path = "stats/random_fen/random_positions.fen";
@@ -88,6 +87,7 @@ int main(int argc, char **argv)
     clock_t start = clock();
     XqTranspositionTable *table;
     XqEngineAdapter engine;
+    XqSearchLimits limits = xq_search_limits_default();
 
     if (argc > 2)
     {
@@ -96,7 +96,7 @@ int main(int argc, char **argv)
     }
 
     input_path = argc == 2 ? argv[1] : default_input_path;
-    printf("search: input=%s depth=%u\n", input_path, SEARCH_DEPTH);
+    printf("search: input=%s depth=%u\n", input_path, limits.max_depth);
 
     table = xq_transposition_table_create();
     if (table == NULL)
@@ -144,7 +144,7 @@ int main(int argc, char **argv)
             return fail_at_line(input, input_path, line_number, "invalid FEN", line,
                                 searched, start, checksum, table);
 
-        if (!xq_engine_find_best_move(&engine, &pos, SEARCH_DEPTH, &best))
+        if (!xq_engine_find_best_move(&engine, &pos, &limits, &best))
             return fail_at_line(input, input_path, line_number, "engine failed to find a move", line,
                                 searched, start, checksum, table);
 

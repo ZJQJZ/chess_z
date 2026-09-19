@@ -218,7 +218,7 @@ int main(int argc, char **argv)
         {
             XqMove best;
             char text[8];
-            if (!xq_engine_find_best_move(&engine, &pos, 10, &best))
+            if (!xq_engine_find_best_move(&engine, &pos, NULL, &best))
             {
                 printf("engine failed to move\n");
                 break;

@@ -343,20 +343,16 @@ void xq_transposition_table_get_stats(const XqTranspositionTable *table,
 /**
  * @brief Creates a default limit configuration for the built-in search.
  *
- * The default configuration limits the search time to 3 seconds, uses a monotonic wall clock, and
- * awards each root move a 70-point depth-confidence bonus for every additional completed ply.
+ * The default configuration limits the search to depth 10 and 3 seconds, uses a monotonic wall
+ * clock, and awards each root move a 70-point depth-confidence bonus per additional completed ply.
  *
- * `max_depth` is normalized to the minimum depth of 1 if its input value is 0.
- *
- * @param max_depth Maximum search depth for iterative deepening search; normalized to 1 if set to
- *                  0.
- * @return          The normalized default limit configuration.
+ * @return The default limit configuration.
  */
-XqSearchLimits xq_search_limits_default(unsigned max_depth)
+XqSearchLimits xq_search_limits_default(void)
 {
     XqSearchLimits limits;
 
-    limits.max_depth = max_depth == 0 ? 1 : max_depth;
+    limits.max_depth = 10;
     limits.time_limit_ms = 3000;
     limits.depth_bonus = 70;
     limits.time_mode = XQ_SEARCH_TIME_MONOTONIC;
@@ -1439,58 +1435,28 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
 /**
  * @brief Finds the best move using a custom search callback or the built-in search.
  *
- * The requested depth is converted to default search limits. If `engine` provides a custom search
- * callback, that callback is invoked directly.
+ * Default search limits are created only when `limits` is null. Otherwise, the supplied limits
+ * are used. A maximum depth of zero is normalized to one. If `engine` provides a custom search
+ * callback, it receives the normalized maximum depth and manages its own time limit.
  *
  * Otherwise, `builtin_search()` is used.
  *
  * @param engine    Engine adapter that may provide a custom search callback; may be null.
  * @param pos       Position to search. The built-in search requires a non-null position and
  *                  restores it before returning.
- * @param depth     Requested maximum search depth. The built-in search treats zero as one.
+ * @param limits    Optional search limits; null selects the default configuration.
  * @param best_move Output that receives the selected move; must not be null.
  * @return          True if a best move was found and written; false on invalid input, when no move
  *                  is available, or when the custom search callback fails.
  */
-bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth,
-                              XqMove *best_move)
-{
-    XqSearchLimits limits = xq_search_limits_default(depth);
-
-    if (best_move == NULL)
-        return false;
-    if (engine != NULL && engine->search != NULL)
-        return engine->search(pos, depth, best_move, engine->user);
-    return builtin_search(engine, pos, &limits, best_move);
-}
-
-/**
- * @brief Finds the best move under explicit depth and time limits.
- *
- * The built-in search performs iterative deepening and uses the depth bonus in `limits` to choose a
- * result after a timeout. A `max_depth` of zero is normalized to one.
- *
- * If `engine` provides a custom search callback, only the normalized maximum depth is passed to it;
- * the custom search remains responsible for its own time limit and depth bonus policy.
- *
- * @param engine    Engine adapter; may be null. The built-in search is used when no custom search
- *                  callback is provided.
- * @param pos       Position to search. The built-in search requires a non-null position and leaves
- *                  it unchanged after the search.
- * @param limits    Search depth, time limit, depth bonus, and clock-mode configuration; must not be
- *                  null.
- * @param best_move Output that receives the selected move; must not be null.
- * @return          True if a best move was found and written; false on invalid input, when no move
- *                  is available, or when the custom search callback fails.
- */
-bool xq_engine_find_best_move_with_limits(const XqEngineAdapter *engine, XqPosition *pos,
-                                          const XqSearchLimits *limits, XqMove *best_move)
+bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
+                              const XqSearchLimits *limits, XqMove *best_move)
 {
     XqSearchLimits effective_limits;
 
-    if (best_move == NULL || limits == NULL)
+    if (best_move == NULL)
         return false;
-    effective_limits = *limits;
+    effective_limits = limits != NULL ? *limits : xq_search_limits_default();
     if (effective_limits.max_depth == 0)
         effective_limits.max_depth = 1;
     if (engine != NULL && engine->search != NULL)

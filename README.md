@@ -81,7 +81,7 @@ quit   退出
 ```
 
 生成器使用固定随机种子，从初始局面随机行走 `0..100` 步，共输出 100 个局面，每行一个 FEN。
-搜索程序顺序读取一次文件，以深度 4 为每个局面搜索一步，适合作为性能分析的非交互式入口。
+搜索程序顺序读取一次文件，使用默认搜索配置（最大深度 10、限时 3 秒）为每个局面搜索一步，适合作为性能分析的非交互式入口。
 
 ## AI 接入
 
@@ -114,7 +114,8 @@ XqEngineAdapter engine = {
 };
 
 XqMove best;
-xq_engine_find_best_move(&engine, &pos, 4, &best);
+XqSearchLimits limits = xq_search_limits_default();
+xq_engine_find_best_move(&engine, &pos, &limits, &best);
 ```
 
 ## 坐标约定

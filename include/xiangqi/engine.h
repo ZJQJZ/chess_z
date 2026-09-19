@@ -97,11 +97,11 @@ void xq_transposition_table_destroy(XqTranspositionTable *table);
 void xq_transposition_table_reset_stats(XqTranspositionTable *table);
 void xq_transposition_table_get_stats(const XqTranspositionTable *table,
                                       XqTranspositionStats *stats);
-XqSearchLimits xq_search_limits_default(unsigned max_depth);
-bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqMove *best_move);
+XqSearchLimits xq_search_limits_default(void);
+/* limits 为 NULL 时使用默认限制；搜索深度由 limits->max_depth 指定。 */
 /* 时间限制和深度奖励仅适用于内置搜索；自定义 search 回调仍自行管理时间。 */
-bool xq_engine_find_best_move_with_limits(const XqEngineAdapter *engine, XqPosition *pos,
-                                          const XqSearchLimits *limits, XqMove *best_move);
+bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
+                              const XqSearchLimits *limits, XqMove *best_move);
 bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result);
 bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos, XqQuiescenceExplainResult *result);
 
