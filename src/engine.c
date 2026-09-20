@@ -1029,8 +1029,8 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
  *
  * When the side to move is not in check, the static evaluation is used as the stand-pat score and
  * only captures are searched. When the side to move is in check, stand pat is not allowed and every
- * pseudo-legal evasion is searched. The function uses fail-hard alpha-beta semantics and therefore
- * returns `beta` on a beta cutoff.
+ * legal evasion is searched; no legal evasion means checkmate. The function uses fail-hard
+ * alpha-beta semantics and therefore returns `beta` on a beta cutoff.
  *
  * @param engine  Engine adapter used for static evaluation and move ordering; may be null.
  * @param pos     Current position; must not be null and is restored before the function returns.
@@ -1053,14 +1053,16 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
     if (search_enter_node(context))
         return 0;
 
-    xq_generate_pseudo_legal(pos, &list);
+    in_check = xq_position_in_check(pos, pos->side_to_move);
+    if (in_check)
+        xq_generate_legal(pos, &list);
+    else
+        xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
         return -XQ_MATE_SCORE + ply;
 
     if (depth <= -XQ_MAX_QUIESCENCE_DEPTH)
         return static_evaluate(engine, pos, pos->side_to_move);
-
-    in_check = xq_position_in_check(pos, pos->side_to_move);
 
     if (!in_check)
     {
@@ -1556,7 +1558,7 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
  * @brief Explains one ply of quiescence search at the current position.
  *
  * The result first exposes the stand-pat evaluation when it is legal, then records the captures or
- * check evasions that quiescence search actually examines.
+ * legal check evasions that quiescence search actually examines.
  *
  * Each move's score is still computed by a recursive call to `quiescence()` so that the explanation
  * remains consistent with the real search.
@@ -1596,7 +1598,10 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
         return false;
 
     result->in_check = xq_position_in_check(pos, pos->side_to_move);
-    xq_generate_pseudo_legal(pos, &list);
+    if (result->in_check)
+        xq_generate_legal(pos, &list);
+    else
+        xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
     {
         result->final_score = -XQ_MATE_SCORE;

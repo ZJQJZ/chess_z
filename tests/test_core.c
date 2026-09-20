@@ -288,6 +288,95 @@ static void test_explain_quiescence(void) {
     assert(!xq_engine_explain_quiescence_one_ply(NULL, &pos, NULL));
 }
 
+/* Check every ordered evasion, including those in recursive quiescence nodes. */
+static int check_evasion_order_score(const XqPosition *pos, XqMove move, void *user) {
+    int *checked = user;
+
+    if (xq_position_in_check(pos, pos->side_to_move)) {
+        XqPosition next = *pos;
+        assert(xq_position_make_move(&next, move));
+        assert(!xq_position_in_check(&next, pos->side_to_move));
+        ++*checked;
+    }
+    return xq_engine_default_move_order_score(pos, move, NULL);
+}
+
+static void test_quiescence_legal_evasions(void) {
+    static const char *fens[] = {
+        /* a1e1 blocks the check; a2e2 captures the checking rook. */
+        "3k5/9/9/9/9/9/9/4r4/R8/4K4 r - -",
+        "3k5/9/9/9/9/9/9/R3r4/9/4K4 r - -",
+    };
+    size_t index;
+    int checked = 0;
+    XqEngineAdapter engine = {
+        .score_move = check_evasion_order_score,
+        .user = &checked,
+    };
+
+    for (index = 0; index < sizeof(fens) / sizeof(fens[0]); ++index) {
+        XqPosition pos;
+        XqPosition before;
+        XqMoveList legal;
+        XqQuiescenceExplainResult result;
+        bool found_rook_evasion = false;
+        int i;
+
+        assert(xq_position_from_fen(&pos, fens[index]));
+        before = pos;
+        xq_generate_legal(&pos, &legal);
+        assert(legal.count > 0);
+        assert(xq_engine_explain_quiescence_one_ply(&engine, &pos, &result));
+        assert(result.in_check);
+        assert(!result.stand_pat_used);
+        assert(result.count == legal.count);
+        for (i = 0; i < result.count; ++i) {
+            XqPosition next = pos;
+            XqMove move = result.moves[i].move;
+            assert(xq_position_make_move(&next, move));
+            assert(!xq_position_in_check(&next, pos.side_to_move));
+            if (move.from == xq_square_make(0, (int)index + 1) &&
+                move.to == xq_square_make(4, (int)index + 1))
+                found_rook_evasion = true;
+        }
+        assert(found_rook_evasion);
+        assert(memcmp(&pos, &before, sizeof(pos)) == 0);
+    }
+    assert(checked > 0);
+}
+
+static void test_quiescence_checkmate(void) {
+    XqPosition pos;
+    XqPosition before;
+    XqMoveList pseudo;
+    XqMoveList legal;
+    XqQuiescenceExplainResult result;
+
+    assert(xq_position_from_fen(&pos, "3k5/9/9/9/9/9/9/9/3rrr3/4K4 r - -"));
+    before = pos;
+    xq_generate_pseudo_legal(&pos, &pseudo);
+    xq_generate_legal(&pos, &legal);
+    assert(pseudo.count > 0);
+    assert(legal.count == 0);
+    assert(xq_engine_explain_quiescence_one_ply(NULL, &pos, &result));
+    assert(result.in_check);
+    assert(!result.stand_pat_used);
+    assert(result.count == 0);
+    assert(result.best_index == -1);
+    assert(result.final_score == -30000);
+    assert(memcmp(&pos, &before, sizeof(pos)) == 0);
+
+    /* e2e1 captures a pawn and mates in the recursive quiescence search. */
+    assert(xq_position_from_fen(&pos, "4k4/9/9/9/9/9/9/4r4/3rPr3/4K4 b - -"));
+    before = pos;
+    assert(xq_engine_explain_quiescence_one_ply(NULL, &pos, &result));
+    assert(result.best_index >= 0);
+    assert(result.moves[result.best_index].move.from == xq_square_make(4, 2));
+    assert(result.moves[result.best_index].move.to == xq_square_make(4, 1));
+    assert(result.final_score == 29999);
+    assert(memcmp(&pos, &before, sizeof(pos)) == 0);
+}
+
 int main(void) {
     test_startpos();
     test_validate_rejects_extra_piece_bits();
@@ -303,6 +392,8 @@ int main(void) {
     test_explain_search_one_ply();
     test_explain_custom_move_ordering();
     test_explain_quiescence();
+    test_quiescence_legal_evasions();
+    test_quiescence_checkmate();
     printf("xiangqi core tests passed\n");
     return 0;
 }
