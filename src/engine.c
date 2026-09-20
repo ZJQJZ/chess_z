@@ -1323,9 +1323,9 @@ static XqMove select_timed_root_move(const ScoredMove *moves, int count, int dep
 /**
  * @brief Runs the built-in iterative-deepening search.
  *
- * The function searches from depth 1 through the requested maximum depth. Scores from all root
- * moves in the previous completed iteration determine their ordering in the next iteration, while
- * the previous principal variation supplies an additional ordering hint.
+ * The function searches only legal root moves from depth 1 through the requested maximum depth.
+ * Scores from all root moves in the previous completed iteration determine their ordering in the
+ * next iteration, while the previous principal variation supplies an additional ordering hint.
  *
  * If the time limit expires during an iteration, the function selects among the root moves whose
  * searches completed.
@@ -1337,7 +1337,7 @@ static XqMove select_timed_root_move(const ScoredMove *moves, int count, int dep
  * @param limits    Depth, time, depth-bonus, and clock-mode configuration; must not be null.
  * @param best_move Output that receives the selected move; must not be null.
  * @return          True if at least one root move exists and a move is selected; false if the
- *                  position is invalid for searching or contains no pseudo-legal moves.
+ *                  position is invalid for searching or contains no legal moves.
  */
 static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
                            const XqSearchLimits *limits, XqMove *best_move)
@@ -1356,7 +1356,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
     if (pos == NULL || xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
         return false;
 
-    xq_generate_pseudo_legal(pos, &list);
+    xq_generate_legal(pos, &list);
     if (list.count == 0)
         return false;
     order_moves(engine, pos, &list);
