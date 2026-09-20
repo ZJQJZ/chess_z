@@ -20,6 +20,93 @@ static const int piece_values[XQ_PIECE_TYPE_NB] = {
     [XQ_ROOK] = 600,   [XQ_CANNON] = 285,  [XQ_PAWN] = 70,
 };
 
+/*
+ * Positional bonuses added to `piece_values`, in the same score units. These are conservative
+ * hand-selected starting values, not parameters tuned through self-play.
+ *
+ * Rows run from the piece owner's home rank (0) to the opponent's home rank (9), unlike FEN's
+ * display order. Red uses the board rank directly; Black uses 9 - rank. Every row is symmetric
+ * across files, so both colors share the tables without a file reversal.
+ *
+ * These tables describe location only; they do not account for attacks, blocked horse legs, cannon
+ * screens or game phase. Unspecified rows for palace-bound pieces and bishops are zero.
+ */
+static const int piece_square_values[XQ_PIECE_TYPE_NB][XQ_RANKS][XQ_FILES] =
+    {
+        [XQ_KING] =
+            {
+                {0, 0, 0, 0, 0, 0, 0, 0, 0},
+                {0, 0, 0, -8, -4, -8, 0, 0, 0},
+                {0, 0, 0, -16, -12, -16, 0, 0, 0},
+            },
+        [XQ_ADVISOR] =
+            {
+                {0, 0, 0, 0, 0, 0, 0, 0, 0},
+                {0, 0, 0, 0, 6, 0, 0, 0, 0},
+                {0, 0, 0, 0, 0, 0, 0, 0, 0},
+            },
+        [XQ_BISHOP] =
+            {
+                {0, 0, 0, 0, 0, 0, 0, 0, 0},
+                {0, 0, 0, 0, 0, 0, 0, 0, 0},
+                {2, 0, 0, 0, 6, 0, 0, 0, 2},
+                {0, 0, 0, 0, 0, 0, 0, 0, 0},
+                {0, 0, 2, 0, 0, 0, 2, 0, 0},
+            },
+        [XQ_KNIGHT] =
+            {
+                {-20, -8, -12, -8, -8, -8, -12, -8, -20},
+                {-16, -4, 0, 4, 4, 4, 0, -4, -16},
+                {-12, 0, 8, 12, 12, 12, 8, 0, -12},
+                {-8, 4, 12, 20, 20, 20, 12, 4, -8},
+                {-4, 8, 16, 24, 24, 24, 16, 8, -4},
+                {-4, 8, 20, 28, 28, 28, 20, 8, -4},
+                {-8, 8, 20, 28, 28, 28, 20, 8, -8},
+                {-12, 4, 16, 24, 24, 24, 16, 4, -12},
+                {-16, 0, 8, 12, 12, 12, 8, 0, -16},
+                {-20, -8, -4, 0, 0, 0, -4, -8, -20},
+            },
+        [XQ_ROOK] =
+            {
+                {0, 0, 2, 4, 2, 4, 2, 0, 0},
+                {2, 4, 6, 8, 6, 8, 6, 4, 2},
+                {4, 6, 8, 10, 8, 10, 8, 6, 4},
+                {4, 8, 10, 12, 10, 12, 10, 8, 4},
+                {6, 8, 12, 14, 12, 14, 12, 8, 6},
+                {6, 8, 12, 14, 12, 14, 12, 8, 6},
+                {6, 8, 12, 16, 14, 16, 12, 8, 6},
+                {8, 12, 16, 20, 18, 20, 16, 12, 8},
+                {8, 12, 16, 20, 18, 20, 16, 12, 8},
+                {4, 8, 12, 16, 14, 16, 12, 8, 4},
+            },
+        [XQ_CANNON] =
+            {
+                {-4, -2, 0, 2, 4, 2, 0, -2, -4},
+                {0, 2, 4, 6, 8, 6, 4, 2, 0},
+                {2, 4, 8, 10, 14, 10, 8, 4, 2},
+                {2, 4, 6, 10, 12, 10, 6, 4, 2},
+                {0, 2, 4, 8, 10, 8, 4, 2, 0},
+                {0, 2, 4, 6, 8, 6, 4, 2, 0},
+                {-2, 0, 2, 4, 6, 4, 2, 0, -2},
+                {-2, 0, 2, 4, 6, 4, 2, 0, -2},
+                {-4, -2, 0, 2, 4, 2, 0, -2, -4},
+                {-8, -4, 0, 2, 4, 2, 0, -4, -8},
+            },
+        [XQ_PAWN] =
+            {
+                {0, 0, 0, 0, 0, 0, 0, 0, 0},
+                {0, 0, 0, 0, 0, 0, 0, 0, 0},
+                {0, 0, 0, 0, 0, 0, 0, 0, 0},
+                {0, 0, 0, 0, 0, 0, 0, 0, 0},
+                {4, 6, 8, 10, 12, 10, 8, 6, 4},
+                {18, 22, 26, 30, 32, 30, 26, 22, 18},
+                {24, 28, 36, 40, 44, 40, 36, 28, 24},
+                {28, 32, 40, 46, 50, 46, 40, 32, 28},
+                {24, 28, 36, 42, 46, 42, 36, 28, 24},
+                {8, 12, 18, 22, 26, 22, 18, 12, 8},
+            },
+};
+
 static const int legal_move_values[XQ_PIECE_TYPE_NB] = {
     [XQ_KING] = 10, [XQ_ADVISOR] = 10, [XQ_BISHOP] = 10, [XQ_KNIGHT] = 20,
     [XQ_ROOK] = 20, [XQ_CANNON] = 15,  [XQ_PAWN] = 10,
@@ -684,10 +771,44 @@ static int evaluate_legal_moves(const XqPosition *pos, XqColor color)
 }
 
 /**
+ * @brief Sums material and piece-square bonuses for one side without modifying the position.
+ *
+ * Black's ranks are reflected so both sides use the same tables relative to their own home rank.
+ *
+ * @param pos   Position to evaluate; must not be null and is left unchanged.
+ * @param color Side whose pieces are evaluated; must be XQ_RED or XQ_BLACK.
+ * @return      Total material value plus piece-square bonuses for the specified side, without
+ *              subtracting the opponent's score.
+ */
+static int evaluate_side(const XqPosition *pos, XqColor color)
+{
+    int score = 0;
+    int type;
+
+    for (type = 0; type < XQ_PIECE_TYPE_NB; ++type)
+    {
+        XqBitboard remaining = pos->pieces[color][type];
+
+        while (!xq_bb_is_empty(remaining))
+        {
+            XqSquare sq = xq_bb_first_square(remaining);
+            int rank = xq_square_rank(sq);
+            int file = xq_square_file(sq);
+
+            xq_bb_clear(&remaining, sq);
+            if (color == XQ_BLACK)
+                rank = XQ_RANKS - 1 - rank;
+            score += piece_values[type] + piece_square_values[type][rank][file];
+        }
+    }
+    return score;
+}
+
+/**
  * @brief Evaluates a position from the requested side's perspective using the built-in evaluator.
  *
- * The evaluator assigns fixed values to each piece type and subtracts the opponent's total material
- * from the perspective side's total material.
+ * The evaluator adds a piece-square bonus to each piece's fixed material value, then subtracts the
+ * opponent's total from the perspective side's total. Positive scores favor perspective.
  *
  * Legal-move mobility support is present but currently disabled.
  *
@@ -698,17 +819,11 @@ static int evaluate_legal_moves(const XqPosition *pos, XqColor color)
  */
 int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user)
 {
-    int score = 0;
     XqColor opponent = xq_color_opponent(perspective);
-    int type;
+    int score;
 
     (void)user;
-    for (type = 0; type < XQ_PIECE_TYPE_NB; ++type)
-    {
-        int value = piece_values[type];
-        score += value * xq_bb_count(pos->pieces[perspective][type]);
-        score -= value * xq_bb_count(pos->pieces[opponent][type]);
-    }
+    score = evaluate_side(pos, perspective) - evaluate_side(pos, opponent);
     // score += evaluate_legal_moves(pos, perspective);
     // score -= evaluate_legal_moves(pos, opponent);
     return score;
