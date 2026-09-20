@@ -1029,8 +1029,9 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
  *
  * When the side to move is not in check, the static evaluation is used as the stand-pat score and
  * only captures are searched. When the side to move is in check, stand pat is not allowed and every
- * legal evasion is searched; no legal evasion means checkmate. The function uses fail-hard
- * alpha-beta semantics and therefore returns `beta` on a beta cutoff.
+ * legal evasion is searched; no legal evasion means checkmate. The function uses fail-soft
+ * alpha-beta semantics: it returns the best searched score, which may lie outside the original
+ * window and represent an upper or lower bound rather than an exact value.
  *
  * @param engine  Engine adapter used for static evaluation and move ordering; may be null.
  * @param pos     Current position; must not be null and is restored before the function returns.
@@ -1047,6 +1048,7 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
 {
     XqMoveList list;
     bool in_check;
+    int best = INT_MIN / 2;
     int stand_pat;
     int i;
 
@@ -1067,8 +1069,9 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
     if (!in_check)
     {
         stand_pat = static_evaluate(engine, pos, pos->side_to_move);
+        best = stand_pat;
         if (stand_pat >= beta)
-            return beta;
+            return stand_pat;
         if (stand_pat > alpha)
             alpha = stand_pat;
     }
@@ -1090,13 +1093,15 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
         xq_position_unmake_move(pos, list.moves[i]);
         if (context != NULL && context->stopped)
             return 0;
+        if (score > best)
+            best = score;
         if (score >= beta)
-            return beta;
+            return best;
         if (score > alpha)
             alpha = score;
     }
 
-    return alpha;
+    return best;
 }
 
 /**
@@ -1576,6 +1581,7 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
     int order_scores[XQ_MAX_MOVES];
     int alpha = INT_MIN / 2;
     int beta = INT_MAX / 2;
+    int best = INT_MIN / 2;
     int i;
 
     if (result == NULL)
@@ -1612,10 +1618,11 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
     {
         result->stand_pat_used = true;
         result->stand_pat = static_evaluate(engine, pos, pos->side_to_move);
+        best = result->stand_pat;
         if (result->stand_pat >= beta)
         {
             result->stand_pat_cutoff = true;
-            result->final_score = beta;
+            result->final_score = best;
             return true;
         }
         if (result->stand_pat > alpha)
@@ -1657,27 +1664,31 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
         explained->is_best = false;
         explained->caused_cutoff = false;
 
+        if (score > best)
+        {
+            best = score;
+            result->best_index = result->count;
+        }
         if (score >= beta)
         {
             result->best_index = result->count;
             explained->score_kind = XQ_SEARCH_SCORE_LOWER_BOUND;
             explained->caused_cutoff = true;
             ++result->count;
-            result->final_score = beta;
+            result->final_score = best;
             result->moves[result->best_index].is_best = true;
             return true;
         }
         if (score > alpha)
         {
             alpha = score;
-            result->best_index = result->count;
             explained->score_kind = XQ_SEARCH_SCORE_EXACT;
         }
 
         ++result->count;
     }
 
-    result->final_score = alpha;
+    result->final_score = best;
     if (result->best_index >= 0 && result->best_index < result->count)
         result->moves[result->best_index].is_best = true;
     return true;
