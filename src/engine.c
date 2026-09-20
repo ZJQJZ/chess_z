@@ -1027,6 +1027,10 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
  * current node's distance from the root of the full search. It increases at each recursive call and
  * is used to encode mate distance.
  *
+ * Before generating moves, an attacked opponent king is scored as a win by king capture on the
+ * next ply. This rejects a preceding pseudo-legal move that left its own king attacked, even when
+ * both kings are attacked, before legal check-evasion generation or stand pat can hide that fact.
+ *
  * When the side to move is not in check, the static evaluation is used as the stand-pat score and
  * only captures are searched. When the side to move is in check, stand pat is not allowed and every
  * legal evasion is searched; no legal evasion means checkmate. The function uses fail-soft
@@ -1054,6 +1058,9 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
 
     if (search_enter_node(context))
         return 0;
+
+    if (xq_position_in_check(pos, xq_color_opponent(pos->side_to_move)))
+        return XQ_MATE_SCORE - (ply + 1);
 
     in_check = xq_position_in_check(pos, pos->side_to_move);
     if (in_check)
@@ -1562,8 +1569,9 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
 /**
  * @brief Explains one ply of quiescence search at the current position.
  *
- * The result first exposes the stand-pat evaluation when it is legal, then records the captures or
- * legal check evasions that quiescence search actually examines.
+ * An attacked opponent king immediately produces a winning score, matching quiescence search.
+ * Otherwise, the result exposes the stand-pat evaluation when it is legal, then records the
+ * captures or legal check evasions that quiescence search actually examines.
  *
  * Each move's score is still computed by a recursive call to `quiescence()` so that the explanation
  * remains consistent with the real search.
@@ -1604,6 +1612,11 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
         return false;
 
     result->in_check = xq_position_in_check(pos, pos->side_to_move);
+    if (xq_position_in_check(pos, xq_color_opponent(pos->side_to_move)))
+    {
+        result->final_score = XQ_MATE_SCORE - 1;
+        return true;
+    }
     if (result->in_check)
         xq_generate_legal(pos, &list);
     else
