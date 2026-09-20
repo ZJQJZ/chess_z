@@ -1068,7 +1068,7 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
     else
         xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
-        return -XQ_MATE_SCORE + ply;
+        return -XQ_MATE_SCORE + ply + 2;
 
     if (depth <= -XQ_MAX_QUIESCENCE_DEPTH)
         return static_evaluate(engine, pos, pos->side_to_move);
@@ -1091,9 +1091,6 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
 
         if (!in_check && list.moves[i].captured == XQ_EMPTY_PIECE)
             continue;
-        if (list.moves[i].captured != XQ_EMPTY_PIECE &&
-            xq_piece_type(list.moves[i].captured) == XQ_KING)
-            return XQ_MATE_SCORE - (ply + 1);
 
         xq_position_make_move(pos, list.moves[i]);
         score = -quiescence(engine, pos, depth - 1, ply + 1, -beta, -alpha, context);
@@ -1224,7 +1221,7 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
 
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
-        return -XQ_MATE_SCORE + ply;
+        return -XQ_MATE_SCORE + ply + 2;
     order_moves(engine, pos, &list);
 
     /* For example, suppose the requested depth is 6, the window is [50, 100], and the table
@@ -1623,7 +1620,7 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
         xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
     {
-        result->final_score = -XQ_MATE_SCORE;
+        result->final_score = -XQ_MATE_SCORE + 2;
         return true;
     }
 
