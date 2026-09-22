@@ -117,7 +117,7 @@ static void draw_position(const XqPosition *pos, XqSquare selected, const char *
     DrawText(status, 20, WINDOW_HEIGHT - 35, 20, (Color){55, 40, 25, 255});
 }
 
-static bool make_selected_move(XqPosition *pos, XqSquare from, XqSquare to)
+static bool make_selected_move(XqPosition *pos, XqSquare from, XqSquare to, XqMove *played)
 {
     XqMoveList legal;
     int i;
@@ -126,13 +126,18 @@ static bool make_selected_move(XqPosition *pos, XqSquare from, XqSquare to)
     for (i = 0; i < legal.count; ++i)
         if ((XqSquare)legal.moves[i].from == from &&
             (XqSquare)legal.moves[i].to == to)
-            return xq_position_make_move(pos, legal.moves[i]);
+        {
+            *played = legal.moves[i];
+            return xq_position_make_move(pos, *played);
+        }
     return false;
 }
 
 int main(void)
 {
     XqPosition pos;
+    XqHistory history;
+    int exit_status = 0;
     XqSquare selected = XQ_NO_SQUARE;
     bool game_over = false;
     char status[80] = "Red: select a piece";
@@ -143,6 +148,7 @@ int main(void)
         .user = NULL,
         .score_move = NULL,
         .transposition_table = table,
+        .history = &history,
     };
     int codepoint_count;
     int *codepoints;
@@ -152,6 +158,12 @@ int main(void)
         fprintf(stderr, "warning: transposition table allocation failed; continuing without cache\n");
 
     xq_position_startpos(&pos);
+    if (!xq_history_init(&history, &pos))
+    {
+        fprintf(stderr, "error: history allocation failed\n");
+        xq_transposition_table_destroy(table);
+        return 1;
+    }
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "chess_z");
     codepoints = LoadCodepoints("帥仕相馬車炮兵将士象卒", &codepoint_count);
     piece_font = LoadFontEx("/Library/Fonts/Arial Unicode.ttf", 48,
@@ -177,15 +189,34 @@ int main(void)
                     selected = clicked;
                 else
                 {
-                    if (make_selected_move(&pos, selected, clicked))
+                    XqMove played;
+                    if (make_selected_move(&pos, selected, clicked, &played))
                     {
                         XqMove best;
+                        if (!xq_history_push(&history, played, &pos))
+                        {
+                            fprintf(stderr, "error: history allocation failed; stopping game\n");
+                            snprintf(status, sizeof(status), "History allocation failed; game stopped");
+                            game_over = true;
+                            exit_status = 1;
+                            selected = XQ_NO_SQUARE;
+                            continue;
+                        }
                         snprintf(status, sizeof(status), "Black is thinking...");
                         if (xq_engine_find_best_move(&engine, &pos, NULL, &best))
                         {
                             XqMoveList replies;
                             char move_text[8];
                             xq_position_make_move(&pos, best);
+                            if (!xq_history_push(&history, best, &pos))
+                            {
+                                fprintf(stderr, "error: history allocation failed; stopping game\n");
+                                snprintf(status, sizeof(status), "History allocation failed; game stopped");
+                                game_over = true;
+                                exit_status = 1;
+                                selected = XQ_NO_SQUARE;
+                                continue;
+                            }
                             snprintf(status, sizeof(status), "Black played %s",
                                      xq_move_to_string(best, move_text, sizeof(move_text)));
                             xq_generate_legal(&pos, &replies);
@@ -215,5 +246,6 @@ int main(void)
     UnloadFont(piece_font);
     CloseWindow();
     xq_transposition_table_destroy(table);
-    return 0;
+    xq_history_destroy(&history);
+    return exit_status;
 }

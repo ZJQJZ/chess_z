@@ -8,6 +8,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 add_library(xiangqi
     src/position.c
+    src/history.c
     src/movegen.c
     src/engine.c
 )

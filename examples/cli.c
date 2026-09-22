@@ -131,6 +131,8 @@ int main(int argc, char **argv)
     XqMoveList legal;
     XqTranspositionTable *table;
     XqEngineAdapter engine;
+    XqHistory history;
+    int exit_status = EXIT_SUCCESS;
     const char *fen = NULL;
     XqColor engine_color = XQ_BLACK;
     char input[64];
@@ -186,12 +188,18 @@ int main(int argc, char **argv)
     else
         xq_position_startpos(&pos);
 
+    if (!xq_history_init(&history, &pos))
+    {
+        fprintf(stderr, "error: history allocation failed\n");
+        return EXIT_FAILURE;
+    }
     table = xq_transposition_table_create();
     engine.static_evaluate = NULL;
     engine.search = NULL;
     engine.user = NULL;
     engine.score_move = NULL;
     engine.transposition_table = table;
+    engine.history = &history;
 
     if (table == NULL)
         fprintf(stderr, "warning: transposition table allocation failed; continuing without cache\n");
@@ -226,6 +234,12 @@ int main(int argc, char **argv)
             printf("%s engine plays: %s\n", color_name(engine_color),
                    xq_move_to_string(best, text, sizeof(text)));
             xq_position_make_move(&pos, best);
+            if (!xq_history_push(&history, best, &pos))
+            {
+                fprintf(stderr, "error: history allocation failed; stopping game\n");
+                exit_status = EXIT_FAILURE;
+                break;
+            }
             continue;
         }
 
@@ -262,9 +276,16 @@ int main(int argc, char **argv)
                 continue;
             }
             xq_position_make_move(&pos, move);
+            if (!xq_history_push(&history, move, &pos))
+            {
+                fprintf(stderr, "error: history allocation failed; stopping game\n");
+                exit_status = EXIT_FAILURE;
+                break;
+            }
         }
     }
 
     xq_transposition_table_destroy(table);
-    return 0;
+    xq_history_destroy(&history);
+    return exit_status;
 }

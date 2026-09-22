@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 
+#include "xiangqi/history.h"
 #include "xiangqi/position.h"
 #include "xiangqi/types.h"
 
@@ -28,6 +29,9 @@ typedef struct XqEngineAdapter
     void *user;
     XqMoveScoreFn score_move;
     XqTranspositionTable *transposition_table;
+    /* Optional real-game history, borrowed for built-in root search only.
+     * NULL, empty or mismatched history disables cycle detection. */
+    const XqHistory *history;
 } XqEngineAdapter;
 
 typedef enum XqSearchTimeMode

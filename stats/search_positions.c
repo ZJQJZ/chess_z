@@ -109,6 +109,7 @@ int main(int argc, char **argv)
     engine.user = NULL;
     engine.score_move = NULL;
     engine.transposition_table = table;
+    engine.history = NULL; /* Each FEN is an independent position. */
 
     input = fopen(input_path, "rb");
     if (input == NULL)

@@ -1440,6 +1440,156 @@ static XqMove select_timed_root_move(const ScoredMove *moves, int count, int dep
 }
 
 /**
+ * @brief Computes the rolling hash of the move sequence between two recorded positions.
+ *
+ * Position indices are used as boundaries: the path includes moves in entries `begin + 1` through
+ * `end`. For example, begin=2 and end=5 selects the three moves in entries 3, 4, and 5.
+ *
+ * Let H[i] be the prefix hash through entry i and B the hash base. Subtracting `H[begin] * B^(end -
+ * begin)` from `H[end]` removes the earlier moves and leaves the requested path hash. Each entry's
+ * `power` stores B raised to its index, so the calculation takes constant time without traversing
+ * moves. Unsigned arithmetic intentionally wraps modulo 2^64.
+ *
+ * Equal-length identical paths have equal hashes regardless of their offsets in history. Hash
+ * equality alone does not prove path equality; callers must compare the moves to exclude hash
+ * collisions and check position hashes separately when detecting a closed cycle.
+ *
+ * @param history Recorded game history; must not be null and is left unchanged.
+ * @param begin   Starting position index; must satisfy begin <= end.
+ * @param end     Ending position index; must be less than history->count.
+ * @return        Hash of the selected move sequence, or zero for an empty path (begin == end).
+ */
+static uint64_t history_path_hash(const XqHistory *history, size_t begin, size_t end)
+{
+    return history->entries[end].prefix -
+           history->entries[begin].prefix * history->entries[end - begin].power;
+}
+
+/**
+ * @brief Determines whether completing a detected threefold cycle makes the moving side lose.
+ *
+ * The caller has already verified that appending candidate would complete three consecutive,
+ * identical move sequences whose four boundary positions have matching hashes. This function
+ * applies the loss rule only; it does not detect cycles or play the candidate move.
+ *
+ * The current rule always returns true, making the side to move in root lose for closing the third
+ * cycle. Keeping this decision separate allows future rules to inspect the cycle, for example to
+ * require that every move by the closing side gives check before declaring a loss.
+ *
+ * History contains only real moves, and root is the position before candidate. The third cycle's
+ * final move is supplied separately as candidate and is not yet present in history. A future rule
+ * can use a copy of root and the recorded moves to reconstruct and inspect the cycle positions.
+ *
+ * @param history   Real-game history ending at root; must not be null and is left unchanged.
+ * @param start     Position index at the beginning of the first of the three cycles.
+ * @param length    Number of individual moves in one cycle; a positive even number satisfying start
+ *                  + 3 * length == history->count.
+ * @param root      Position before candidate is played; must not be null and is left unchanged.
+ * @param candidate Legal root move that would close the third identical cycle.
+ * @return          True if the side playing candidate loses under the cycle rule. The current
+ *                  implementation always returns true; future rules may return false to allow it.
+ */
+static bool root_cycle_is_loss(const XqHistory *history, size_t start, size_t length,
+                               const XqPosition *root, XqMove candidate)
+{
+    (void)history;
+    (void)start;
+    (void)length;
+    (void)root;
+    (void)candidate;
+    return true;
+}
+
+/**
+ * @brief Removes legal root moves that would complete a cycle penalized as a loss.
+ *
+ * Called once before iterative deepening, this function examines only real-game history plus a
+ * candidate root move. It does not detect repetitions inside negamax or quiescence search. Null,
+ * empty, or mismatched history leaves the move list unchanged; matching requires the last recorded
+ * position hash to equal the current position hash.
+ *
+ * The virtual position index after the candidate is `end = history->count`. For each possible even
+ * cycle length, the first cycle starts at `end - 3 * length`. Only even lengths can return to the
+ * same side to move. The first three boundary positions must have equal hashes, and prefix hashes
+ * must match for the first two complete paths and for the third path without its final move. That
+ * missing move must match the last move of the first path in the supplied legal move list.
+ *
+ * Hash matches are checked move by move using source and destination squares. The candidate is then
+ * temporarily played to verify the fourth boundary position hash and immediately unmade.
+ * `root_cycle_is_loss()` decides whether the verified cycle penalizes the moving side, keeping rule
+ * changes separate from cycle detection. Candidates are never appended to real history.
+ *
+ * Prefix-hash screening takes O(history->count) time; matching paths additionally require move
+ * lookup and exact comparison. Rejected moves are removed in place while preserving the relative
+ * order of surviving moves. The list may become empty; choosing a fallback is the caller's job.
+ *
+ * @param history Optional real-game history ending at pos; may be null and is left unchanged.
+ * @param pos     Root position; must not be null and is restored after each temporary move.
+ * @param list    Legal root moves to filter in place; must not be null. Both moves and count are
+ *                updated when candidates are rejected.
+ * @return        True if at least one move was removed; false if no move was removed, including
+ *                when history is absent, empty, or does not match the root position.
+ */
+static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMoveList *list)
+{
+    bool rejected[XQ_MAX_MOVES] = {false};
+    size_t end;
+    size_t length;
+    int count = 0;
+    int original_count = list->count;
+
+    if (history == NULL || history->count == 0 ||
+        history->entries[history->count - 1].key != xq_position_hash(pos))
+        return false;
+
+    end = history->count;
+    for (length = 2; length <= end / 3; length += 2)
+    {
+        size_t start = end - 3 * length;
+        size_t second = start + length;
+        size_t third = second + length;
+        uint64_t key = history->entries[start].key;
+        size_t j;
+        int i;
+        bool closed;
+
+        if (history->entries[second].key != key || history->entries[third].key != key ||
+            history_path_hash(history, start, second) !=
+                history_path_hash(history, second, third) ||
+            history_path_hash(history, start, second - 1) !=
+                history_path_hash(history, third, end - 1))
+            continue;
+
+        /* The missing move must equal the last move of the first period. */
+        for (i = 0; i < list->count; ++i)
+            if (!rejected[i] && moves_equal(list->moves[i], history->entries[second].move))
+                break;
+        if (i == list->count)
+            continue;
+
+        for (j = 1; j <= length; ++j)
+            if (!moves_equal(history->entries[start + j].move, history->entries[second + j].move) ||
+                (j < length &&
+                 !moves_equal(history->entries[start + j].move, history->entries[third + j].move)))
+                break;
+        if (j <= length)
+            continue;
+
+        xq_position_make_move(pos, list->moves[i]);
+        closed = xq_position_hash(pos) == key;
+        xq_position_unmake_move(pos, list->moves[i]);
+        if (closed && root_cycle_is_loss(history, start, length, pos, list->moves[i]))
+            rejected[i] = true;
+    }
+
+    for (int i = 0; i < list->count; ++i)
+        if (!rejected[i])
+            list->moves[count++] = list->moves[i];
+    list->count = count;
+    return count != original_count;
+}
+
+/**
  * @brief Runs the built-in iterative-deepening search.
  *
  * The function searches only legal root moves from depth 1 through the requested maximum depth.
@@ -1448,6 +1598,9 @@ static XqMove select_timed_root_move(const ScoredMove *moves, int count, int dep
  *
  * If the time limit expires during an iteration, the function selects among the root moves whose
  * searches completed.
+ *
+ * Before iterative deepening, real-game history excludes moves that close three identical cycles.
+ * If every legal move loses this way, the original first move is returned without searching.
  *
  * @param engine    Engine adapter used for evaluation, move ordering, and optional transposition
  *                  table access; may be null.
@@ -1468,6 +1621,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
     uint64_t root_key;
     XqMove hash_move;
     SearchContext context;
+    bool filtered_cycles;
     unsigned depth = limits->max_depth == 0 ? 1 : limits->max_depth;
     unsigned current_depth;
     int i;
@@ -1485,6 +1639,11 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
         (void)prioritize_move(&list, hash_move);
 
     search_context_init(&context, limits);
+
+    *best_move = list.moves[0];
+    filtered_cycles = filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
+    if (list.count == 0)
+        return true; /* All legal moves lose: retain the original first move. */
 
     for (i = 0; i < list.count; ++i)
     {
@@ -1548,8 +1707,10 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
         order_root_moves(root_moves, list.count);
         *best_move = root_moves[0].move;
         previous_pv = current_pv;
-        tt_store(table, root_key, current_depth, root_moves[0].score, 0, XQ_SEARCH_SCORE_EXACT,
-                 root_moves[0].move);
+        /* A history-dependent root result must not enter the position-only cache. */
+        if (!filtered_cycles)
+            tt_store(table, root_key, current_depth, root_moves[0].score, 0, XQ_SEARCH_SCORE_EXACT,
+                     root_moves[0].move);
 
         if (current_depth == depth)
             break;
