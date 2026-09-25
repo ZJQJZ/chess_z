@@ -37,11 +37,12 @@ static const char *color_name(XqColor color)
  */
 static void print_usage(const char *program)
 {
-    printf("usage: %s [--fen FEN] [--engine red|black] [--search-detail]\n", program);
+    printf("usage: %s [--fen FEN] [--engine red|black] [--time-ms MS] [--search-detail]\n", program);
     printf("\n");
     printf("options:\n");
     printf("  -f, --fen FEN           initialize the position from FEN\n");
     printf("  -e, --engine COLOR      choose the engine side: red or black\n");
+    printf("      --time-ms MS        default thinking time per engine move (positive integer milliseconds)\n");
     printf("      --search-detail     append each engine search to build/search_detail.txt\n");
     printf("  -h, --help              show this help\n");
     printf("\n");
@@ -107,13 +108,52 @@ static bool parse_move_text(const char *text, XqMoveList *legal, XqMove *move)
     return false;
 }
 
+/* Parse a positive millisecond limit, rejecting overflow and extra arguments. */
+static bool parse_time_ms(const char *text, uint64_t *time_limit_ms)
+{
+    uint64_t value = 0;
+
+    if (*text < '0' || *text > '9')
+        return false;
+    while (*text >= '0' && *text <= '9')
+    {
+        unsigned digit = (unsigned)(*text++ - '0');
+        if (value > (UINT64_MAX - digit) / 10)
+            return false;
+        value = value * 10 + digit;
+    }
+    while (isspace((unsigned char)*text))
+        ++text;
+    if (*text != '\0' || value == 0)
+        return false;
+    *time_limit_ms = value;
+    return true;
+}
+
+/* Parse an optional positive millisecond limit for the next engine reply only. */
+static bool parse_move_input(const char *text, XqMoveList *legal, XqMove *move,
+                             uint64_t *time_limit_ms)
+{
+    while (isspace((unsigned char)*text))
+        ++text;
+    if (strlen(text) < 4 || !parse_move_text(text, legal, move))
+        return false;
+    text += 4;
+    if (*text != '\0' && !isspace((unsigned char)*text))
+        return false;
+    while (isspace((unsigned char)*text))
+        ++text;
+    return *text == '\0' || parse_time_ms(text, time_limit_ms);
+}
+
 /**
  * help
  */
 static void print_help(void)
 {
     printf("commands:\n");
-    printf("  a0a1  move from file/rank to file/rank\n");
+    printf("  a0a1 [time_ms]  move; optional positive integer time limit for the next engine reply\n");
+    printf("                  e.g. a0a1 2000 (2 seconds); omit time to use the default\n");
     printf("  fen   print current FEN\n");
     printf("  moves print legal moves\n");
     printf("  quit  exit\n");
@@ -230,7 +270,8 @@ int main(int argc, char **argv)
     XqTranspositionTable *table;
     XqEngineAdapter engine;
     XqHistory history;
-    XqSearchLimits limits = xq_search_limits_default();
+    XqSearchLimits default_limits = xq_search_limits_default();
+    XqSearchLimits limits;
     bool search_detail = false;
     FILE *search_log = NULL;
     int exit_status = EXIT_SUCCESS;
@@ -249,6 +290,21 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--search-detail") == 0)
         {
             search_detail = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--time-ms") == 0)
+        {
+            if (++i >= argc)
+            {
+                fprintf(stderr, "error: --time-ms requires a positive integer millisecond argument\n");
+                print_usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+            if (!parse_time_ms(argv[i], &default_limits.time_limit_ms))
+            {
+                fprintf(stderr, "error: invalid thinking time: %s (expected positive integer milliseconds)\n", argv[i]);
+                return EXIT_FAILURE;
+            }
             continue;
         }
         if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--fen") == 0)
@@ -283,6 +339,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    limits = default_limits;
     if (fen != NULL)
     {
         if (!xq_position_from_fen(&pos, fen))
@@ -359,8 +416,20 @@ int main(int argc, char **argv)
         }
 
         printf("%s to move > ", color_name(pos.side_to_move));
+        fflush(stdout);
         if (fgets(input, sizeof(input), stdin) == NULL)
             break;
+        if (strchr(input, '\n') == NULL && !feof(stdin))
+        {
+            int ch = getchar();
+            if (ch != '\n' && ch != EOF)
+            {
+                while ((ch = getchar()) != '\n' && ch != EOF)
+                    ;
+                printf("input too long. Use a move optionally followed by time_ms.\n");
+                continue;
+            }
+        }
         input[strcspn(input, "\r\n")] = '\0';
 
         if (strcmp(input, "quit") == 0 || strcmp(input, "q") == 0)
@@ -385,11 +454,13 @@ int main(int argc, char **argv)
 
         {
             XqMove move;
-            if (!parse_move_text(input, &legal, &move))
+            uint64_t time_limit_ms = default_limits.time_limit_ms;
+            if (!parse_move_input(input, &legal, &move, &time_limit_ms))
             {
-                printf("illegal move or bad format. Try moves like b2b9, or type moves.\n");
+                printf("illegal move or bad format. Use b2b9 [time_ms] (positive integer milliseconds), or type moves.\n");
                 continue;
             }
+            limits.time_limit_ms = time_limit_ms;
             xq_position_make_move(&pos, move);
             if (!xq_history_push(&history, move, &pos))
             {

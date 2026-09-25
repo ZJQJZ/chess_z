@@ -49,6 +49,27 @@ gcc -std=c99 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c sr
 ./build/xiangqi_cli
 ```
 
+启动时可用 `--time-ms` 设置整局默认的每步思考时间（正整数，单位毫秒），例如 2 秒：
+
+```sh
+./build/xiangqi_cli --time-ms 2000
+./build/xiangqi_cli --engine red --time-ms 2000 --search-detail
+```
+
+不传此参数时使用引擎默认的 3000 毫秒。引擎先手时的第一步也使用该设置。
+
+轮到玩家时，可以在走法后附加引擎下一步的思考时间（正整数，单位毫秒）：
+
+```text
+b2b9 2000
+```
+
+这表示走出 `b2b9` 后，引擎下一步最多思考约 2 秒；搜索也可能因达到深度限制等原因提前结束。
+只输入走法（如 `b2b9`）则使用 `--time-ms` 指定的时间，未指定时为 3000 毫秒；深度限制仍为 10 层。
+时间设置仅对紧接着的一次引擎搜索生效，下一次省略时间时恢复默认值。
+时间为零、负数、小数、溢出或带有多余参数的输入会被拒绝，棋盘保持不变。
+引擎先手时的第一步仍使用默认限制。整局复用同一张置换表，修改思考时间不会清空或重建它。
+
 开启每次引擎走棋的搜索摘要：
 
 ```sh
@@ -65,7 +86,7 @@ gcc -std=c99 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c sr
 
 | 字段 | 含义 |
 | --- | --- |
-| `depth_limit` / `time_limit_ms` / `time_mode` / `depth_bonus` | 本次搜索配置，默认 10 层、3000 毫秒、单调墙钟、深度奖励 70 |
+| `depth_limit` / `time_limit_ms` / `time_mode` / `depth_bonus` | 本次搜索配置，默认 10 层、3000 毫秒、单调墙钟、深度奖励 70；可通过 `--time-ms` 设置默认时间，输入走法时可指定下一步的时间限制 |
 | `max_started_depth` | 实际开始搜索至少一个根走法的最大迭代深度 |
 | `completed_depth` | 全部根候选走法均已完成的最大迭代深度 |
 | `selected_move_depth` | 最终选中走法的已完成深度；未经搜索的回退走法为 0 |
