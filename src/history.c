@@ -116,6 +116,14 @@ bool xq_history_push(XqHistory *history, XqMove move, const XqPosition *pos)
     return true;
 }
 
+bool xq_history_truncate(XqHistory *history, size_t count)
+{
+    if (count == 0 || count > history->count)
+        return false;
+    history->count = count;
+    return true;
+}
+
 /**
  * @brief Releases the history's entry array and resets the object to zero.
  *

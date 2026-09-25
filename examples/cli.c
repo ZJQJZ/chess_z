@@ -156,6 +156,7 @@ static void print_help(void)
     printf("                  e.g. a0a1 2000 (2 seconds); omit time to use the default\n");
     printf("  fen   print current FEN\n");
     printf("  moves print legal moves\n");
+    printf("  undo  take back your last move and the engine reply (alias: u)\n");
     printf("  quit  exit\n");
 }
 
@@ -263,9 +264,31 @@ static void write_search_detail(FILE **log, const XqPosition *pos,
     flush_search_detail(log);
 }
 
+/* Replaying the retained moves also restores the initial FEN's move counters.
+ * History and board are committed together; the engine's cache is untouched. */
+static bool undo_last_turn(XqPosition *pos, const XqPosition *initial,
+                           XqHistory *history, size_t plies)
+{
+    XqPosition restored = *initial;
+    size_t retained;
+    size_t i;
+
+    if (history->count <= plies)
+        return false;
+    retained = history->count - plies;
+    for (i = 1; i < retained; ++i)
+        if (!xq_position_make_move(&restored, history->entries[i].move))
+            return false;
+    if (!xq_history_truncate(history, retained))
+        return false;
+    *pos = restored;
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     XqPosition pos;
+    XqPosition initial_position;
     XqMoveList legal;
     XqTranspositionTable *table;
     XqEngineAdapter engine;
@@ -351,6 +374,7 @@ int main(int argc, char **argv)
     else
         xq_position_startpos(&pos);
 
+    initial_position = pos;
     if (!xq_history_init(&history, &pos))
     {
         fprintf(stderr, "error: history allocation failed\n");
@@ -385,10 +409,10 @@ int main(int argc, char **argv)
             printf("%s has no legal moves and loses. %s wins.\n",
                    pos.side_to_move == XQ_RED ? "red" : "black",
                    pos.side_to_move == XQ_RED ? "black" : "red");
-            break;
+            printf("Game over. Type undo to take back your last turn, or quit.\n");
         }
 
-        if (pos.side_to_move == engine_color)
+        if (legal.count > 0 && pos.side_to_move == engine_color)
         {
             XqMove best = {0};
             XqSearchStats stats;
@@ -415,7 +439,10 @@ int main(int argc, char **argv)
             continue;
         }
 
-        printf("%s to move > ", color_name(pos.side_to_move));
+        if (legal.count == 0)
+            printf("game over > ");
+        else
+            printf("%s to move > ", color_name(pos.side_to_move));
         fflush(stdout);
         if (fgets(input, sizeof(input), stdin) == NULL)
             break;
@@ -439,6 +466,33 @@ int main(int argc, char **argv)
             print_help();
             continue;
         }
+        if (strcmp(input, "undo") == 0 || strcmp(input, "u") == 0)
+        {
+            /* A human winning move has no engine reply to retract. */
+            size_t plies = pos.side_to_move == engine_color ? 1 : 2;
+            if (history.count <= plies)
+            {
+                printf("No player move to undo.\n");
+                continue;
+            }
+            if (!undo_last_turn(&pos, &initial_position, &history, plies))
+            {
+                fprintf(stderr, "error: cannot restore position; undo cancelled\n");
+                continue;
+            }
+            limits = default_limits;
+            printf("Undid %zu move(s). Your turn again.\n", plies);
+            if (search_log != NULL)
+            {
+                char restored_fen[128];
+                if (!xq_position_to_fen(&pos, restored_fen, sizeof(restored_fen)))
+                    strcpy(restored_fen, "unavailable");
+                fprintf(search_log, "\n--- undo ---\nplies_undone: %zu\nfen_after: %s\n",
+                        plies, restored_fen);
+                flush_search_detail(&search_log);
+            }
+            continue;
+        }
         if (strcmp(input, "moves") == 0)
         {
             print_legal_moves(&legal);
@@ -449,6 +503,12 @@ int main(int argc, char **argv)
             char fen[128];
             if (xq_position_to_fen(&pos, fen, sizeof(fen)))
                 printf("%s\n", fen);
+            continue;
+        }
+
+        if (legal.count == 0)
+        {
+            printf("Game over. Type undo or quit.\n");
             continue;
         }
 

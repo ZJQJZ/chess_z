@@ -28,6 +28,10 @@ bool xq_history_reset(XqHistory *history, const XqPosition *initial);
 /* Append after a successful real move; pos is the resulting position.
  * Requires initialized history. Allocation failure leaves history unchanged. */
 bool xq_history_push(XqHistory *history, XqMove move, const XqPosition *pos);
+/* Retain the first count positions, including the initial position (count >= 1).
+ * Rejects counts beyond the current history; retains storage for subsequent moves.
+ * The caller must restore the board to the retained final position separately. */
+bool xq_history_truncate(XqHistory *history, size_t count);
 void xq_history_destroy(XqHistory *history);
 
 #endif
