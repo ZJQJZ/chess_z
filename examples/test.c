@@ -96,7 +96,21 @@ int main()
     // const char *chinese_fen = "2xsj2c1/4sB2C/1M2x4/4P3p/9/9/9/1m2z4/9/3J5 r - -";
     // const char *chinese_fen = "4B3P/C8/2M1j1PMx/4z1cc1/9/9/9/3m5/4z4/3J5 r - -";
     // const char *chinese_fen = "4C4/3j2M2/7P1/9/2xp2x2/9/c8/9/3z1z3/4J1C2 r - -";
-    const char *chinese_fen = "P1xsp1CM1/c2Csj3/7m1/1cB6/2M1B1z2/9/9/2m6/5z3/4Jp3 r - -";
+    // const char *chinese_fen = "P1xsp1CM1/c2Csj3/7m1/1cB6/2M1B1z2/9/9/2m6/5z3/4Jp3 r - -";
+    
+    // 24 过
+    // const char *chinese_fen = "5sx2/4j4/4xs1m1/9/4M4/4P1C2/9/3z5/2c1z4/3J5 r - -";
+
+    // 25 过
+    // const char *chinese_fen = "4js3/1M2s4/4p4/9/9/3C3C1/4p4/4X4/4S1cm1/3SJ1X2 r - -";
+
+    // 122 过
+    // const char *chinese_fen = "2c2j1M1/9/7C1/2zM2z2/1mx6/9/9/2mpp4/2z2z3/3J1z1c1 r - -";
+
+    //123
+    // const char *chinese_fen = "1BB1js3/C3sm3/9/9/p5xM1/c8/P8/9/4z1z2/5J3 r - -";
+    const char *chinese_fen = "cmxsj1x2/1C2s4/7cm/z7z/9/6P2/B3z3B/X6P1/4S4/3S1J1C1 r - -";
+
     char english_fen[128];
     XqPosition pos;
 
