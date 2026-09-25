@@ -36,5 +36,7 @@ uint64_t xq_position_hash(const XqPosition *pos);
 bool xq_position_validate(const XqPosition *pos);
 const char *xq_piece_to_text(int piece);
 void xq_position_print(const XqPosition *pos);
+/* Rotate the display by 180 degrees when flipped; board and coordinates are unchanged. */
+void xq_position_print_oriented(const XqPosition *pos, bool flipped);
 
 #endif

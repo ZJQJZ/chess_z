@@ -157,6 +157,7 @@ static void print_help(void)
     printf("  fen   print current FEN\n");
     printf("  moves print legal moves\n");
     printf("  undo  take back your last move and the engine reply (alias: u)\n");
+    printf("  flip  rotate the board display 180 degrees; move coordinates stay unchanged\n");
     printf("  quit  exit\n");
 }
 
@@ -296,6 +297,7 @@ int main(int argc, char **argv)
     XqSearchLimits default_limits = xq_search_limits_default();
     XqSearchLimits limits;
     bool search_detail = false;
+    bool board_flipped = false;
     FILE *search_log = NULL;
     int exit_status = EXIT_SUCCESS;
     const char *fen = NULL;
@@ -401,7 +403,7 @@ int main(int argc, char **argv)
 
     for (;;)
     {
-        xq_position_print(&pos);
+        xq_position_print_oriented(&pos, board_flipped);
         xq_generate_legal(&pos, &legal);
 
         if (legal.count == 0)
@@ -464,6 +466,13 @@ int main(int argc, char **argv)
         if (strcmp(input, "help") == 0 || strcmp(input, "?") == 0)
         {
             print_help();
+            continue;
+        }
+        if (strcmp(input, "flip") == 0)
+        {
+            board_flipped = !board_flipped;
+            printf("Board view: %s at bottom. Move coordinates are unchanged.\n",
+                   board_flipped ? "black" : "red");
             continue;
         }
         if (strcmp(input, "undo") == 0 || strcmp(input, "u") == 0)

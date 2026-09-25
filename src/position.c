@@ -454,14 +454,22 @@ const char *xq_piece_to_text(int piece)
  */
 void xq_position_print(const XqPosition *pos)
 {
-    int rank;
+    xq_position_print_oriented(pos, false);
+}
 
-    for (rank = XQ_RANKS - 1; rank >= 0; --rank)
+/* Only the traversal order changes; square labels retain their original meaning. */
+void xq_position_print_oriented(const XqPosition *pos, bool flipped)
+{
+    int row;
+    int column;
+
+    for (row = 0; row < XQ_RANKS; ++row)
     {
-        int file;
+        int rank = flipped ? row : XQ_RANKS - 1 - row;
         printf("%d ", rank);
-        for (file = 0; file < XQ_FILES; ++file)
+        for (column = 0; column < XQ_FILES; ++column)
         {
+            int file = flipped ? XQ_FILES - 1 - column : column;
             XqSquare sq = xq_square_make(file, rank);
             int piece = pos->board[sq];
             const char *text = xq_piece_to_text(piece);
@@ -474,6 +482,11 @@ void xq_position_print(const XqPosition *pos)
         }
         printf("\n");
     }
-    printf("  a  b  c  d  e  f  g  h  i\n");
+    printf("  ");
+    for (column = 0; column < XQ_FILES; ++column)
+    {
+        int file = flipped ? XQ_FILES - 1 - column : column;
+        printf("%c%s", 'a' + file, column == XQ_FILES - 1 ? "\n" : "  ");
+    }
     printf("side: %s\n", pos->side_to_move == XQ_RED ? "red" : "black");
 }
