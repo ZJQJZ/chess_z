@@ -30,6 +30,7 @@ xq_enable_warnings(xiangqi)
 
 add_executable(xiangqi_cli examples/cli.c)
 target_link_libraries(xiangqi_cli PRIVATE xiangqi)
+xq_enable_warnings(xiangqi_cli)
 
 add_executable(xiangqi_explain examples/explain.c)
 target_link_libraries(xiangqi_explain PRIVATE xiangqi)
@@ -57,3 +58,10 @@ enable_testing()
 add_executable(xiangqi_core_tests tests/test_core.c)
 target_link_libraries(xiangqi_core_tests PRIVATE xiangqi)
 add_test(NAME xiangqi_core_tests COMMAND xiangqi_core_tests)
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME xiangqi_cli_tests
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py
+                $<TARGET_FILE:xiangqi_cli>)
+endif()

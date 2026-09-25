@@ -49,6 +49,45 @@ gcc -std=c99 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c sr
 ./build/xiangqi_cli
 ```
 
+开启每次引擎走棋的搜索摘要：
+
+```sh
+./build/xiangqi_cli --search-detail
+./build/xiangqi_cli --engine red --search-detail
+```
+
+默认不记录日志。开启后，向**当前工作目录**下的 `build/search_detail.txt` 追加文本；
+缺少 `build` 目录时自动创建。每次启动写入时间、初始 FEN 和引擎执棋方，
+每次引擎搜索结束后立即写入并刷新一份摘要。旧对局保留，人类走棋不会触发额外搜索。
+文件创建或写入失败会输出警告并关闭本次运行的日志功能，对局继续。
+
+每份摘要包含回合编号、走棋前 FEN、执棋方、搜索成功状态、最终走法，以及以下字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `depth_limit` / `time_limit_ms` / `time_mode` / `depth_bonus` | 本次搜索配置，默认 10 层、3000 毫秒、单调墙钟、深度奖励 70 |
+| `max_started_depth` | 实际开始搜索至少一个根走法的最大迭代深度 |
+| `completed_depth` | 全部根候选走法均已完成的最大迭代深度 |
+| `selected_move_depth` | 最终选中走法的已完成深度；未经搜索的回退走法为 0 |
+| `nodes` | 普通搜索和静态搜索函数的进入次数，普通搜索叶节点转入静态搜索时各计一次 |
+| `elapsed_ms` | 整次调用的单调墙钟耗时，读取失败显示 `unavailable` |
+| `stopped` | 是否因时间限制或搜索计时错误提前中断 |
+| `stats_available` / `cache_available` | 内部搜索统计／置换表统计是否可用 |
+| `cache_probes` / `cache_hits` / `cache_hit_rate` | 本次置换表查询数、命中数和命中率；查询为零时为 `0.00%` |
+| `cache_cutoffs` | 缓存分数直接复用或上下界导致剪枝的次数 |
+| `cache_stores` / `cache_replacements` | 本次缓存写入和替换次数 |
+
+三个实际深度均以半回合（ply）为单位，不包含静态搜索延伸；未开始搜索时为 0。
+超时可能保留当前未完成迭代中已经完成的候选结果，因此所选走法深度可能高于完整完成深度。
+缓存统计取本次调用前后的计数差，不清空缓存和累计计数。命中包含仅用于走法排序的命中，
+不等同于可以直接复用缓存分数；无缓存时计数为零并标记 `cache_available: no`。
+
+库调用方可使用 `xq_engine_find_best_move_with_stats(..., XqSearchStats *stats)` 获取相同统计；
+`stats` 可以为 `NULL`，原有 `xq_engine_find_best_move` 接口保持兼容。
+自定义搜索回调仅提供调用耗时，其内部深度、节点和缓存统计标记不可用。
+安装 Python 3 时，CMake 会额外注册 CLI 日志集成测试；也可直接运行
+`python3 tests/test_cli.py ./build/xiangqi_cli`。
+
 示例入口默认是“你执红，内置简易引擎执黑”。输入格式是 `起点+终点`，文件用 `a..i`，行号用 `0..9`，例如：
 
 ```text

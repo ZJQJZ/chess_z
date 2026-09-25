@@ -3,10 +3,21 @@
 #include "xiangqi/position.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
+
+static const char *search_detail_path = "build/search_detail.txt";
 
 /**
  * 返回指定棋子颜色对应的英文名称。
@@ -26,11 +37,12 @@ static const char *color_name(XqColor color)
  */
 static void print_usage(const char *program)
 {
-    printf("usage: %s [--fen FEN] [--engine red|black]\n", program);
+    printf("usage: %s [--fen FEN] [--engine red|black] [--search-detail]\n", program);
     printf("\n");
     printf("options:\n");
     printf("  -f, --fen FEN           initialize the position from FEN\n");
     printf("  -e, --engine COLOR      choose the engine side: red or black\n");
+    printf("      --search-detail     append each engine search to build/search_detail.txt\n");
     printf("  -h, --help              show this help\n");
     printf("\n");
     printf("FEN strings containing spaces must be quoted.\n");
@@ -125,6 +137,92 @@ static void print_legal_moves(const XqMoveList *legal)
     }
 }
 
+/* Logging failures disable only diagnostics, never the game. */
+static void flush_search_detail(FILE **log)
+{
+    if (ferror(*log) || fflush(*log) == EOF)
+    {
+        fprintf(stderr, "warning: cannot write %s; search logging disabled\n", search_detail_path);
+        fclose(*log);
+        *log = NULL;
+    }
+}
+
+static FILE *open_search_detail(const XqPosition *pos, XqColor engine_color)
+{
+    FILE *log;
+    char fen[128];
+    char timestamp[64] = "unavailable";
+    time_t now;
+    struct tm *local;
+    int directory_result;
+
+#ifdef _WIN32
+    directory_result = _mkdir("build");
+#else
+    directory_result = mkdir("build", 0777);
+#endif
+    if (directory_result != 0 && errno != EEXIST)
+    {
+        fprintf(stderr, "warning: cannot create build directory: %s; search logging disabled\n",
+                strerror(errno));
+        return NULL;
+    }
+    log = fopen(search_detail_path, "a");
+    if (log == NULL)
+    {
+        fprintf(stderr, "warning: cannot open %s: %s; search logging disabled\n",
+                search_detail_path, strerror(errno));
+        return NULL;
+    }
+    now = time(NULL);
+    local = now == (time_t)-1 ? NULL : localtime(&now);
+    if (local != NULL && strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S %Z", local) == 0)
+        strcpy(timestamp, "unavailable");
+    if (!xq_position_to_fen(pos, fen, sizeof(fen)))
+        strcpy(fen, "unavailable");
+    fprintf(log, "\n=== new game ===\ntimestamp: %s\ninitial_fen: %s\nengine_color: %s\n",
+            timestamp, fen, color_name(engine_color));
+    flush_search_detail(&log);
+    return log;
+}
+
+static void write_search_detail(FILE **log, const XqPosition *pos,
+                                const XqSearchLimits *limits, bool found,
+                                XqMove best, const XqSearchStats *stats)
+{
+    FILE *out = *log;
+    char fen[128];
+    char move[8];
+    const XqTranspositionStats *cache = &stats->cache;
+    double hit_rate = cache->probes == 0 ? 0.0 : 100.0 * (double)cache->hits / (double)cache->probes;
+
+    if (!xq_position_to_fen(pos, fen, sizeof(fen)))
+        strcpy(fen, "unavailable");
+    fprintf(out, "\n--- engine search ---\nfullmove_number: %u\nside_to_move: %s\n"
+                 "fen_before: %s\nsuccess: %s\nselected_move: %s\n",
+            (unsigned)pos->fullmove_number, color_name(pos->side_to_move), fen,
+            found ? "yes" : "no", found ? xq_move_to_string(best, move, sizeof(move)) : "none");
+    fprintf(out, "depth_limit: %u\ntime_limit_ms: %" PRIu64 "\ntime_mode: %s\ndepth_bonus: %d\n",
+            limits->max_depth, limits->time_limit_ms,
+            limits->time_mode == XQ_SEARCH_TIME_CPU ? "cpu" : "monotonic", limits->depth_bonus);
+    fprintf(out, "stats_available: %s\n", stats->available ? "yes" : "no");
+    if (stats->available)
+        fprintf(out, "max_started_depth: %u\ncompleted_depth: %u\nselected_move_depth: %u\n"
+                     "nodes: %" PRIu64 "\nstopped: %s\n",
+                stats->max_started_depth, stats->completed_depth, stats->selected_move_depth,
+                stats->nodes, stats->stopped ? "yes" : "no");
+    if (stats->elapsed_available)
+        fprintf(out, "elapsed_ms: %" PRIu64 "\n", stats->elapsed_ms);
+    else
+        fprintf(out, "elapsed_ms: unavailable\n");
+    fprintf(out, "cache_available: %s\n", stats->cache_available ? "yes" : "no");
+    fprintf(out, "cache_probes: %" PRIu64 "\ncache_hits: %" PRIu64 "\ncache_hit_rate: %.2f%%\n"
+                 "cache_cutoffs: %" PRIu64 "\ncache_stores: %" PRIu64 "\ncache_replacements: %" PRIu64 "\n",
+            cache->probes, cache->hits, hit_rate, cache->cutoffs, cache->stores, cache->replacements);
+    flush_search_detail(log);
+}
+
 int main(int argc, char **argv)
 {
     XqPosition pos;
@@ -132,6 +230,9 @@ int main(int argc, char **argv)
     XqTranspositionTable *table;
     XqEngineAdapter engine;
     XqHistory history;
+    XqSearchLimits limits = xq_search_limits_default();
+    bool search_detail = false;
+    FILE *search_log = NULL;
     int exit_status = EXIT_SUCCESS;
     const char *fen = NULL;
     XqColor engine_color = XQ_BLACK;
@@ -144,6 +245,11 @@ int main(int argc, char **argv)
         {
             print_usage(argv[0]);
             return EXIT_SUCCESS;
+        }
+        if (strcmp(argv[i], "--search-detail") == 0)
+        {
+            search_detail = true;
+            continue;
         }
         if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--fen") == 0)
         {
@@ -204,6 +310,9 @@ int main(int argc, char **argv)
     if (table == NULL)
         fprintf(stderr, "warning: transposition table allocation failed; continuing without cache\n");
 
+    if (search_detail)
+        search_log = open_search_detail(&pos, engine_color);
+
     printf("Xiangqi demo: human %s vs builtin %s engine\n",
            color_name(xq_color_opponent(engine_color)), color_name(engine_color));
     printf("Use coordinates a-i and ranks 0-9. Example: b2b9\n");
@@ -224,9 +333,15 @@ int main(int argc, char **argv)
 
         if (pos.side_to_move == engine_color)
         {
-            XqMove best;
+            XqMove best = {0};
+            XqSearchStats stats;
+            bool found;
             char text[8];
-            if (!xq_engine_find_best_move(&engine, &pos, NULL, &best))
+            found = xq_engine_find_best_move_with_stats(&engine, &pos, &limits, &best,
+                                                       search_log != NULL ? &stats : NULL);
+            if (search_log != NULL)
+                write_search_detail(&search_log, &pos, &limits, found, best, &stats);
+            if (!found)
             {
                 printf("engine failed to move\n");
                 break;
@@ -287,5 +402,7 @@ int main(int argc, char **argv)
 
     xq_transposition_table_destroy(table);
     xq_history_destroy(&history);
+    if (search_log != NULL && fclose(search_log) == EOF)
+        fprintf(stderr, "warning: cannot close %s\n", search_detail_path);
     return exit_status;
 }

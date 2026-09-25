@@ -1608,11 +1608,12 @@ static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMove
  *                  returns.
  * @param limits    Depth, time, depth-bonus, and clock-mode configuration; must not be null.
  * @param best_move Output that receives the selected move; must not be null.
+ * @param stats     Optional, zero-initialized output for built-in search counters.
  * @return          True if at least one root move exists and a move is selected; false if the
  *                  position is invalid for searching or contains no legal moves.
  */
 static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
-                           const XqSearchLimits *limits, XqMove *best_move)
+                           const XqSearchLimits *limits, XqMove *best_move, XqSearchStats *stats)
 {
     XqMoveList list;
     ScoredMove root_moves[XQ_MAX_MOVES];
@@ -1639,6 +1640,8 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
         (void)prioritize_move(&list, hash_move);
 
     search_context_init(&context, limits);
+    if (stats != NULL)
+        stats->stopped = context.stopped;
 
     *best_move = list.moves[0];
     filtered_cycles = filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
@@ -1658,6 +1661,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
         PrincipalVariation current_pv = {0};
         int alpha = INT_MIN / 2;
         int beta = INT_MAX / 2;
+        int completed_roots = 0;
 
         if (current_depth > 1)
             tt_new_generation(table);
@@ -1672,6 +1676,8 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             if (search_check_time(&context, true))
                 break;
 
+            if (stats != NULL)
+                stats->max_started_depth = current_depth;
             if (previous_pv.count > 0 && moves_equal(root_moves[i].move, previous_pv.moves[0]))
             {
                 child_hint = previous_pv.moves + 1;
@@ -1688,6 +1694,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
 
             root_moves[i].score = score;
             root_moves[i].completed_depth = current_depth;
+            ++completed_roots;
             if (score > alpha)
             {
                 alpha = score;
@@ -1697,6 +1704,10 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             if (search_check_time(&context, true))
                 break;
         }
+
+        /* The clock may expire just after the last root move completed. */
+        if (stats != NULL && completed_roots == list.count)
+            stats->completed_depth = current_depth;
 
         if (context.stopped)
         {
@@ -1716,6 +1727,17 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             break;
     }
 
+    if (stats != NULL)
+    {
+        stats->nodes = context.nodes;
+        stats->stopped = context.stopped;
+        for (i = 0; i < list.count; ++i)
+            if (moves_equal(root_moves[i].move, *best_move))
+            {
+                stats->selected_move_depth = root_moves[i].completed_depth;
+                break;
+            }
+    }
     return true;
 }
 
@@ -1739,16 +1761,88 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
                               const XqSearchLimits *limits, XqMove *best_move)
 {
+    return xq_engine_find_best_move_with_stats(engine, pos, limits, best_move, NULL);
+}
+
+/**
+ * @brief Finds the best move and optionally collects per-call search statistics.
+ *
+ * Default search limits are used when `limits` is null, and a maximum depth of zero is
+ * normalized to one. If `engine` provides a custom search callback, it receives the normalized
+ * maximum depth and manages its own time limit. Otherwise, `builtin_search()` is used; a null
+ * engine selects the default evaluation and move ordering without a transposition table or
+ * game history.
+ *
+ * When supplied, `stats` is initialized even if the search fails. Internal search counters are
+ * available only for the built-in search. Cache statistics are per-call counter differences
+ * when the built-in search uses a transposition table; collecting them does not reset the cache
+ * or its cumulative counters. Elapsed time is measured with the monotonic clock for either
+ * search path when clock readings succeed, independently of the configured search time mode.
+ *
+ * @param engine    Engine adapter that may provide custom callbacks, a cache, and history;
+ *                  may be null to use the built-in defaults.
+ * @param pos       Position to search. The built-in search requires a non-null position and
+ *                  restores it before returning.
+ * @param limits    Optional search limits; null selects the default configuration.
+ * @param best_move Output that receives the selected move; must not be null.
+ * @param stats     Optional output statistics; null disables diagnostics collection. Check the
+ *                  availability flags before using internal counters, elapsed time, or cache data.
+ * @return          True if a best move was found and written; false on invalid input, when no move
+ *                  is available, or when the custom search callback fails.
+ */
+bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine, XqPosition *pos,
+                                         const XqSearchLimits *limits, XqMove *best_move,
+                                         XqSearchStats *stats)
+{
     XqSearchLimits effective_limits;
+    XqTranspositionStats before;
+    bool custom = engine != NULL && engine->search != NULL;
+    XqTranspositionTable *table =
+        stats != NULL && !custom && engine != NULL ? engine->transposition_table : NULL;
+    bool found;
+    int64_t start = -1;
+
+    if (stats != NULL)
+    {
+        memset(stats, 0, sizeof(*stats));
+        stats->available = !custom;
+        stats->cache_available = !custom && table != NULL;
+    }
 
     if (best_move == NULL)
         return false;
     effective_limits = limits != NULL ? *limits : xq_search_limits_default();
     if (effective_limits.max_depth == 0)
         effective_limits.max_depth = 1;
-    if (engine != NULL && engine->search != NULL)
-        return engine->search(pos, effective_limits.max_depth, best_move, engine->user);
-    return builtin_search(engine, pos, &effective_limits, best_move);
+    if (stats != NULL)
+    {
+        start = monotonic_time_ms();
+        xq_transposition_table_get_stats(table, &before);
+    }
+    if (custom)
+        found = engine->search(pos, effective_limits.max_depth, best_move, engine->user);
+    else
+        found = builtin_search(engine, pos, &effective_limits, best_move, stats);
+    if (stats != NULL)
+    {
+        int64_t end = monotonic_time_ms();
+        if (start >= 0 && end >= start)
+        {
+            stats->elapsed_available = true;
+            stats->elapsed_ms = (uint64_t)(end - start);
+        }
+        if (stats->cache_available)
+        {
+            XqTranspositionStats after;
+            xq_transposition_table_get_stats(table, &after);
+            stats->cache.probes = after.probes - before.probes;
+            stats->cache.hits = after.hits - before.hits;
+            stats->cache.cutoffs = after.cutoffs - before.cutoffs;
+            stats->cache.stores = after.stores - before.stores;
+            stats->cache.replacements = after.replacements - before.replacements;
+        }
+    }
+    return found;
 }
 
 /**

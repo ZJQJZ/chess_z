@@ -22,6 +22,21 @@ typedef struct XqTranspositionStats
     uint64_t replacements;
 } XqTranspositionStats;
 
+/* Per-call statistics; depth is in plies and excludes quiescence extensions. */
+typedef struct XqSearchStats
+{
+    bool available; /* Internal counters are available only for built-in search. */
+    unsigned max_started_depth; /* Zero if no root move was searched. */
+    unsigned completed_depth; /* All root moves completed at this depth. */
+    unsigned selected_move_depth; /* Zero for an unsearched fallback move. */
+    uint64_t nodes; /* Entries into negamax and quiescence, including their shared leaf. */
+    bool stopped; /* Time limit reached or search clock failed. */
+    bool elapsed_available;
+    uint64_t elapsed_ms; /* Monotonic wall time, independent of the search time mode. */
+    bool cache_available;
+    XqTranspositionStats cache; /* Counter deltas; cumulative table stats are untouched. */
+} XqSearchStats;
+
 typedef struct XqEngineAdapter
 {
     XqEvaluateFn static_evaluate;
@@ -106,6 +121,11 @@ XqSearchLimits xq_search_limits_default(void);
 /* 时间限制和深度奖励仅适用于内置搜索；自定义 search 回调仍自行管理时间。 */
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
                               const XqSearchLimits *limits, XqMove *best_move);
+/* stats may be NULL; otherwise initialized on every return, including failure.
+ * Custom callbacks provide wall time only; internal/cache statistics are unavailable. */
+bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine, XqPosition *pos,
+                                       const XqSearchLimits *limits, XqMove *best_move,
+                                       XqSearchStats *stats);
 bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result);
 bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos, XqQuiescenceExplainResult *result);
 
