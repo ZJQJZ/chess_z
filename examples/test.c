@@ -109,7 +109,10 @@ int main()
 
     //123
     // const char *chinese_fen = "1BB1js3/C3sm3/9/9/p5xM1/c8/P8/9/4z1z2/5J3 r - -";
-    const char *chinese_fen = "cmxsj1x2/1C2s4/7cm/z7z/9/6P2/B3z3B/X6P1/4S4/3S1J1C1 r - -";
+
+    // const char *chinese_fen = "cmxsj1x2/1C2s4/7cm/z7z/9/6P2/B3z3B/X6P1/4S4/3S1J1C1 r - -";
+    const char *chinese_fen = "cmxsjsx1c/9/8p/2C5z/6z2/4P1p2/z3B3m/X1M1P3M/6C2/3SJSX2 r - -";
+    // const char *chinese_fen = "cmxsjsx1c/8p/9/4C3z/6z2/4P1p2/z3B3m/X1M1P3M/6C2/3SJSX2 r - -";
 
     char english_fen[128];
     XqPosition pos;
