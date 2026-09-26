@@ -37,12 +37,13 @@ static const char *color_name(XqColor color)
  */
 static void print_usage(const char *program)
 {
-    printf("usage: %s [--fen FEN] [--engine red|black] [--time-ms MS] [--search-detail]\n", program);
+    printf("usage: %s [--fen FEN] [--engine red|black] [--time-ms MS] [--tt-file PATH] [--search-detail]\n", program);
     printf("\n");
     printf("options:\n");
     printf("  -f, --fen FEN           initialize the position from FEN\n");
     printf("  -e, --engine COLOR      choose the engine side: red or black\n");
     printf("      --time-ms MS        default thinking time per engine move (positive integer milliseconds)\n");
+    printf("      --tt-file PATH      load a saved transposition table before the first search\n");
     printf("      --search-detail     append each engine search to build/search_detail.txt\n");
     printf("  -h, --help              show this help\n");
     printf("\n");
@@ -158,7 +159,50 @@ static void print_help(void)
     printf("  moves print legal moves\n");
     printf("  undo  take back your last move and the engine reply (alias: u)\n");
     printf("  flip  rotate the board display 180 degrees; move coordinates stay unchanged\n");
+    printf("  save-tt PATH  save the current transposition table (paths may contain spaces)\n");
     printf("  quit  exit\n");
+}
+
+static const char *tt_io_status_text(XqTranspositionIoStatus status)
+{
+    switch (status)
+    {
+    case XQ_TT_IO_OK:
+        return "success";
+    case XQ_TT_IO_FILE_ERROR:
+        return "file I/O error (check the path, parent directory and permissions)";
+    case XQ_TT_IO_INVALID_FORMAT:
+        return "invalid or corrupted transposition table file";
+    case XQ_TT_IO_INCOMPATIBLE:
+        return "incompatible cache format, engine version or table dimensions";
+    case XQ_TT_IO_NO_MEMORY:
+        return "not enough memory for the transposition table operation";
+    case XQ_TT_IO_INVALID_ARGUMENT:
+        return "invalid table or file path";
+    }
+    return "unknown transposition table error";
+}
+
+/* The entire remainder is one path. Optional matching outer quotes are stripped;
+ * shell expansion and escape processing are intentionally not performed here. */
+static char *parse_save_path(char *text)
+{
+    char *end;
+
+    while (isspace((unsigned char)*text))
+        ++text;
+    end = text + strlen(text);
+    while (end > text && isspace((unsigned char)end[-1]))
+        --end;
+    *end = '\0';
+    if (*text == '\'' || *text == '"')
+    {
+        if (end - text < 2 || end[-1] != *text)
+            return NULL;
+        ++text;
+        *--end = '\0';
+    }
+    return *text != '\0' ? text : NULL;
 }
 
 /**
@@ -301,8 +345,9 @@ int main(int argc, char **argv)
     FILE *search_log = NULL;
     int exit_status = EXIT_SUCCESS;
     const char *fen = NULL;
+    const char *tt_file = NULL;
     XqColor engine_color = XQ_BLACK;
-    char input[64];
+    char input[4096];
     int i;
 
     for (i = 1; i < argc; ++i)
@@ -315,6 +360,17 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--search-detail") == 0)
         {
             search_detail = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--tt-file") == 0)
+        {
+            if (++i >= argc || argv[i][0] == '\0')
+            {
+                fprintf(stderr, "error: --tt-file requires a nonempty file path\n");
+                print_usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+            tt_file = argv[i];
             continue;
         }
         if (strcmp(argv[i], "--time-ms") == 0)
@@ -383,6 +439,20 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     table = xq_transposition_table_create();
+    if (tt_file != NULL)
+    {
+        XqTranspositionIoStatus status = table == NULL ? XQ_TT_IO_NO_MEMORY
+                                                      : xq_transposition_table_load(table, tt_file);
+        if (status != XQ_TT_IO_OK)
+        {
+            fprintf(stderr, "error: cannot load transposition table '%s': %s\n",
+                    tt_file, tt_io_status_text(status));
+            xq_transposition_table_destroy(table);
+            xq_history_destroy(&history);
+            return EXIT_FAILURE;
+        }
+        printf("Loaded transposition table from: %s\n", tt_file);
+    }
     engine.static_evaluate = NULL;
     engine.search = NULL;
     engine.user = NULL;
@@ -455,7 +525,7 @@ int main(int argc, char **argv)
             {
                 while ((ch = getchar()) != '\n' && ch != EOF)
                     ;
-                printf("input too long. Use a move optionally followed by time_ms.\n");
+                printf("input too long (maximum %zu bytes); command ignored.\n", sizeof(input) - 1);
                 continue;
             }
         }
@@ -466,6 +536,29 @@ int main(int argc, char **argv)
         if (strcmp(input, "help") == 0 || strcmp(input, "?") == 0)
         {
             print_help();
+            continue;
+        }
+        if (strncmp(input, "save-tt", 7) == 0 &&
+            (input[7] == '\0' || isspace((unsigned char)input[7])))
+        {
+            char *path = parse_save_path(input + 7);
+            XqTranspositionIoStatus status;
+            if (path == NULL)
+            {
+                printf("usage: save-tt PATH (nonempty path; optional matching outer quotes)\n");
+                continue;
+            }
+            if (table == NULL)
+            {
+                fprintf(stderr, "error: no transposition table is available to save\n");
+                continue;
+            }
+            status = xq_transposition_table_save(table, path);
+            if (status != XQ_TT_IO_OK)
+                fprintf(stderr, "error: cannot save transposition table '%s': %s\n",
+                        path, tt_io_status_text(status));
+            else
+                printf("Saved transposition table to: %s\n", path);
             continue;
         }
         if (strcmp(input, "flip") == 0)

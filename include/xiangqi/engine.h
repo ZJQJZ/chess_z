@@ -116,6 +116,27 @@ void xq_transposition_table_destroy(XqTranspositionTable *table);
 void xq_transposition_table_reset_stats(XqTranspositionTable *table);
 void xq_transposition_table_get_stats(const XqTranspositionTable *table,
                                       XqTranspositionStats *stats);
+typedef enum XqTranspositionIoStatus
+{
+    XQ_TT_IO_OK,
+    XQ_TT_IO_FILE_ERROR,
+    XQ_TT_IO_INVALID_FORMAT,
+    XQ_TT_IO_INCOMPATIBLE,
+    XQ_TT_IO_NO_MEMORY,
+    XQ_TT_IO_INVALID_ARGUMENT
+} XqTranspositionIoStatus;
+
+/* Built-in search caches only; callers must not search or mutate the table concurrently.
+ * Save preserves the table and replaces path only after a complete temporary file is closed.
+ * Load validates into temporary storage, preserving the table on any failure. On success it
+ * restores slots and generations, resets statistics, and preserves the table object's address.
+ * Neither operation creates parent directories or saves/restores a game position or history.
+ * Files require matching format and engine-cache versions; custom evaluation/search semantics
+ * must not be mixed with this built-in cache format. Null/empty arguments are rejected. */
+XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *table,
+                                                   const char *path);
+XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
+                                                   const char *path);
 XqSearchLimits xq_search_limits_default(void);
 /* limits 为 NULL 时使用默认限制；搜索深度由 limits->max_depth 指定。 */
 /* 时间限制和深度奖励仅适用于内置搜索；自定义 search 回调仍自行管理时间。 */

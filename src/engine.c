@@ -7,12 +7,18 @@
 #include "xiangqi/movegen.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 static const int piece_values[XQ_PIECE_TYPE_NB] = {
@@ -165,6 +171,17 @@ struct XqTranspositionTable
     XqTranspositionBucket *buckets; // size: 1 << 18
     uint8_t generation;
     XqTranspositionStats stats;
+};
+
+/* Bump FORMAT_VERSION when the wire layout changes. Bump ENGINE_VERSION whenever evaluation,
+ * score/search semantics, piece encoding, or Zobrist hashing changes. Compatibility is explicitly
+ * maintained, not inferred from source edits. Only the built-in engine's cache is supported. */
+enum
+{
+    XQ_TT_FORMAT_VERSION = 1,
+    XQ_TT_ENGINE_VERSION = 1,
+    XQ_TT_FILE_HEADER_SIZE = 32,
+    XQ_TT_FILE_RECORD_SIZE = 24
 };
 
 /**
@@ -425,6 +442,386 @@ void xq_transposition_table_get_stats(const XqTranspositionTable *table,
         memset(stats, 0, sizeof(*stats));
     else
         *stats = table->stats;
+}
+
+/* Wire layout: 32-byte header, count * 24-byte records, then a 4-byte IEEE CRC32.
+ * Header: magic[8], format:u32, engine:u32, buckets:u32, ways:u32, count:u32,
+ * generation:u8, reserved[3]. Record: slot:u32, key:u64, score:i32, depth:u16,
+ * generation:u8, kind:u8, from:u8, to:u8, piece:u8, captured:u8 (255 means empty).
+ * All integers are little endian; CRC covers the header and records, not its own bytes. */
+
+/**
+ * @brief Encodes the low bytes of an unsigned integer in little-endian order.
+ *
+ * Writes directly into the caller's buffer without performing file I/O. Bits above the requested
+ * width are discarded, so the caller must choose a width sufficient for the serialized field.
+ *
+ * @param out   Destination buffer with room for at least bytes bytes; must not be null.
+ * @param value Integer to encode; passed by value and unchanged in the caller.
+ * @param bytes Number of bytes to write, from zero through eight.
+ */
+static void tt_put_le(unsigned char *out, uint64_t value, unsigned bytes)
+{
+    unsigned i;
+    for (i = 0; i < bytes; ++i)
+    {
+        out[i] = (unsigned char)(value & 255u);
+        value >>= 8;
+    }
+}
+
+/**
+ * @brief Decodes a little-endian byte sequence as an unsigned integer.
+ *
+ * Does not interpret a sign bit. Signed fields, such as cached scores, are converted separately by
+ * the caller after decoding their unsigned representation.
+ *
+ * @param in    Source buffer containing at least bytes bytes; must not be null and is unchanged.
+ * @param bytes Number of bytes to read, from zero through eight.
+ * @return      The decoded value, or zero when bytes is zero.
+ */
+static uint64_t tt_get_le(const unsigned char *in, unsigned bytes)
+{
+    uint64_t value = 0;
+    unsigned i;
+    for (i = 0; i < bytes; ++i)
+        value |= (uint64_t)in[i] << (8 * i);
+    return value;
+}
+
+/**
+ * @brief Updates an IEEE CRC32 state with a block of bytes using the reflected polynomial.
+ *
+ * Supports incremental calculation across the header and records. The caller initializes the state
+ * to UINT32_MAX, passes each returned state into the next update, and XORs the final state with
+ * UINT32_MAX exactly once to obtain the stored checksum. The checksum trailer is excluded.
+ *
+ * @param crc  Running state before processing this block, without the final XOR applied.
+ * @param data Source bytes; must contain at least size bytes and is left unchanged.
+ * @param size Number of bytes to process.
+ * @return     Updated state without the final XOR, or the original state when size is zero.
+ */
+static uint32_t tt_crc32(uint32_t crc, const unsigned char *data, size_t size)
+{
+    size_t i;
+    for (i = 0; i < size; ++i)
+    {
+        unsigned bit;
+        crc ^= data[i];
+        for (bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ ((crc & 1u) ? UINT32_C(0xedb88320) : 0);
+    }
+    return crc;
+}
+
+/**
+ * @brief Writes a complete byte block to a file stream and optionally updates its CRC32 state.
+ *
+ * Updates the checksum only after the entire block has been accepted by fwrite(). A failed write
+ * may still write part of the block; it is not rolled back. Success does not imply that buffered
+ * output has reached disk, so the caller must also check fclose() before replacing the cache file.
+ *
+ * @param file Open binary output stream; must not be null and remains open on return.
+ * @param data Source buffer containing at least size bytes; left unchanged.
+ * @param size Number of bytes to write at the stream's current position.
+ * @param crc  Optional running CRC32 state to update; null excludes this block from the checksum.
+ * @return     True if all requested bytes were written; false on a short write.
+ */
+static bool tt_write_bytes(FILE *file, const unsigned char *data, size_t size, uint32_t *crc)
+{
+    if (fwrite(data, 1, size, file) != size)
+        return false;
+    if (crc != NULL)
+        *crc = tt_crc32(*crc, data, size);
+    return true;
+}
+
+/**
+ * @brief Reads a complete byte block from a file stream and optionally updates its CRC32 state.
+ *
+ * A short read leaves the checksum unchanged, but may partially fill the destination and advance
+ * the stream. The caller distinguishes premature EOF from an I/O error using ferror(), and is
+ * responsible for validating decoded fields and comparing the final checksum.
+ *
+ * @param file Open binary input stream; must not be null and remains open on return.
+ * @param data Destination buffer with room for at least size bytes; must not be null.
+ * @param size Number of bytes to read at the stream's current position.
+ * @param crc  Optional running CRC32 state to update; null excludes this block from the checksum.
+ * @return     True if all requested bytes were read; false on premature EOF or a read error.
+ */
+static bool tt_read_bytes(FILE *file, unsigned char *data, size_t size, uint32_t *crc)
+{
+    if (fread(data, 1, size, file) != size)
+        return false;
+    if (crc != NULL)
+        *crc = tt_crc32(*crc, data, size);
+    return true;
+}
+
+/**
+ * @brief Exclusively creates a temporary file and wraps its descriptor in a binary output stream.
+ *
+ * Replaces the template's trailing XXXXXX with a unique suffix. POSIX uses mkstemp(); Windows
+ * generates a candidate name and opens it with exclusive creation, failing if it already exists. If
+ * stream creation fails after the file is created, closes its descriptor and attempts removal. On
+ * success, the caller owns the stream and must close it and rename or remove the file.
+ *
+ * @param path     Writable, null-terminated path template ending in XXXXXX; must not be null.
+ *                 Receives the actual path on success and may also be modified on failure.
+ * @param capacity Capacity of the path buffer, including its terminator; used on Windows.
+ * @return         An open file stream on success; null if name generation, creation, or wrapping
+ *                 the file descriptor fails.
+ */
+static FILE *tt_open_temporary(char *path, size_t capacity)
+{
+    int fd;
+    FILE *file;
+#ifdef _WIN32
+    if (_mktemp_s(path, capacity) != 0)
+        return NULL;
+    fd = _open(path, _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+    (void)capacity;
+    fd = mkstemp(path);
+#endif
+    if (fd < 0)
+        return NULL;
+#ifdef _WIN32
+    file = _fdopen(fd, "wb");
+#else
+    file = fdopen(fd, "wb");
+#endif
+    if (file == NULL)
+    {
+#ifdef _WIN32
+        _close(fd);
+#else
+        close(fd);
+#endif
+        remove(path);
+    }
+    return file;
+}
+
+/**
+ * @brief Saves a built-in engine's transposition table to a versioned binary cache file.
+ *
+ * Serializes valid entries with their original slots, normalized scores, and generations using the
+ * little-endian layout above, followed by an IEEE CRC32 checksum. Empty slots and cumulative
+ * statistics are omitted. Saving an empty table is supported; the in-memory table is unchanged.
+ *
+ * Writes to an exclusively created temporary file beside the destination, then replaces the
+ * destination only after all writes and fclose() succeed. Failure preserves the old destination and
+ * attempts temporary-file cleanup. Parent directories must already exist. The caller must prevent
+ * concurrent table mutation; no game position, history, or search limits are saved.
+ *
+ * @param table Initialized table to save; must not be null.
+ * @param path  Nonempty destination path; must not be null. An existing file is replaced on
+ *              success.
+ * @return      XQ_TT_IO_OK on success; XQ_TT_IO_INVALID_ARGUMENT for null or empty arguments
+ *              XQ_TT_IO_NO_MEMORY for path-size overflow or allocation failure, or
+ *              XQ_TT_IO_FILE_ERROR for temporary-file, write, close, or replacement failures.
+ */
+XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *table,
+                                                    const char *path)
+{
+    unsigned char header[XQ_TT_FILE_HEADER_SIZE] = {0};
+    unsigned char record[XQ_TT_FILE_RECORD_SIZE];
+    unsigned char trailer[4];
+    uint32_t count = 0;
+    uint32_t crc = UINT32_MAX;
+    uint32_t slot;
+    size_t path_size;
+    char *temporary;
+    FILE *file;
+    bool written;
+    XqTranspositionIoStatus status = XQ_TT_IO_FILE_ERROR;
+
+    if (table == NULL || path == NULL || *path == '\0')
+        return XQ_TT_IO_INVALID_ARGUMENT;
+    path_size = strlen(path);
+    if (path_size > SIZE_MAX - sizeof(".tmp.XXXXXX"))
+        return XQ_TT_IO_NO_MEMORY;
+    path_size += sizeof(".tmp.XXXXXX");
+    temporary = malloc(path_size);
+    if (temporary == NULL)
+        return XQ_TT_IO_NO_MEMORY;
+    snprintf(temporary, path_size, "%s.tmp.XXXXXX", path);
+    file = tt_open_temporary(temporary, path_size);
+    if (file == NULL)
+    {
+        free(temporary);
+        return XQ_TT_IO_FILE_ERROR;
+    }
+
+    for (slot = 0; slot < XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE; ++slot)
+        if (table->buckets[slot / XQ_TT_BUCKET_SIZE].entries[slot % XQ_TT_BUCKET_SIZE].depth != 0)
+            ++count;
+    memcpy(header, "XQTTBIN", 8);
+    tt_put_le(header + 8, XQ_TT_FORMAT_VERSION, 4);
+    tt_put_le(header + 12, XQ_TT_ENGINE_VERSION, 4);
+    tt_put_le(header + 16, XQ_TT_BUCKET_COUNT, 4);
+    tt_put_le(header + 20, XQ_TT_BUCKET_SIZE, 4);
+    tt_put_le(header + 24, count, 4);
+    header[28] = table->generation;
+    written = tt_write_bytes(file, header, sizeof(header), &crc);
+    for (slot = 0; written && slot < XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE; ++slot)
+    {
+        const XqTranspositionEntry *entry =
+            &table->buckets[slot / XQ_TT_BUCKET_SIZE].entries[slot % XQ_TT_BUCKET_SIZE];
+        if (entry->depth == 0)
+            continue;
+        tt_put_le(record, slot, 4);
+        tt_put_le(record + 4, entry->key, 8);
+        tt_put_le(record + 12, (uint32_t)entry->score, 4);
+        tt_put_le(record + 16, entry->depth, 2);
+        record[18] = entry->generation;
+        record[19] = entry->score_kind;
+        record[20] = entry->best_move.from;
+        record[21] = entry->best_move.to;
+        record[22] = (unsigned char)entry->best_move.piece;
+        record[23] = entry->best_move.captured == XQ_EMPTY_PIECE
+                         ? 255
+                         : (unsigned char)entry->best_move.captured;
+        written = tt_write_bytes(file, record, sizeof(record), &crc);
+    }
+    tt_put_le(trailer, crc ^ UINT32_MAX, 4);
+    if (written)
+        written = tt_write_bytes(file, trailer, sizeof(trailer), NULL);
+    if (fclose(file) != 0)
+        written = false;
+    if (written)
+    {
+#ifdef _WIN32
+        if (MoveFileExA(temporary, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+#else
+        if (rename(temporary, path) == 0)
+#endif
+            status = XQ_TT_IO_OK;
+    }
+    if (status != XQ_TT_IO_OK)
+        remove(temporary);
+    free(temporary);
+    return status;
+}
+
+/**
+ * @brief Validates a saved transposition table and replaces the target table's contents on success.
+ *
+ * Requires matching format and engine-cache versions and table dimensions. Reads into temporary
+ * storage, checking the header, record count, unique slots, hash-bucket mapping, score and move
+ * fields, CRC32, and absence of trailing bytes before accepting the file.
+ *
+ * Only after validation and successful file closure does the function replace the bucket array,
+ * restore its saved generation, and reset statistics. The table object's address stays unchanged;
+ * any failure preserves its previous contents and statistics. Loading replaces rather than merges
+ * entries and does not restore a game. The caller must prevent concurrent access to the table.
+ *
+ * @param table Initialized table receiving the loaded entries; must not be null.
+ * @param path  Nonempty path to an existing cache file; must not be null and is left unchanged.
+ * @return      XQ_TT_IO_OK on success; XQ_TT_IO_INVALID_ARGUMENT for null or empty arguments,
+ *              XQ_TT_IO_FILE_ERROR for file I/O failures, XQ_TT_IO_INVALID_FORMAT for malformed,
+ *              truncated, or checksum-invalid data, XQ_TT_IO_INCOMPATIBLE for version or dimension
+ *              mismatches, or XQ_TT_IO_NO_MEMORY if the temporary bucket array cannot be allocated.
+ */
+XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table, const char *path)
+{
+    unsigned char header[XQ_TT_FILE_HEADER_SIZE];
+    unsigned char record[XQ_TT_FILE_RECORD_SIZE];
+    unsigned char trailer[4];
+    uint32_t crc = UINT32_MAX;
+    uint32_t count;
+    uint32_t i;
+    XqTranspositionBucket *buckets = NULL;
+    FILE *file;
+    XqTranspositionIoStatus status = XQ_TT_IO_INVALID_FORMAT;
+
+    if (table == NULL || path == NULL || *path == '\0')
+        return XQ_TT_IO_INVALID_ARGUMENT;
+    file = fopen(path, "rb");
+    if (file == NULL)
+        return XQ_TT_IO_FILE_ERROR;
+    if (!tt_read_bytes(file, header, sizeof(header), &crc))
+        goto done;
+    if (memcmp(header, "XQTTBIN", 8) != 0)
+        goto done;
+    if (tt_get_le(header + 8, 4) != XQ_TT_FORMAT_VERSION ||
+        tt_get_le(header + 12, 4) != XQ_TT_ENGINE_VERSION ||
+        tt_get_le(header + 16, 4) != XQ_TT_BUCKET_COUNT ||
+        tt_get_le(header + 20, 4) != XQ_TT_BUCKET_SIZE)
+    {
+        status = XQ_TT_IO_INCOMPATIBLE;
+        goto done;
+    }
+    count = (uint32_t)tt_get_le(header + 24, 4);
+    if (count > XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE || header[29] != 0 || header[30] != 0 ||
+        header[31] != 0)
+        goto done;
+    buckets = calloc(XQ_TT_BUCKET_COUNT, sizeof(*buckets));
+    if (buckets == NULL)
+    {
+        status = XQ_TT_IO_NO_MEMORY;
+        goto done;
+    }
+    for (i = 0; i < count; ++i)
+    {
+        uint32_t slot;
+        uint32_t encoded_score;
+        int64_t score;
+        uint64_t key;
+        XqTranspositionEntry *entry;
+
+        if (!tt_read_bytes(file, record, sizeof(record), &crc))
+            goto done;
+        slot = (uint32_t)tt_get_le(record, 4);
+        key = tt_get_le(record + 4, 8);
+        encoded_score = (uint32_t)tt_get_le(record + 12, 4);
+        score = encoded_score <= INT32_MAX ? (int64_t)encoded_score
+                                           : (int64_t)encoded_score - INT64_C(4294967296);
+        /* Built-in search uses +/- INT_MAX/2 as window sentinels. Keep malformed values
+         * away from integer limits, including subsequent mate-distance adjustments. */
+        if (slot >= XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE ||
+            slot / XQ_TT_BUCKET_SIZE != (key & (XQ_TT_BUCKET_COUNT - 1u)) ||
+            tt_get_le(record + 16, 2) == 0 || score <= INT_MIN / 2 || score >= INT_MAX / 2 ||
+            (record[19] != XQ_SEARCH_SCORE_EXACT && record[19] != XQ_SEARCH_SCORE_LOWER_BOUND &&
+             record[19] != XQ_SEARCH_SCORE_UPPER_BOUND) ||
+            record[20] >= XQ_SQUARES || record[21] >= XQ_SQUARES || record[20] == record[21] ||
+            record[22] >= XQ_COLOR_NB * XQ_PIECE_TYPE_NB ||
+            (record[23] != 255 && record[23] >= XQ_COLOR_NB * XQ_PIECE_TYPE_NB))
+            goto done;
+        if (record[23] != 255 && record[22] / XQ_PIECE_TYPE_NB == record[23] / XQ_PIECE_TYPE_NB)
+            goto done;
+        entry = &buckets[slot / XQ_TT_BUCKET_SIZE].entries[slot % XQ_TT_BUCKET_SIZE];
+        if (entry->depth != 0)
+            goto done;
+        entry->key = key;
+        entry->score = (int)score;
+        entry->depth = (uint16_t)tt_get_le(record + 16, 2);
+        entry->generation = record[18];
+        entry->score_kind = record[19];
+        entry->best_move = (XqMove){record[20], record[21], (int8_t)record[22],
+                                    record[23] == 255 ? XQ_EMPTY_PIECE : (int8_t)record[23]};
+    }
+    if (!tt_read_bytes(file, trailer, sizeof(trailer), NULL) ||
+        tt_get_le(trailer, 4) != (crc ^ UINT32_MAX) || fgetc(file) != EOF)
+        goto done;
+    status = XQ_TT_IO_OK;
+
+done:
+    if (ferror(file))
+        status = XQ_TT_IO_FILE_ERROR;
+    if (fclose(file) != 0)
+        status = XQ_TT_IO_FILE_ERROR;
+    if (status == XQ_TT_IO_OK)
+    {
+        XqTranspositionBucket *old = table->buckets;
+        table->buckets = buckets;
+        table->generation = header[28];
+        memset(&table->stats, 0, sizeof(table->stats));
+        buckets = old;
+    }
+    free(buckets);
+    return status;
 }
 
 /**
@@ -1779,8 +2176,8 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
  * or its cumulative counters. Elapsed time is measured with the monotonic clock for either
  * search path when clock readings succeed, independently of the configured search time mode.
  *
- * @param engine    Engine adapter that may provide custom callbacks, a cache, and history;
- *                  may be null to use the built-in defaults.
+ * @param engine    Engine adapter that may provide custom callbacks, a cache, and history; may be
+ *                  null to use the built-in defaults.
  * @param pos       Position to search. The built-in search requires a non-null position and
  *                  restores it before returning.
  * @param limits    Optional search limits; null selects the default configuration.
