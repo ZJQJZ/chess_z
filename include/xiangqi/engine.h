@@ -25,12 +25,12 @@ typedef struct XqTranspositionStats
 /* Per-call statistics; depth is in plies and excludes quiescence extensions. */
 typedef struct XqSearchStats
 {
-    bool available; /* Internal counters are available only for built-in search. */
-    unsigned max_started_depth; /* Zero if no root move was searched. */
-    unsigned completed_depth; /* All root moves completed at this depth. */
+    bool available;               /* Internal counters are available only for built-in search. */
+    unsigned max_started_depth;   /* Zero if no root move was searched. */
+    unsigned completed_depth;     /* All root moves completed at this depth. */
     unsigned selected_move_depth; /* Zero for an unsearched fallback move. */
     uint64_t nodes; /* Entries into negamax and quiescence, including their shared leaf. */
-    bool stopped; /* Time limit reached or search clock failed. */
+    bool stopped;   /* Time limit reached or search clock failed. */
     bool elapsed_available;
     uint64_t elapsed_ms; /* Monotonic wall time, independent of the search time mode. */
     bool cache_available;
@@ -108,6 +108,25 @@ typedef struct XqQuiescenceExplainResult
     bool stand_pat_cutoff;
 } XqQuiescenceExplainResult;
 
+/* A normal-search node (remaining_depth >= 1) observed along an exact root path.
+ * score_kind is meaningful only when complete; a partial final_score is the best
+ * completed candidate score, not an exact node evaluation. visited is false if
+ * the path was never reached with positive remaining normal-search depth. */
+typedef struct XqPathExplainResult
+{
+    bool visited;
+    bool complete;
+    bool score_available;
+    unsigned root_depth;
+    unsigned remaining_depth;
+    size_t ply;
+    XqSearchScoreKind score_kind;
+    int alpha_before;
+    int beta;
+    XqExplainResult node;
+    XqSearchStats stats;
+} XqPathExplainResult;
+
 int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user);
 int xq_engine_default_move_order_score(const XqPosition *pos, XqMove move, void *user);
 XqTranspositionTable *xq_transposition_table_create(void);
@@ -134,9 +153,8 @@ typedef enum XqTranspositionIoStatus
  * Files require matching format and engine-cache versions; custom evaluation/search semantics
  * must not be mixed with this built-in cache format. Null/empty arguments are rejected. */
 XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *table,
-                                                   const char *path);
-XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
-                                                   const char *path);
+                                                    const char *path);
+XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table, const char *path);
 XqSearchLimits xq_search_limits_default(void);
 /* limits 为 NULL 时使用默认限制；搜索深度由 limits->max_depth 指定。 */
 /* 时间限制和深度奖励仅适用于内置搜索；自定义 search 回调仍自行管理时间。 */
@@ -145,9 +163,25 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
 /* stats may be NULL; otherwise initialized on every return, including failure.
  * Custom callbacks provide wall time only; internal/cache statistics are unavailable. */
 bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine, XqPosition *pos,
-                                       const XqSearchLimits *limits, XqMove *best_move,
-                                       XqSearchStats *stats);
-bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth, XqExplainResult *result);
-bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos, XqQuiescenceExplainResult *result);
+                                         const XqSearchLimits *limits, XqMove *best_move,
+                                         XqSearchStats *stats);
+bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos,
+                                      unsigned depth, XqExplainResult *result);
+bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos,
+                                          XqQuiescenceExplainResult *result);
+
+/* Search from pos, observing only the exact from/to sequence in path (NULL for
+ * an empty path). The caller supplies a legal path; pos is restored on return.
+ * limits is required: time_limit_ms=0 searches max_depth directly, otherwise
+ * iterative deepening shares one deadline. max_depth must be at least 1;
+ * UINT_MAX is the practical unlimited normal-depth cap for timed searches.
+ * Only evaluation/ordering callbacks are used, never search, cache or history.
+ * Records only normal-search visits with remaining depth >= 1; quiescence visits
+ * are excluded. Retains the latest completed visit, otherwise the latest partial visit.
+ * False means invalid arguments; timeout, terminal and unvisited paths are valid
+ * results. result is initialized even on failure (unless itself NULL). */
+bool xq_engine_explain_path(const XqEngineAdapter *engine, XqPosition *pos,
+                            const XqSearchLimits *limits, const XqMove *path, size_t path_count,
+                            XqPathExplainResult *result);
 
 #endif

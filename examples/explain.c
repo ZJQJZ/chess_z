@@ -3,6 +3,8 @@
 #include "xiangqi/position.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -22,8 +24,13 @@ enum
  */
 static void print_usage(const char *program)
 {
-    printf("usage: %s [--depth N] [--fen FEN]\n", program);
-    printf("  N=0 directly explains quiescence search for the input position.\n");
+    printf("usage: %s [--depth N] [--fen FEN] [--time-ms MS] [--moves MOVE ...]\n", program);
+    printf("  --time-ms MS  total root-search budget (positive milliseconds); iterative deepening.\n");
+    printf("  --moves ...   observe this path in the root search; accepts quoted sequences too.\n");
+    printf("  Either option prints one target node and exits. Unvisited paths are not searched separately.\n");
+    printf("  Depth is measured from the root: default 4, or unlimited with --time-ms.\n");
+    printf("  Path targets require remaining depth >= 1; single-shot mode rejects --depth 0.\n");
+    printf("  N=0 is supported only by the original interactive quiescence explanation.\n");
 }
 
 /**
@@ -74,8 +81,9 @@ static bool parse_positive_int(const char *text, int *value)
     char *end;
     long parsed;
 
+    errno = 0;
     parsed = strtol(text, &end, 10);
-    if (text == end || parsed <= 0 || parsed > INT_MAX)
+    if (errno == ERANGE || text == end || parsed <= 0 || parsed > INT_MAX)
         return false;
     while (*end != '\0')
     {
@@ -95,8 +103,9 @@ static bool parse_nonnegative_int(const char *text, int *value)
     char *end;
     long parsed;
 
+    errno = 0;
     parsed = strtol(text, &end, 10);
-    if (text == end || parsed < 0 || parsed > INT_MAX)
+    if (errno == ERANGE || text == end || parsed < 0 || parsed > INT_MAX)
         return false;
     while (*end != '\0')
     {
@@ -329,60 +338,289 @@ static bool explain_current(XqPosition *pos, unsigned root_depth, const int *pat
     return true;
 }
 
-int main(int argc, char **argv)
+typedef struct ExplainOptions
 {
-    XqPosition positions[MAX_HISTORY + 1];
-    int path[MAX_HISTORY];
-    int ply = 0;
-    unsigned depth = 4u;
-    const char *fen = NULL;
-    int arg;
-    char input[INPUT_SIZE];
+    unsigned depth;
+    bool depth_set;
+    bool single;
+    uint64_t time_ms;
+    const char *fen;
+    XqMove *moves;
+    const char **move_texts;
+    size_t count;
+    size_t capacity;
+} ExplainOptions;
 
+/* Same positive, overflow-checked millisecond syntax as xiangqi_cli. */
+static bool parse_time_ms(const char *text, uint64_t *time_ms)
+{
+    uint64_t value = 0;
+    if (*text < '0' || *text > '9')
+        return false;
+    while (*text >= '0' && *text <= '9')
+    {
+        unsigned digit = (unsigned)(*text++ - '0');
+        if (value > (UINT64_MAX - digit) / 10)
+            return false;
+        value = value * 10 + digit;
+    }
+    while (isspace((unsigned char)*text))
+        ++text;
+    if (*text != '\0' || value == 0)
+        return false;
+    *time_ms = value;
+    return true;
+}
+
+/* Tokenize without modifying argv, retaining only coordinates until FEN is known. */
+static bool append_moves(ExplainOptions *options, const char *text)
+{
+    size_t before = options->count;
+    while (*text != '\0')
+    {
+        const char *begin;
+        size_t length;
+        int ff, fr, tf, tr;
+        while (isspace((unsigned char)*text))
+            ++text;
+        if (*text == '\0')
+            break;
+        begin = text;
+        while (*text != '\0' && !isspace((unsigned char)*text))
+            ++text;
+        length = (size_t)(text - begin);
+        if (length != 4)
+        {
+            fprintf(stderr, "invalid move %zu: %.*s (expected four characters)\n",
+                    options->count + 1, (int)length, begin);
+            return false;
+        }
+        ff = tolower((unsigned char)begin[0]) - 'a';
+        fr = begin[1] - '0';
+        tf = tolower((unsigned char)begin[2]) - 'a';
+        tr = begin[3] - '0';
+        if (!xq_square_is_valid(ff, fr) || !xq_square_is_valid(tf, tr))
+        {
+            fprintf(stderr, "invalid move %zu: %.4s\n", options->count + 1, begin);
+            return false;
+        }
+        if (options->count == options->capacity)
+        {
+            size_t capacity = options->capacity == 0 ? 16 : options->capacity * 2;
+            XqMove *moves;
+            const char **texts;
+            if (capacity > (size_t)INT_MAX || capacity > SIZE_MAX / sizeof(*moves) ||
+                capacity > SIZE_MAX / sizeof(*texts))
+                return false;
+            moves = realloc(options->moves, capacity * sizeof(*moves));
+            if (moves == NULL)
+            {
+                fprintf(stderr, "could not allocate move path\n");
+                return false;
+            }
+            options->moves = moves;
+            texts = realloc(options->move_texts, capacity * sizeof(*texts));
+            if (texts == NULL)
+            {
+                fprintf(stderr, "could not allocate move path\n");
+                return false;
+            }
+            options->move_texts = texts;
+            options->capacity = capacity;
+        }
+        options->move_texts[options->count] = begin;
+        options->moves[options->count++] = (XqMove){
+            .from = (uint8_t)xq_square_make(ff, fr),
+            .to = (uint8_t)xq_square_make(tf, tr),
+        };
+    }
+    if (options->count == before)
+    {
+        fprintf(stderr, "--moves requires a nonempty move sequence\n");
+        return false;
+    }
+    return true;
+}
+
+/* 0: invalid input, 1: run, 2: help. */
+static int parse_options(int argc, char **argv, ExplainOptions *options)
+{
+    int arg;
     for (arg = 1; arg < argc; ++arg)
     {
         if (strcmp(argv[arg], "--depth") == 0)
         {
             int parsed;
-            if (arg + 1 >= argc || !parse_nonnegative_int(argv[arg + 1], &parsed))
-            {
-                print_usage(argv[0]);
-                return EXIT_FAILURE;
-            }
-            depth = (unsigned)parsed;
-            ++arg;
+            if (++arg == argc || !parse_nonnegative_int(argv[arg], &parsed))
+                return 0;
+            options->depth = (unsigned)parsed;
+            options->depth_set = true;
         }
         else if (strcmp(argv[arg], "--fen") == 0)
         {
-            if (arg + 1 >= argc)
+            if (++arg == argc)
+                return 0;
+            options->fen = argv[arg];
+        }
+        else if (strcmp(argv[arg], "--time-ms") == 0)
+        {
+            if (++arg == argc || !parse_time_ms(argv[arg], &options->time_ms))
             {
-                print_usage(argv[0]);
-                return EXIT_FAILURE;
+                fprintf(stderr, "--time-ms requires positive integer milliseconds\n");
+                return 0;
             }
-            fen = argv[++arg];
+            options->single = true;
+        }
+        else if (strcmp(argv[arg], "--moves") == 0)
+        {
+            size_t before = options->count;
+            options->single = true;
+            while (arg + 1 < argc && strncmp(argv[arg + 1], "--", 2) != 0)
+                if (!append_moves(options, argv[++arg]))
+                    return 0;
+            if (options->count == before)
+            {
+                fprintf(stderr, "--moves requires a nonempty move sequence\n");
+                return 0;
+            }
         }
         else if (strcmp(argv[arg], "--help") == 0 || strcmp(argv[arg], "-h") == 0)
-        {
-            print_usage(argv[0]);
-            return EXIT_SUCCESS;
-        }
+            return 2;
         else
-        {
-            print_usage(argv[0]);
-            return EXIT_FAILURE;
-        }
+            return 0;
     }
+    if (options->time_ms != 0 && !options->depth_set)
+        options->depth = UINT_MAX;
+    return 1;
+}
 
-    if (fen != NULL)
+static bool validate_path(const XqPosition *root, ExplainOptions *options, XqPosition *target)
+{
+    size_t step;
+    *target = *root;
+    for (step = 0; step < options->count; ++step)
     {
-        if (!xq_position_from_fen(&positions[0], fen))
+        XqMoveList legal;
+        int i;
+        xq_generate_legal(target, &legal);
+        for (i = 0; i < legal.count; ++i)
+            if (legal.moves[i].from == options->moves[step].from &&
+                legal.moves[i].to == options->moves[step].to)
+                break;
+        if (i == legal.count)
         {
-            fprintf(stderr, "invalid FEN: %s\n", fen);
+            fprintf(stderr, "illegal move %zu: %.4s\n", step + 1, options->move_texts[step]);
+            return false;
+        }
+        options->moves[step] = legal.moves[i];
+        if (!xq_position_make_move(target, legal.moves[i]))
+            return false;
+    }
+    return true;
+}
+
+static int explain_path_once(XqPosition *root, ExplainOptions *options)
+{
+    XqPosition target;
+    XqPathExplainResult result;
+    XqSearchLimits limits = xq_search_limits_default();
+    size_t i;
+    if (options->depth == 0)
+    {
+        fprintf(stderr, "path explanation requires --depth >= 1\n");
+        return EXIT_FAILURE;
+    }
+    if (!validate_path(root, options, &target))
+        return EXIT_FAILURE;
+    limits.max_depth = options->depth;
+    limits.time_limit_ms = options->time_ms;
+    if (!xq_engine_explain_path(NULL, root, &limits, options->moves, options->count, &result))
+        return EXIT_FAILURE;
+    printf("path=");
+    if (options->count == 0)
+        printf("root");
+    for (i = 0; i < options->count; ++i)
+    {
+        char text[8];
+        printf("%s%s", i == 0 ? "" : " ",
+               xq_move_to_string(options->moves[i], text, sizeof(text)));
+    }
+    printf("\nside=%s ply=%zu depth_limit=", target.side_to_move == XQ_RED ? "red" : "black",
+           options->count);
+    if (options->depth == UINT_MAX)
+        printf("unlimited");
+    else
+        printf("%u", options->depth);
+    printf(" time_limit_ms=%" PRIu64 "\n", options->time_ms);
+    xq_position_print(&target);
+    printf("fen: ");
+    print_fen(&target);
+    printf("search stopped=%s completed_root_depth=%u max_started_depth=%u nodes=%" PRIu64,
+           result.stats.stopped ? "yes" : "no", result.stats.completed_depth,
+           result.stats.max_started_depth, result.stats.nodes);
+    if (result.stats.elapsed_available)
+        printf(" elapsed_ms=%" PRIu64, result.stats.elapsed_ms);
+    printf("\n");
+    if (!result.visited)
+    {
+        printf("path not visited with remaining depth >= 1 in this search\n");
+        return EXIT_SUCCESS;
+    }
+    printf("node root_depth=%u remaining_depth=%u complete=%s alpha=%d beta=%d\n",
+           result.root_depth, result.remaining_depth, result.complete ? "yes" : "no",
+           result.alpha_before, result.beta);
+    if (result.score_available)
+        printf("%s=%d kind=%s best=%d\n", result.complete ? "final_score" : "partial_score",
+               result.node.final_score, result.complete ? score_kind_text(result.score_kind) : "partial",
+               result.node.best_index + 1);
+    else
+        printf("no completed candidate score\n");
+    if (result.node.count != 0)
+        print_explained_moves(result.node.moves, result.node.count, NULL, 0);
+    else
+        printf("no searched continuations\n");
+    return EXIT_SUCCESS;
+}
+
+int main(int argc, char **argv)
+{
+    XqPosition positions[MAX_HISTORY + 1];
+    int path[MAX_HISTORY];
+    int ply = 0;
+    ExplainOptions options = {.depth = 4u};
+    unsigned depth;
+    int parsed = parse_options(argc, argv, &options);
+    char input[INPUT_SIZE];
+
+    if (parsed != 1)
+    {
+        print_usage(argv[0]);
+        free(options.moves);
+        free(options.move_texts);
+        return parsed == 2 ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    depth = options.depth;
+    if (options.fen != NULL)
+    {
+        if (!xq_position_from_fen(&positions[0], options.fen))
+        {
+            fprintf(stderr, "invalid FEN: %s\n", options.fen);
+            free(options.moves);
+            free(options.move_texts);
             return EXIT_FAILURE;
         }
     }
     else
         xq_position_startpos(&positions[0]);
+    if (options.single)
+    {
+        int status = explain_path_once(&positions[0], &options);
+        free(options.moves);
+        free(options.move_texts);
+        return status;
+    }
+    free(options.moves);
+    free(options.move_texts);
 
     print_help();
     for (;;)
