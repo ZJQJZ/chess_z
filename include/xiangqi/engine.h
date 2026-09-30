@@ -26,7 +26,7 @@ typedef struct XqTranspositionStats
 typedef struct XqSearchStats
 {
     bool available;               /* Internal counters are available only for built-in search. */
-    unsigned max_started_depth;   /* Zero if no root move was searched. */
+    unsigned max_started_depth;   /* Deepest iteration in which a root move was searched. */
     unsigned completed_depth;     /* All root moves completed at this depth. */
     unsigned selected_move_depth; /* Zero for an unsearched fallback move. */
     uint64_t nodes; /* Entries into negamax and quiescence, including their shared leaf. */
@@ -108,6 +108,71 @@ typedef struct XqQuiescenceExplainResult
     bool stand_pat_cutoff;
 } XqQuiescenceExplainResult;
 
+typedef enum XqExplainTtStatus
+{
+    XQ_EXPLAIN_TT_DISABLED,
+    XQ_EXPLAIN_TT_NOT_PROBED, /* E.g. a depth-zero leaf or a terminal return before lookup. */
+    XQ_EXPLAIN_TT_MISS,
+    XQ_EXPLAIN_TT_HIT,       /* Entry found without returning; may be an ordering-only lookup. */
+    XQ_EXPLAIN_TT_CUTOFF     /* The node returned directly from this entry. */
+} XqExplainTtStatus;
+
+/* Snapshot of the actual entry probe, before descendant searches can replace it.
+ * depth, score, score_kind and best_move are valid for HIT/CUTOFF only. score is
+ * restored for the queried ply, from that node's side-to-move perspective.
+ * hash_move_used means the move was matched and promoted for ordering; a PV
+ * hint can subsequently take priority. It is false on a direct cache return. */
+typedef struct XqExplainTtInfo
+{
+    XqExplainTtStatus status;
+    unsigned depth;
+    int score;
+    XqSearchScoreKind score_kind;
+    XqMove best_move;
+    bool hash_move_used;
+    bool ordering_only; /* Root lookup supplies ordering only, irrespective of depth/bound. */
+} XqExplainTtInfo;
+
+/* Latest observed cache cutoff at a strict ancestor on the requested path.
+ * Independent of the retained target visit; root_depth identifies this event's
+ * iteration, which need not be the target record's or the last started iteration. */
+typedef struct XqExplainTtBlock
+{
+    bool available;
+    unsigned root_depth;
+    size_t ply;
+    unsigned remaining_depth;
+    int alpha;
+    int beta;
+    XqExplainTtInfo tt;
+} XqExplainTtBlock;
+
+/* Latest completed return for one root move, as used by the CLI's selection policy.
+ * score may be a bound and is valid only when completed_depth > 0. During a timeout,
+ * candidates may carry different depths; selection_score includes the depth bonus. */
+typedef struct XqRootMoveExplain
+{
+    XqMove move;
+    int score;
+    unsigned completed_depth;
+    int64_t selection_score;
+} XqRootMoveExplain;
+
+/* Final root decision, independent of the retained target-node visit. The root cache
+ * is queried for ordering once, before iteration 1; ordering_tt preserves that query.
+ * selected_index is -1 for no selection or a fallback outside the filtered move list. */
+typedef struct XqRootSearchExplain
+{
+    bool move_available;
+    bool used_timeout_selection;
+    XqMove selected_move;
+    int selected_index;
+    int depth_bonus;
+    int count;
+    XqRootMoveExplain moves[XQ_MAX_MOVES];
+    XqExplainTtInfo ordering_tt;
+} XqRootSearchExplain;
+
 /* A normal-search node (remaining_depth >= 1) observed along an exact root path.
  * score_kind is meaningful only when complete; a partial final_score is the best
  * completed candidate score, not an exact node evaluation. visited is false if
@@ -124,6 +189,10 @@ typedef struct XqPathExplainResult
     int alpha_before;
     int beta;
     XqExplainResult node;
+    XqExplainTtInfo tt; /* Target node's entry probe, not its descendants' probes. */
+    XqExplainTtInfo move_tt[XQ_MAX_MOVES]; /* Parallel to node.moves; child perspective. */
+    XqExplainTtBlock blocked_tt;
+    XqRootSearchExplain root; /* CLI-compatible final choice; node.best_index is visit-local. */
     XqSearchStats stats;
 } XqPathExplainResult;
 
@@ -170,16 +239,23 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
 bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos,
                                           XqQuiescenceExplainResult *result);
 
-/* Search from pos, observing only the exact from/to sequence in path (NULL for
- * an empty path). The caller supplies a legal path; pos is restored on return.
- * limits is required: time_limit_ms=0 searches max_depth directly, otherwise
- * iterative deepening shares one deadline. max_depth must be at least 1;
- * UINT_MAX is the practical unlimited normal-depth cap for timed searches.
- * Only evaluation/ordering callbacks are used, never search, cache or history.
- * Records only normal-search visits with remaining depth >= 1; quiescence visits
- * are excluded. Retains the latest completed visit, otherwise the latest partial visit.
- * False means invalid arguments; timeout, terminal and unvisited paths are valid
- * results. result is initialized even on failure (unless itself NULL). */
+/* Observe the exact legal from/to path (NULL for an empty path), searching from pos.
+ * Uses an independent root driver aligned with CLI search, including history filtering,
+ * PV/root ordering, cache generations, time checks and timeout selection with depth_bonus.
+ * Production builtin_search, negamax and quiescence carry no explanation hooks.
+ * Iterations always start at 1; limits is required with max_depth >= 1, and time_limit_ms=0
+ * disables the deadline. Evaluation/ordering callbacks, table and history are used;
+ * custom search callbacks are ignored. pos is restored on return.
+ * The root cache is queried once for ordering, never for a direct score return. Internal
+ * nodes can return cached scores. Memory updates and per-call cache deltas follow ordinary
+ * search; the table is neither saved nor cleared and must match evaluation semantics.
+ * Only positive normal-depth target visits are recorded. Retain the latest complete visit,
+ * otherwise the latest partial one; blocked_tt independently records the latest ancestor
+ * cache cutoff. root holds the actual final move and candidate returns used for selection,
+ * separate from the retained target visit and its best_index. Tracing takes wall time, so
+ * separate timed runs can still stop at different nodes. Terminal roots use root_depth=0.
+ * False means invalid arguments; timeout, terminal and unvisited paths are valid results.
+ * result is initialized even on failure (unless itself NULL). */
 bool xq_engine_explain_path(const XqEngineAdapter *engine, XqPosition *pos,
                             const XqSearchLimits *limits, const XqMove *path, size_t path_count,
                             XqPathExplainResult *result);

@@ -24,11 +24,15 @@ enum
  */
 static void print_usage(const char *program)
 {
-    printf("usage: %s [--depth N] [--fen FEN] [--time-ms MS] [--moves MOVE ...]\n", program);
+    printf("usage: %s [--depth N] [--fen FEN] [--time-ms MS] [--tt-file PATH] [--moves MOVE ...]\n", program);
     printf("  --time-ms MS  total root-search budget (positive milliseconds); iterative deepening.\n");
     printf("  --moves ...   observe this path in the root search; accepts quoted sequences too.\n");
-    printf("  Either option prints one target node and exits. Unvisited paths are not searched separately.\n");
-    printf("  Depth is measured from the root: default 4, or unlimited with --time-ms.\n");
+    printf("  --tt-file PATH load a transposition table; updates stay in memory, the file is unchanged.\n");
+    printf("  Any of these options prints one target node and exits. Unvisited paths are not searched separately.\n");
+    printf("  Single-shot search follows CLI: iterative deepening, default depth 10 and time 3000 ms.\n");
+    printf("  An empty transposition table is used unless --tt-file loads one. Root cache is ordering-only.\n");
+    printf("  Final root selection is separate from the retained target visit; timeout uses a depth bonus.\n");
+    printf("  Depth is measured from the root; interactive mode keeps its default depth of 4.\n");
     printf("  Path targets require remaining depth >= 1; single-shot mode rejects --depth 0.\n");
     printf("  N=0 is supported only by the original interactive quiescence explanation.\n");
 }
@@ -49,6 +53,44 @@ static const char *score_kind_text(XqSearchScoreKind kind)
     default:
         return "?";
     }
+}
+
+static const char *tt_status_text(XqExplainTtStatus status)
+{
+    switch (status)
+    {
+    case XQ_EXPLAIN_TT_DISABLED: return "disabled";
+    case XQ_EXPLAIN_TT_NOT_PROBED: return "not-probed";
+    case XQ_EXPLAIN_TT_MISS: return "miss";
+    case XQ_EXPLAIN_TT_HIT: return "hit";
+    case XQ_EXPLAIN_TT_CUTOFF: return "direct";
+    }
+    return "?";
+}
+
+static bool tt_has_entry(const XqExplainTtInfo *info)
+{
+    return info->status == XQ_EXPLAIN_TT_HIT || info->status == XQ_EXPLAIN_TT_CUTOFF;
+}
+
+/* Scores printed here are from the queried node's own side-to-move perspective. */
+static void print_tt_info(const char *label, const XqExplainTtInfo *info, unsigned required_depth)
+{
+    printf("%s status=%s", label, tt_status_text(info->status));
+    if (tt_has_entry(info))
+    {
+        char move[8];
+        if (!info->ordering_only)
+            printf(" required_depth=%u", required_depth);
+        printf(" cached_depth=%u cached_score=%d cached_kind=%s cached_best=%s hash_move_used=%s",
+               info->depth, info->score, score_kind_text(info->score_kind),
+               xq_move_to_string(info->best_move, move, sizeof(move)),
+               info->hash_move_used ? "yes" : "no");
+        if (info->status == XQ_EXPLAIN_TT_HIT)
+            printf(" reason=%s", info->ordering_only ? "ordering-only" :
+                   info->depth < required_depth ? "insufficient-depth" : "bound-outside-cutoff");
+    }
+    printf("\n");
 }
 
 /**
@@ -235,12 +277,17 @@ static void add_navigation_move(XqMoveList *navigation, XqMove move)
 /**
  * 把一组“已经解释过的候选走法”打印成表格
  */
-static void print_explained_moves(const XqExplainedMove *moves, int count, const int *path, int ply)
+static void print_explained_moves(const XqExplainedMove *moves, int count, const int *path, int ply,
+                                   const XqExplainTtInfo *cache)
 {
     int i;
 
-    printf("%-4s %-12s %-5s %-5s %-5s %-9s %-11s %-11s %-8s %-7s %-10s\n",
+    printf("%-4s %-12s %-5s %-5s %-5s %-9s %-11s %-11s %-8s %-7s %-10s",
            "idx", "node", "move", "pc", "cap", "order", "alpha", "beta", "score", "kind", "flags");
+    if (cache != NULL)
+        printf(" %-10s %-8s %-10s %-8s %-8s %-9s", "child_tt", "tt_depth", "tt_score",
+               "tt_kind", "tt_best", "hash_used");
+    printf("\n");
     for (i = 0; i < count; ++i)
     {
         const XqExplainedMove *explained = &moves[i];
@@ -254,7 +301,7 @@ static void print_explained_moves(const XqExplainedMove *moves, int count, const
         if (explained->caused_cutoff)
             (void)strcat(flags, flags[0] == '\0' ? "cutoff" : ",cutoff");
 
-        printf("%-4d %-12s %-5s %-5c %-5c %-9d %-11d %-11d %-8d %-7s %-10s\n",
+        printf("%-4d %-12s %-5s %-5c %-5c %-9d %-11d %-11d %-8d %-7s %-10s",
                i + 1,
                node_id,
                xq_move_to_string(explained->move, move_text, sizeof(move_text)),
@@ -266,6 +313,22 @@ static void print_explained_moves(const XqExplainedMove *moves, int count, const
                explained->score,
                score_kind_text(explained->score_kind),
                flags);
+        if (cache != NULL)
+        {
+            const XqExplainTtInfo *info = &cache[i];
+            printf(" %-10s", tt_status_text(info->status));
+            if (tt_has_entry(info))
+            {
+                char cached_move[8];
+                printf(" %-8u %-10d %-8s %-8s %-9s", info->depth, info->score,
+                       score_kind_text(info->score_kind),
+                       xq_move_to_string(info->best_move, cached_move, sizeof(cached_move)),
+                       info->hash_move_used ? "yes" : "no");
+            }
+            else
+                printf(" %-8s %-10s %-8s %-8s %-9s", "-", "-", "-", "-", "-");
+        }
+        printf("\n");
     }
 }
 
@@ -297,7 +360,7 @@ static bool explain_quiescence_current(XqPosition *pos, const int *path, int ply
     if (result.count == 0)
         printf("no tactical continuations\n");
     else
-        print_explained_moves(result.moves, result.count, path, ply);
+        print_explained_moves(result.moves, result.count, path, ply, NULL);
 
     for (i = 0; i < result.count; ++i)
         add_navigation_move(navigation, result.moves[i].move);
@@ -332,7 +395,7 @@ static bool explain_current(XqPosition *pos, unsigned root_depth, const int *pat
     }
 
     printf("final_score=%d best=%d\n", result.final_score, result.best_index + 1);
-    print_explained_moves(result.moves, result.count, path, ply);
+    print_explained_moves(result.moves, result.count, path, ply, NULL);
     for (i = 0; i < result.count; ++i)
         add_navigation_move(navigation, result.moves[i].move);
     return true;
@@ -345,6 +408,7 @@ typedef struct ExplainOptions
     bool single;
     uint64_t time_ms;
     const char *fen;
+    const char *tt_file;
     XqMove *moves;
     const char **move_texts;
     size_t count;
@@ -462,6 +526,16 @@ static int parse_options(int argc, char **argv, ExplainOptions *options)
                 return 0;
             options->fen = argv[arg];
         }
+        else if (strcmp(argv[arg], "--tt-file") == 0)
+        {
+            if (++arg == argc || argv[arg][0] == '\0')
+            {
+                fprintf(stderr, "--tt-file requires a nonempty file path\n");
+                return 0;
+            }
+            options->tt_file = argv[arg];
+            options->single = true;
+        }
         else if (strcmp(argv[arg], "--time-ms") == 0)
         {
             if (++arg == argc || !parse_time_ms(argv[arg], &options->time_ms))
@@ -489,8 +563,14 @@ static int parse_options(int argc, char **argv, ExplainOptions *options)
         else
             return 0;
     }
-    if (options->time_ms != 0 && !options->depth_set)
-        options->depth = UINT_MAX;
+    if (options->single)
+    {
+        XqSearchLimits defaults = xq_search_limits_default();
+        if (!options->depth_set)
+            options->depth = defaults.max_depth;
+        if (options->time_ms == 0)
+            options->time_ms = defaults.time_limit_ms;
+    }
     return 1;
 }
 
@@ -519,11 +599,90 @@ static bool validate_path(const XqPosition *root, ExplainOptions *options, XqPos
     return true;
 }
 
+static const char *tt_io_status_text(XqTranspositionIoStatus status)
+{
+    switch (status)
+    {
+    case XQ_TT_IO_OK:
+        return "success";
+    case XQ_TT_IO_FILE_ERROR:
+        return "file I/O error (check the path, parent directory and permissions)";
+    case XQ_TT_IO_INVALID_FORMAT:
+        return "invalid or corrupted transposition table file";
+    case XQ_TT_IO_INCOMPATIBLE:
+        return "incompatible cache format, engine version or table dimensions";
+    case XQ_TT_IO_NO_MEMORY:
+        return "not enough memory for the transposition table operation";
+    case XQ_TT_IO_INVALID_ARGUMENT:
+        return "invalid table or file path";
+    }
+    return "unknown transposition table error";
+}
+
+/* This event has its own iteration and is not inferred from the retained target visit. */
+static void print_tt_block(const XqExplainTtBlock *block, const ExplainOptions *options)
+{
+    size_t i;
+    if (!block->available)
+        return;
+    printf("latest_ancestor_cache_block root_depth=%u ply=%zu remaining_depth=%u alpha=%d beta=%d path=",
+           block->root_depth, block->ply, block->remaining_depth, block->alpha, block->beta);
+    if (block->ply == 0)
+        printf("root");
+    for (i = 0; i < block->ply; ++i)
+    {
+        char move[8];
+        printf("%s%s", i == 0 ? "" : " ",
+               xq_move_to_string(options->moves[i], move, sizeof(move)));
+    }
+    printf("\n");
+    print_tt_info("ancestor_tt", &block->tt, block->remaining_depth);
+    printf("The ancestor returned directly from the table; the target was not reached in that iteration.\n");
+}
+
+/* The final root decision may use mixed-depth returns from an interrupted iteration. */
+static void print_root_selection(const XqPathExplainResult *result)
+{
+    const XqRootSearchExplain *root = &result->root;
+    char move[8];
+    int i;
+    if (!root->move_available)
+    {
+        printf("root_selection: no legal root move\n");
+        return;
+    }
+    printf("root_selection selected_move=%s selected_move_depth=%u policy=%s depth_bonus=%d\n",
+           xq_move_to_string(root->selected_move, move, sizeof(move)),
+           result->stats.selected_move_depth,
+           result->stats.selected_move_depth == 0 ? "fallback" :
+           root->used_timeout_selection ? "timeout-depth-bonus" : "completed-iteration",
+           root->depth_bonus);
+    if (!root->used_timeout_selection || root->count == 0)
+        return;
+    printf("Root selection uses each move's latest completed return, possibly from different depths.\n"
+           "Scores below use the root side's perspective.\n"
+           "selection_score = score + completed_depth * depth_bonus; returns may be bounds.\n");
+    printf("%-6s %-9s %-16s %-17s %s\n", "move", "score", "completed_depth",
+           "selection_score", "selected");
+    for (i = 0; i < root->count; ++i)
+    {
+        const XqRootMoveExplain *row = &root->moves[i];
+        printf("%-6s ", xq_move_to_string(row->move, move, sizeof(move)));
+        if (row->completed_depth != 0)
+            printf("%-9d %-16u %-17" PRId64, row->score, row->completed_depth, row->selection_score);
+        else
+            printf("%-9s %-16u %-17s", "-", 0u, "-");
+        printf(" %s\n", i == root->selected_index ? "yes" : "");
+    }
+}
+
 static int explain_path_once(XqPosition *root, ExplainOptions *options)
 {
     XqPosition target;
     XqPathExplainResult result;
     XqSearchLimits limits = xq_search_limits_default();
+    XqEngineAdapter engine = {0};
+    bool found;
     size_t i;
     if (options->depth == 0)
     {
@@ -532,9 +691,28 @@ static int explain_path_once(XqPosition *root, ExplainOptions *options)
     }
     if (!validate_path(root, options, &target))
         return EXIT_FAILURE;
+    engine.transposition_table = xq_transposition_table_create();
+    if (options->tt_file != NULL)
+    {
+        XqTranspositionIoStatus status;
+        status = engine.transposition_table == NULL ? XQ_TT_IO_NO_MEMORY
+                 : xq_transposition_table_load(engine.transposition_table, options->tt_file);
+        if (status != XQ_TT_IO_OK)
+        {
+            fprintf(stderr, "cannot load transposition table '%s': %s\n",
+                    options->tt_file, tt_io_status_text(status));
+            xq_transposition_table_destroy(engine.transposition_table);
+            return EXIT_FAILURE;
+        }
+        printf("Loaded transposition table from: %s\n", options->tt_file);
+    }
+    else if (engine.transposition_table == NULL)
+        fprintf(stderr, "warning: transposition table allocation failed; continuing without cache\n");
     limits.max_depth = options->depth;
     limits.time_limit_ms = options->time_ms;
-    if (!xq_engine_explain_path(NULL, root, &limits, options->moves, options->count, &result))
+    found = xq_engine_explain_path(&engine, root, &limits, options->moves, options->count, &result);
+    xq_transposition_table_destroy(engine.transposition_table);
+    if (!found)
         return EXIT_FAILURE;
     printf("path=");
     if (options->count == 0)
@@ -545,13 +723,9 @@ static int explain_path_once(XqPosition *root, ExplainOptions *options)
         printf("%s%s", i == 0 ? "" : " ",
                xq_move_to_string(options->moves[i], text, sizeof(text)));
     }
-    printf("\nside=%s ply=%zu depth_limit=", target.side_to_move == XQ_RED ? "red" : "black",
-           options->count);
-    if (options->depth == UINT_MAX)
-        printf("unlimited");
-    else
-        printf("%u", options->depth);
-    printf(" time_limit_ms=%" PRIu64 "\n", options->time_ms);
+    printf("\nside=%s ply=%zu depth_limit=%u time_limit_ms=%" PRIu64 "\n",
+           target.side_to_move == XQ_RED ? "red" : "black", options->count,
+           options->depth, options->time_ms);
     xq_position_print(&target);
     printf("fen: ");
     print_fen(&target);
@@ -561,11 +735,23 @@ static int explain_path_once(XqPosition *root, ExplainOptions *options)
     if (result.stats.elapsed_available)
         printf(" elapsed_ms=%" PRIu64, result.stats.elapsed_ms);
     printf("\n");
+    print_root_selection(&result);
+    if (result.stats.cache_available)
+    {
+        print_tt_info("root_ordering_tt", &result.root.ordering_tt, 1);
+        printf("Root cache policy: ordering lookup before iteration 1; no new root probes in later iterations.\n");
+        printf("cache probes=%" PRIu64 " hits=%" PRIu64 " cutoffs=%" PRIu64
+               " stores=%" PRIu64 " replacements=%" PRIu64 "\n",
+               result.stats.cache.probes, result.stats.cache.hits, result.stats.cache.cutoffs,
+               result.stats.cache.stores, result.stats.cache.replacements);
+        print_tt_block(&result.blocked_tt, options);
+    }
     if (!result.visited)
     {
         printf("path not visited with remaining depth >= 1 in this search\n");
         return EXIT_SUCCESS;
     }
+    printf("Target visit below is independent of the final root selection; best indexes this visit's candidates.\n");
     printf("node root_depth=%u remaining_depth=%u complete=%s alpha=%d beta=%d\n",
            result.root_depth, result.remaining_depth, result.complete ? "yes" : "no",
            result.alpha_before, result.beta);
@@ -575,9 +761,21 @@ static int explain_path_once(XqPosition *root, ExplainOptions *options)
                result.node.best_index + 1);
     else
         printf("no completed candidate score\n");
+    if (result.stats.cache_available)
+        print_tt_info("target_tt", &result.tt, result.remaining_depth);
+    if (result.tt.status == XQ_EXPLAIN_TT_CUTOFF)
+        printf("returned directly from transposition table; no candidates expanded\n");
     if (result.node.count != 0)
-        print_explained_moves(result.node.moves, result.node.count, NULL, 0);
-    else
+    {
+        if (result.stats.cache_available)
+            printf("child_tt is the direct child's entry probe only; tt_score/tt_kind use the child\n"
+                   "side's perspective, while score/kind use the target side's perspective.\n"
+                   "direct=cache return; hit=entry found but depth/bound cannot return;\n"
+                   "miss=no entry; not-probed=leaf/terminal without a lookup.\n");
+        print_explained_moves(result.node.moves, result.node.count, NULL, 0,
+                              result.stats.cache_available ? result.move_tt : NULL);
+    }
+    else if (result.tt.status != XQ_EXPLAIN_TT_CUTOFF)
         printf("no searched continuations\n");
     return EXIT_SUCCESS;
 }
