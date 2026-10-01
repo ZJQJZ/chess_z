@@ -31,7 +31,8 @@ static void print_usage(const char *program)
     printf("  Any of these options prints one target node and exits. Unvisited paths are not searched separately.\n");
     printf("  Single-shot search follows CLI: iterative deepening, default depth 10 and time 3000 ms.\n");
     printf("  An empty transposition table is used unless --tt-file loads one. Root cache is ordering-only.\n");
-    printf("  Final root selection is separate from the retained target visit; timeout falls back to the last complete iteration.\n");
+    printf("  Final root selection is separate from the retained target visit; timeout may finish a nearly complete iteration.\n");
+    printf("  Otherwise an interrupted iteration falls back to the last complete iteration, if available.\n");
     printf("  Depth is measured from the root; interactive mode keeps its default depth of 4.\n");
     printf("  Path targets require remaining depth >= 1; single-shot mode rejects --depth 0.\n");
     printf("  N=0 is supported only by the original interactive quiescence explanation.\n");

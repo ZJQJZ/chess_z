@@ -32,7 +32,7 @@ typedef struct XqSearchStats
     unsigned completed_depth;     /* All root moves completed at this depth. */
     unsigned selected_move_depth; /* Selected result depth; zero for an unsearched fallback. */
     uint64_t nodes; /* Entries into negamax and quiescence, including their shared leaf. */
-    bool stopped;   /* Time limit reached or search clock failed. */
+    bool stopped;   /* Time limit reached (including an extended iteration) or search clock failed. */
     bool elapsed_available;
     uint64_t elapsed_ms; /* Monotonic wall time, independent of the search time mode. */
     bool cache_available;
@@ -62,7 +62,7 @@ typedef enum XqSearchTimeMode
 typedef struct XqSearchLimits
 {
     unsigned max_depth;
-    uint64_t time_limit_ms;
+    uint64_t time_limit_ms; /* Zero disables timing; a nearly complete iteration may exceed the budget. */
     XqSearchTimeMode time_mode;
 } XqSearchLimits;
 
@@ -241,6 +241,7 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
  * Uses an independent root driver aligned with CLI search, including history filtering,
  * PV/root ordering, cache generations, time checks and fallback to the last complete iteration.
  * If none completed, select the best completed first-iteration candidate or an unsearched fallback.
+ * A root iteration strictly above the engine's progress threshold at timeout may finish before exit.
  * Production builtin_search, negamax and quiescence carry no explanation hooks.
  * Iterations always start at 1; limits is required with max_depth >= 1, and time_limit_ms=0
  * disables the deadline. Evaluation/ordering callbacks, table and history are used;

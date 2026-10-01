@@ -43,6 +43,7 @@ static void print_usage(const char *program)
     printf("  -f, --fen FEN           initialize the position from FEN\n");
     printf("  -e, --engine COLOR      choose the engine side: red or black\n");
     printf("      --time-ms MS        default thinking time per engine move (positive integer milliseconds)\n");
+    printf("                         a nearly complete iteration may finish after this budget\n");
     printf("      --tt-file PATH      load a saved transposition table before the first search\n");
     printf("      --search-detail     append each engine search to build/search_detail.txt\n");
     printf("  -h, --help              show this help\n");
