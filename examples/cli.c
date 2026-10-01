@@ -294,10 +294,20 @@ static void write_search_detail(FILE **log, const XqPosition *pos,
             limits->time_mode == XQ_SEARCH_TIME_CPU ? "cpu" : "monotonic");
     fprintf(out, "stats_available: %s\n", stats->available ? "yes" : "no");
     if (stats->available)
-        fprintf(out, "max_started_depth: %u\ncompleted_depth: %u\nselected_move_depth: %u\n"
+    {
+        fprintf(out, "max_started_depth: %u\n", stats->max_started_depth);
+        if (stats->max_started_depth == 0 || stats->iteration_total_moves == 0)
+            fprintf(out, "iteration_progress: not-started (0/%u)\n",
+                    stats->iteration_total_moves);
+        else
+            fprintf(out, "iteration_progress: %u/%u (%.1f%%)\n",
+                    stats->iteration_completed_moves, stats->iteration_total_moves,
+                    100.0 * (double)stats->iteration_completed_moves / stats->iteration_total_moves);
+        fprintf(out, "completed_depth: %u\nselected_move_depth: %u\n"
                      "nodes: %" PRIu64 "\nstopped: %s\n",
-                stats->max_started_depth, stats->completed_depth, stats->selected_move_depth,
+                stats->completed_depth, stats->selected_move_depth,
                 stats->nodes, stats->stopped ? "yes" : "no");
+    }
     if (stats->elapsed_available)
         fprintf(out, "elapsed_ms: %" PRIu64 "\n", stats->elapsed_ms);
     else

@@ -2026,6 +2026,8 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
 
     *best_move = list.moves[0];
     filtered_cycles = filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
+    if (stats != NULL)
+        stats->iteration_total_moves = (unsigned)list.count;
     if (list.count == 0)
         return true; /* All legal moves lose: retain the original first move. */
 
@@ -2059,7 +2061,12 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
                 break;
 
             if (stats != NULL)
+            {
+                /* Do not reset progress until this iteration actually starts searching. */
+                if (i == 0)
+                    stats->iteration_completed_moves = 0;
                 stats->max_started_depth = current_depth;
+            }
             if (previous_pv.count > 0 && moves_equal(root_moves[i].move, previous_pv.moves[0]))
             {
                 child_hint = previous_pv.moves + 1;
@@ -2077,6 +2084,8 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             root_moves[i].score = score;
             root_moves[i].completed_depth = current_depth;
             ++completed_roots;
+            if (stats != NULL)
+                stats->iteration_completed_moves = (unsigned)completed_roots;
             if (score > alpha)
             {
                 current_best_index = i;
@@ -3110,6 +3119,8 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
 
     *best_move = list.moves[0];
     filtered_cycles = filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
+    if (stats != NULL)
+        stats->iteration_total_moves = (unsigned)list.count;
     if (list.count == 0)
     {
         trace_root_selection(explain, NULL, 0, *best_move);
@@ -3147,7 +3158,12 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
                 break;
 
             if (stats != NULL)
+            {
+                /* Do not reset progress until this iteration actually starts searching. */
+                if (i == 0)
+                    stats->iteration_completed_moves = 0;
                 stats->max_started_depth = current_depth;
+            }
             if (previous_pv.count > 0 && moves_equal(root_moves[i].move, previous_pv.moves[0]))
             {
                 child_hint = previous_pv.moves + 1;
@@ -3164,6 +3180,8 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             root_moves[i].score = score;
             root_moves[i].completed_depth = current_depth;
             ++completed_roots;
+            if (stats != NULL)
+                stats->iteration_completed_moves = (unsigned)completed_roots;
             if (score > alpha)
             {
                 current_best_index = i;

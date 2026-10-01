@@ -27,6 +27,8 @@ typedef struct XqSearchStats
 {
     bool available;               /* Internal counters are available only for built-in search. */
     unsigned max_started_depth;   /* Deepest iteration in which a root move was searched. */
+    unsigned iteration_completed_moves; /* Completed root candidates at max_started_depth. */
+    unsigned iteration_total_moves;     /* Root candidates after history filtering, even if unstarted. */
     unsigned completed_depth;     /* All root moves completed at this depth. */
     unsigned selected_move_depth; /* Selected result depth; zero for an unsearched fallback. */
     uint64_t nodes; /* Entries into negamax and quiescence, including their shared leaf. */
