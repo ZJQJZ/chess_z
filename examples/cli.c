@@ -374,9 +374,10 @@ static void write_search_detail(FILE **log, const XqPosition *pos,
                     stats->iteration_completed_moves, stats->iteration_total_moves,
                     100.0 * (double)stats->iteration_completed_moves / stats->iteration_total_moves);
         fprintf(out, "completed_depth: %u\nselected_move_depth: %u\n"
-                     "nodes: %" PRIu64 "\nstopped: %s\n",
+                     "nodes: %" PRIu64 "\nstopped: %s\nwinning_move_found: %s\n",
                 stats->completed_depth, stats->selected_move_depth,
-                stats->nodes, stats->stopped ? "yes" : "no");
+                stats->nodes, stats->stopped ? "yes" : "no",
+                stats->winning_move_found ? "yes" : "no");
     }
     if (stats->elapsed_available)
         fprintf(out, "elapsed_ms: %" PRIu64 "\n", stats->elapsed_ms);

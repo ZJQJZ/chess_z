@@ -654,7 +654,9 @@ static void print_root_selection(const XqPathExplainResult *result)
         printf("root_selection: no legal root move\n");
         return;
     }
-    if (stats->selected_move_depth == 0)
+    if (stats->winning_move_found)
+        policy = "winning-move";
+    else if (stats->selected_move_depth == 0)
         policy = "fallback";
     else if (stats->completed_depth == 0)
         policy = "partial-first-iteration";
@@ -665,7 +667,7 @@ static void print_root_selection(const XqPathExplainResult *result)
     printf("root_selection selected_move=%s selected_move_depth=%u policy=%s\n",
            xq_move_to_string(root->selected_move, move, sizeof(move)),
            stats->selected_move_depth, policy);
-    if (!stats->stopped || root->count == 0)
+    if ((!stats->stopped && !stats->winning_move_found) || root->count == 0)
         return;
     printf("Root candidates below belong to the iteration used for the final selection.\n"
            "Scores use the root side's perspective and may be bounds; unsearched rows have no score.\n");

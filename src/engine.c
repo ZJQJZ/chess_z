@@ -1993,6 +1993,8 @@ static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMove
  * The function searches only legal root moves from depth 1 through the requested maximum depth.
  * Scores from all root moves in the previous completed iteration determine their ordering in the
  * next iteration, while the previous principal variation supplies an additional ordering hint.
+ * A completed root candidate with score >= XQ_MATE_THRESHOLD is selected immediately, before the
+ * next time check, without waiting for the remaining candidates or looking for a faster mate.
  *
  * At the first detected deadline, an unfinished iteration strictly above the completed-root
  * threshold may finish, then supplies the result without starting another iteration. Otherwise, the
@@ -2025,6 +2027,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
     XqMove hash_move;
     SearchContext context;
     bool filtered_cycles;
+    bool winning_move_found = false;
     unsigned depth = limits->max_depth == 0 ? 1 : limits->max_depth;
     unsigned current_depth;
     int i;
@@ -2119,8 +2122,27 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
                 build_principal_variation(&current_pv, root_moves[i].move, &child_pv);
             }
 
+            /* Only a completed, non-interrupted candidate can establish a winning move. */
+            if (score >= XQ_MATE_THRESHOLD)
+            {
+                winning_move_found = true;
+                break;
+            }
             if (search_check_time(&context, true))
                 break;
+        }
+
+        if (winning_move_found && completed_roots != list.count)
+        {
+            *best_move = root_moves[current_best_index].move;
+            /* This iteration supplies the move; unsearched rows must not retain older scores. */
+            for (i = completed_roots; i < list.count; ++i)
+            {
+                root_moves[i].score = INT_MIN / 2;
+                root_moves[i].completed_depth = 0;
+            }
+            /* Remaining alternatives could mate faster, so do not cache the root as EXACT. */
+            break;
         }
 
         if (completed_roots != list.count)
@@ -2145,7 +2167,8 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             tt_store(table, root_key, current_depth, root_moves[0].score, 0, XQ_SEARCH_SCORE_EXACT,
                      root_moves[0].move);
 
-        if (context.stopped || context.deadline_reached || current_depth == depth)
+        if (winning_move_found || context.stopped || context.deadline_reached ||
+            current_depth == depth)
             break;
     }
 
@@ -2153,6 +2176,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
     {
         stats->nodes = context.nodes;
         stats->stopped = context.stopped || context.deadline_reached;
+        stats->winning_move_found = winning_move_found;
         for (i = 0; i < list.count; ++i)
             if (moves_equal(root_moves[i].move, *best_move))
             {
@@ -3012,9 +3036,10 @@ static void trace_root_terminal(ExplainContext *context)
 /**
  * @brief Copies the final root choice and the candidate snapshot used for selection.
  *
- * Rows come from the last complete iteration, or the partial first iteration when none completed.
- * Unsearched rows have completed_depth zero and do not supply a valid score. No selection is
- * recomputed here; scores may be bounds within this single iteration.
+ * Rows come from the last complete iteration, a partial first iteration when none completed, or a
+ * partial iteration that found a winning move. Unsearched rows have completed_depth zero and do not
+ * supply a valid score. No selection is recomputed here; scores may be bounds within this single
+ * iteration.
  *
  * @param context  Explanation context; must not be null.
  * @param moves    Selected iteration's root candidates; may be null when count is zero.
@@ -3089,7 +3114,8 @@ static int search_root_move_for_explain(const XqEngineAdapter *engine, XqPositio
  *
  * A completed root visit is saved before the final clock check, so a deadline reached just after
  * the last candidate does not discard that visit. Final move selection is captured separately
- * from the retained target visit and uses the last complete iteration or the partial first one.
+ * from the retained target visit and may use the last complete iteration, the partial first one, or
+ * a partial iteration that found a winning move. An incomplete root visit stays incomplete.
  *
  * @param engine    Adapter supplying evaluation, ordering, optional cache and history; may be null.
  * @param pos       Root position; restored before returning. A null position returns false.
@@ -3115,6 +3141,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
     SearchContext context = {0};
     bool hash_move_used = false;
     bool filtered_cycles;
+    bool winning_move_found = false;
     unsigned depth = limits->max_depth == 0 ? 1 : limits->max_depth;
     unsigned current_depth;
     int i;
@@ -3223,8 +3250,27 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             /* Save a complete root visit before the final clock check can set stopped. */
             if (completed_roots == list.count)
                 trace_root_finish(explain, alpha);
+            /* Only a completed, non-interrupted candidate can establish a winning move. */
+            if (score >= XQ_MATE_THRESHOLD)
+            {
+                winning_move_found = true;
+                break;
+            }
             if (search_check_time(&context, true))
                 break;
+        }
+
+        if (winning_move_found && completed_roots != list.count)
+        {
+            *best_move = root_moves[current_best_index].move;
+            /* This iteration supplies the move; unsearched rows must not retain older scores. */
+            for (i = completed_roots; i < list.count; ++i)
+            {
+                root_moves[i].score = INT_MIN / 2;
+                root_moves[i].completed_depth = 0;
+            }
+            /* Remaining alternatives could mate faster, so do not cache the root as EXACT. */
+            break;
         }
 
         if (completed_roots != list.count)
@@ -3249,7 +3295,8 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             tt_store(table, root_key, current_depth, root_moves[0].score, 0, XQ_SEARCH_SCORE_EXACT,
                      root_moves[0].move);
 
-        if (context.stopped || context.deadline_reached || current_depth == depth)
+        if (winning_move_found || context.stopped || context.deadline_reached ||
+            current_depth == depth)
             break;
     }
 
@@ -3258,6 +3305,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
     {
         stats->nodes = context.nodes;
         stats->stopped = context.stopped || context.deadline_reached;
+        stats->winning_move_found = winning_move_found;
         for (i = 0; i < list.count; ++i)
             if (moves_equal(root_moves[i].move, *best_move))
             {
@@ -3284,12 +3332,13 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
  * time, so separate timed runs need not stop at the same node or select the same move.
  *
  * result->root reports the actual final root selection and its candidate snapshot from the last
- * complete iteration, or the partial first iteration. This is separate from the retained target
- * visit: result->node.best_index identifies the best candidate of that visit, not the final chosen
- * root move. Keep the latest complete target visit even if a later visit is interrupted; when none
- * completed, return the latest partial visit. Target and child cache snapshots belong to that
- * visit. The initial root ordering lookup is preserved separately in root.ordering_tt; the root
- * target's tt is not-probed after iteration one because the root is not queried again.
+ * complete iteration, the partial first iteration, or the iteration that found a winning move. This
+ * is separate from the retained target visit: result->node.best_index identifies the best candidate
+ * of that visit, not the final chosen root move. Keep the latest complete target visit even if a
+ * later visit is interrupted; when none completed, return the latest partial visit. Target and
+ * child cache snapshots belong to that visit. The initial root ordering lookup is preserved
+ * separately in root.ordering_tt; the root target's tt is not-probed after iteration one because
+ * the root is not queried again.
  *
  * blocked_tt independently retains the latest strict-ancestor cache cutoff and its iteration.
  * Cache PV reconstruction does not count as visiting the target. A terminal root is recorded with
@@ -3305,14 +3354,14 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
  * @param limits     Required limits with max_depth >= 1. Iterations run from one to max_depth;
  *                   time_limit_ms zero disables the deadline, otherwise all iterations share it.
  *                   time_mode has the same meaning as in ordinary search.
- * @param path       Legal from/to sequence from the root, not validated here; may be null only
- *                   when path_count is zero. No extra search is made to reach this path.
+ * @param path       Legal from/to sequence from the root, not validated here; may be null only when
+ *                   path_count is zero. No extra search is made to reach this path.
  * @param path_count Number of moves in path; must not exceed INT_MAX.
  * @param result     Required output, initialized even on invalid input. Target visit, ancestor
  *                   blockage, final root decision and overall statistics are independent records.
- * @return           False only for null required arguments, max_depth zero, a missing nonempty
- *                   path or path_count above INT_MAX. Timeout, terminal and unvisited paths are
- *                   valid results and return true; inspect root.move_available for move selection.
+ * @return           False only for null required arguments, max_depth zero, a missing nonempty path
+ *                   or path_count above INT_MAX. Timeout, terminal and unvisited paths are valid
+ *                   results and return true; inspect root.move_available for move selection.
  */
 bool xq_engine_explain_path(const XqEngineAdapter *engine, XqPosition *pos,
                             const XqSearchLimits *limits, const XqMove *path, size_t path_count,
