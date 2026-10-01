@@ -78,7 +78,7 @@ static bool parse_color(const char *text, XqColor *color)
 /**
  * 把用户在命令行输入的走法文本解析成程序内部的 XqMove，并且检查这个走法是不是当前局面的合法走法
  */
-static bool parse_move_text(const char *text, XqMoveList *legal, XqMove *move)
+static bool parse_move_text(const char *text, const XqMoveList *legal, XqMove *move)
 {
     int from_file;
     int from_rank;
@@ -88,7 +88,7 @@ static bool parse_move_text(const char *text, XqMoveList *legal, XqMove *move)
     XqSquare to;
     int i;
 
-    if (strlen(text) < 4)
+    if (strlen(text) != 4)
         return false;
 
     from_file = tolower((unsigned char)text[0]) - 'a';
@@ -154,20 +154,64 @@ static bool parse_time_ms(const char *text, uint64_t *time_limit_ms)
     return true;
 }
 
-/* Parse an optional positive millisecond limit for the next engine reply only. */
-static bool parse_move_input(const char *text, XqMoveList *legal, XqMove *move,
-                             uint64_t *time_limit_ms)
+typedef struct CliMoveInput
 {
-    while (isspace((unsigned char)*text))
-        ++text;
-    if (strlen(text) < 4 || !parse_move_text(text, legal, move))
-        return false;
-    text += 4;
-    if (*text != '\0' && !isspace((unsigned char)*text))
-        return false;
-    while (isspace((unsigned char)*text))
-        ++text;
-    return *text == '\0' || parse_time_ms(text, time_limit_ms);
+    XqMove moves[2];
+    XqPosition positions[2]; /* Position after each validated move. */
+    int count;
+    uint64_t time_limit_ms;
+} CliMoveInput;
+
+/* Tokenize the input buffer and validate on copies; NULL means success, otherwise an error.
+ * The caller initializes time_limit_ms to the default and commits only after full validation. */
+static const char *parse_move_input(char *text, const XqPosition *pos,
+                                   const XqMoveList *legal, CliMoveInput *parsed)
+{
+    char *tokens[2];
+    int count = 0;
+    XqMoveList replies;
+
+    while (*text != '\0')
+    {
+        while (isspace((unsigned char)*text))
+            ++text;
+        if (*text == '\0')
+            break;
+        if (count == 2)
+            return "extra input: use one move, a move and time_ms, or exactly two moves";
+        tokens[count++] = text;
+        while (*text != '\0' && !isspace((unsigned char)*text))
+            ++text;
+        if (*text != '\0')
+            *text++ = '\0';
+    }
+
+    if (count == 0 || !parse_move_text(tokens[0], legal, &parsed->moves[0]))
+        return "first move is illegal or is not a four-character coordinate move";
+    parsed->positions[0] = *pos;
+    if (!xq_position_make_move(&parsed->positions[0], parsed->moves[0]))
+        return "cannot apply the first move";
+    parsed->count = 1;
+    if (count == 1)
+        return NULL;
+
+    if (isdigit((unsigned char)tokens[1][0]))
+    {
+        if (!parse_time_ms(tokens[1], &parsed->time_limit_ms))
+            return "second item is an invalid time limit; use positive integer milliseconds";
+        return NULL;
+    }
+
+    xq_generate_legal(&parsed->positions[0], &replies);
+    if (replies.count == 0)
+        return "first move ends the game; enter it alone without an engine reply";
+    if (!parse_move_text(tokens[1], &replies, &parsed->moves[1]))
+        return "second item must be a legal four-character engine reply or positive time_ms";
+    parsed->positions[1] = parsed->positions[0];
+    if (!xq_position_make_move(&parsed->positions[1], parsed->moves[1]))
+        return "cannot apply the second move";
+    parsed->count = 2;
+    return NULL;
 }
 
 /**
@@ -178,9 +222,12 @@ static void print_help(void)
     printf("commands:\n");
     printf("  a0a1 [time_ms]  move; optional positive integer time limit for the next engine reply\n");
     printf("                  e.g. a0a1 2000 (2 seconds); omit time to use the default\n");
+    printf("  a0a1 a9a8      play your move and specify the engine reply, without searching\n");
+    printf("                  both moves must be legal; invalid input leaves the whole turn unchanged\n");
+    printf("                  exactly two moves; no third move or additional time argument\n");
     printf("  fen   print current FEN\n");
     printf("  moves print legal moves\n");
-    printf("  undo  take back your last move and the engine reply (alias: u)\n");
+    printf("  undo  take back your last move and the automatic or specified engine reply (alias: u)\n");
     printf("  flip  rotate the board display 180 degrees; move coordinates stay unchanged\n");
     printf("  save-tt PATH  save the current transposition table (paths may contain spaces)\n");
     printf("  quit  exit\n");
@@ -339,6 +386,25 @@ static void write_search_detail(FILE **log, const XqPosition *pos,
     fprintf(out, "cache_probes: %" PRIu64 "\ncache_hits: %" PRIu64 "\ncache_hit_rate: %.2f%%\n"
                  "cache_cutoffs: %" PRIu64 "\ncache_stores: %" PRIu64 "\ncache_replacements: %" PRIu64 "\n",
             cache->probes, cache->hits, hit_rate, cache->cutoffs, cache->stores, cache->replacements);
+    flush_search_detail(log);
+}
+
+/* A specified engine reply is a real move, but produces no search statistics. */
+static void write_manual_engine_move(FILE **log, const XqPosition *before,
+                                     const XqPosition *after, XqMove move)
+{
+    char fen_before[128];
+    char fen_after[128];
+    char text[8];
+
+    if (!xq_position_to_fen(before, fen_before, sizeof(fen_before)))
+        strcpy(fen_before, "unavailable");
+    if (!xq_position_to_fen(after, fen_after, sizeof(fen_after)))
+        strcpy(fen_after, "unavailable");
+    fprintf(*log, "\n--- manual engine move ---\nfullmove_number: %u\nengine_color: %s\n"
+                  "selected_move: %s\nfen_before: %s\nfen_after: %s\n",
+            (unsigned)before->fullmove_number, color_name(before->side_to_move),
+            xq_move_to_string(move, text, sizeof(text)), fen_before, fen_after);
     flush_search_detail(log);
 }
 
@@ -664,21 +730,40 @@ int main(int argc, char **argv)
         }
 
         {
-            XqMove move;
-            uint64_t time_limit_ms = default_limits.time_limit_ms;
-            if (!parse_move_input(input, &legal, &move, &time_limit_ms))
+            CliMoveInput parsed = {.time_limit_ms = default_limits.time_limit_ms};
+            const char *error = parse_move_input(input, &pos, &legal, &parsed);
+            size_t original_count = history.count;
+            int applied;
+
+            if (error != NULL)
             {
-                printf("illegal move or bad format. Use b2b9 [time_ms] (positive integer milliseconds), or type moves.\n");
+                printf("%s; no moves played.\n", error);
+                printf("Use a0a1, a0a1 2000, or a0a1 a9a8; type moves for legal first moves.\n");
                 continue;
             }
-            limits.time_limit_ms = time_limit_ms;
-            xq_position_make_move(&pos, move);
-            if (!xq_history_push(&history, move, &pos))
+            for (applied = 0; applied < parsed.count; ++applied)
+                if (!xq_history_push(&history, parsed.moves[applied], &parsed.positions[applied]))
+                    break;
+            if (applied != parsed.count)
             {
+                /* Keep the original board and roll back even if only the second append failed. */
+                (void)xq_history_truncate(&history, original_count);
                 fprintf(stderr, "error: history allocation failed; stopping game\n");
                 exit_status = EXIT_FAILURE;
                 break;
             }
+            pos = parsed.positions[parsed.count - 1];
+            if (parsed.count == 2)
+            {
+                char text[8];
+                printf("%s engine plays (specified by player): %s\n", color_name(engine_color),
+                       xq_move_to_string(parsed.moves[1], text, sizeof(text)));
+                if (search_log != NULL)
+                    write_manual_engine_move(&search_log, &parsed.positions[0], &parsed.positions[1],
+                                             parsed.moves[1]);
+            }
+            else
+                limits.time_limit_ms = parsed.time_limit_ms;
         }
     }
 
