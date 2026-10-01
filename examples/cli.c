@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,11 +38,12 @@ static const char *color_name(XqColor color)
  */
 static void print_usage(const char *program)
 {
-    printf("usage: %s [--fen FEN] [--engine red|black] [--time-ms MS] [--tt-file PATH] [--search-detail]\n", program);
+    printf("usage: %s [--fen FEN] [--engine red|black] [--depth N] [--time-ms MS] [--tt-file PATH] [--search-detail]\n", program);
     printf("\n");
     printf("options:\n");
     printf("  -f, --fen FEN           initialize the position from FEN\n");
     printf("  -e, --engine COLOR      choose the engine side: red or black\n");
+    printf("      --depth N           maximum search depth in plies (positive integer; default 10)\n");
     printf("      --time-ms MS        default thinking time per engine move (positive integer milliseconds)\n");
     printf("                         a nearly complete iteration may finish after this budget\n");
     printf("      --tt-file PATH      load a saved transposition table before the first search\n");
@@ -108,6 +110,26 @@ static bool parse_move_text(const char *text, XqMoveList *legal, XqMove *move)
         }
 
     return false;
+}
+
+/* Follow explain.c's integer parsing, but require positive depth for an engine move. */
+static bool parse_depth(const char *text, unsigned *depth)
+{
+    char *end;
+    long parsed;
+
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    if (errno == ERANGE || text == end || parsed <= 0 || parsed > INT_MAX)
+        return false;
+    while (*end != '\0')
+    {
+        if (!isspace((unsigned char)*end))
+            return false;
+        ++end;
+    }
+    *depth = (unsigned)parsed;
+    return true;
 }
 
 /* Parse a positive millisecond limit, rejecting overflow and extra arguments. */
@@ -382,6 +404,22 @@ int main(int argc, char **argv)
                 return EXIT_FAILURE;
             }
             tt_file = argv[i];
+            continue;
+        }
+        if (strcmp(argv[i], "--depth") == 0)
+        {
+            if (++i >= argc)
+            {
+                fprintf(stderr, "error: --depth requires a positive integer depth argument\n");
+                print_usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+            if (!parse_depth(argv[i], &default_limits.max_depth))
+            {
+                fprintf(stderr, "error: invalid search depth: %s (expected an integer from 1 to %d)\n",
+                        argv[i], INT_MAX);
+                return EXIT_FAILURE;
+            }
             continue;
         }
         if (strcmp(argv[i], "--time-ms") == 0)
