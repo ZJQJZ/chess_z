@@ -126,7 +126,7 @@ enum
     XQ_MAX_QUIESCENCE_DEPTH = 500,
     XQ_MAX_PV_MOVES = 64,
     XQ_MATE_SCORE = 30000,
-    XQ_MATE_THRESHOLD = 29000,
+    XQ_MAX_STATIC_SCORE = 28999,
     XQ_TT_BUCKET_SIZE = 4,
     XQ_TT_BUCKET_COUNT = 1 << 18
 };
@@ -209,7 +209,7 @@ struct XqTranspositionTable
 enum
 {
     XQ_TT_FORMAT_VERSION = 1,
-    XQ_TT_ENGINE_VERSION = 1,
+    XQ_TT_ENGINE_VERSION = 2,
     XQ_TT_FILE_HEADER_SIZE = 32,
     XQ_TT_FILE_RECORD_SIZE = 24
 };
@@ -648,8 +648,8 @@ static FILE *tt_open_temporary(char *path, size_t capacity)
 /**
  * @brief Saves a built-in engine's transposition table to a versioned binary cache file.
  *
- * Serializes valid entries with their original slots, normalized scores, and generations using the
- * little-endian layout above, followed by an IEEE CRC32 checksum. Empty slots and cumulative
+ * Serializes valid entries with their original slots, side-to-move scores, and generations using
+ * the little-endian layout above, followed by an IEEE CRC32 checksum. Empty slots and cumulative
  * statistics are omitted. Saving an empty table is supported; the in-memory table is unchanged.
  *
  * Writes to an exclusively created temporary file beside the destination, then replaces the
@@ -820,11 +820,12 @@ XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
         encoded_score = (uint32_t)tt_get_le(record + 12, 4);
         score = encoded_score <= INT32_MAX ? (int64_t)encoded_score
                                            : (int64_t)encoded_score - INT64_C(4294967296);
-        /* Built-in search uses +/- INT_MAX/2 as window sentinels. Keep malformed values
-         * away from integer limits, including subsequent mate-distance adjustments. */
+        /* Version 2 stores ordinary bounded evaluations or fixed win/loss scores. */
         if (slot >= XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE ||
             slot / XQ_TT_BUCKET_SIZE != (key & (XQ_TT_BUCKET_COUNT - 1u)) ||
-            tt_get_le(record + 16, 2) == 0 || score <= INT_MIN / 2 || score >= INT_MAX / 2 ||
+            tt_get_le(record + 16, 2) == 0 ||
+            (score != XQ_MATE_SCORE && score != -XQ_MATE_SCORE &&
+             (score < -XQ_MAX_STATIC_SCORE || score > XQ_MAX_STATIC_SCORE)) ||
             (record[19] != XQ_SEARCH_SCORE_EXACT && record[19] != XQ_SEARCH_SCORE_LOWER_BOUND &&
              record[19] != XQ_SEARCH_SCORE_UPPER_BOUND) ||
             record[20] >= XQ_SQUARES || record[21] >= XQ_SQUARES || record[20] == record[21] ||
@@ -933,60 +934,40 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table, uint64_t
 }
 
 /**
- * @brief Converts a score relative to the current search root into a form suitable for storage in
- *        the transposition table.
+ * @brief Checks whether a completed search result proves the maximum possible score.
  *
- * A mate score is relative to the search root, so its value depends on the current ply. The same
- * position reached via different paths may have different scores because it occurs at different ply
- * depths.
+ * Fixed win/loss scores and bounded static evaluations guarantee that no valid score exceeds
+ * XQ_MATE_SCORE (+30000). Reaching this value proves a win only if the result is exact or a lower
+ * bound; an upper bound of +30000 still allows the true score to be lower.
  *
- * Before storing the score in the transposition table, the function adds ply to a positive mate
- * score or subtracts ply from a negative mate score, thereby eliminating the effect of the path
- * length used to reach the current position. When the score is retrieved from the transposition
- * table, `score_from_tt()` uses the current ply at the point of lookup to restore the mate score
- * relative to the search root.
+ * For the window used to obtain score:
+ * - score <= alpha is fail-low: it may be only an upper bound, so do not promote it to EXACT.
+ * - alpha < score < beta is an exact result.
+ * - score >= beta is fail-high: it is a lower bound. At +30000 this also proves an exact win,
+ *   because the true score cannot exceed +30000.
+ * Thus score == XQ_MATE_SCORE && score > alpha covers both forms of proof without needing beta. For
+ * example, +30000 with alpha=100 proves a win; with alpha=30000 it is not sufficient proof.
  *
- * Non-mate scores do not depend on ply and therefore remain unchanged.
+ * Callers must discard interrupted results first. For a child result, negate it to the parent's
+ * perspective and pass the parent's alpha from BEFORE searching that child. Passing alpha after
+ * raising it to score would incorrectly reject the proof. This helper neither writes the cache nor
+ * stops the search; the caller decides how to use the proof.
  *
- * @param score Score obtained at the current search node.
- * @param ply   Number of plies from the search root to the current node.
- * @return      Normalized score suitable for storage in the transposition table.
+ * @param score Completed search result, in the same perspective as alpha.
+ * @param alpha Lower bound of the search window that produced score, before any score update.
+ * @return      True when the result proves +XQ_MATE_SCORE, false otherwise.
  */
-static int score_to_tt(int score, int ply)
+static bool score_proves_win(int score, int alpha)
 {
-    if (score >= XQ_MATE_THRESHOLD)
-        return score + ply;
-    if (score <= -XQ_MATE_THRESHOLD)
-        return score - ply;
-    return score;
-}
-
-/**
- * @brief Restores a transposition-table score for the current search ply.
- *
- * This function is the inverse of `score_to_tt()`. For mate scores, it restores the mate distance
- * according to the current node's distance from the search root. Ordinary position scores are left
- * unchanged.
- *
- * @param score Normalized score read from the transposition table.
- * @param ply   Number of plies from the search root to the current node.
- * @return      The score restored for use at the current ply.
- */
-static int score_from_tt(int score, int ply)
-{
-    if (score >= XQ_MATE_THRESHOLD)
-        return score - ply;
-    if (score <= -XQ_MATE_THRESHOLD)
-        return score + ply;
-    return score;
+    return score == XQ_MATE_SCORE && score > alpha;
 }
 
 /**
  * @brief Probes the transposition table and refreshes the generation of a matching entry.
  *
- * The function also returns the hash move and score kind when requested. It restores and accepts a
- * cached score only when the stored depth is sufficient and the score is either exact or a bound
- * that directly cuts off the current search.
+ * The function also returns the hash move and score kind when requested. It accepts a cached score
+ * only when the stored depth is sufficient and the score is either exact or a bound that directly
+ * cuts off the current search.
  *
  * A false return value does not necessarily mean that the probe missed; a returned hash move may
  * still be used for move ordering.
@@ -997,9 +978,7 @@ static int score_from_tt(int score, int ply)
  * @param depth         Remaining search depth required at the current node.
  * @param alpha         Lower bound of the current alpha-beta search window.
  * @param beta          Upper bound of the current alpha-beta search window.
- * @param ply           Number of plies from the search root, used to restore mate scores.
- * @param score         Optional output; receives the reusable score at the current ply when the
- *                      function returns true.
+ * @param score         Optional output; receives the reusable side-to-move score on a true return.
  * @param hash_move     Optional output; receives the cached best move when an entry matches.
  * @param has_hash_move Optional output; receives whether a matching entry supplied a hash move.
  * @param score_kind    Optional output; receives the cached score's bound kind when an entry
@@ -1008,7 +987,7 @@ static int score_from_tt(int score, int ply)
  *                      otherwise.
  */
 static bool tt_probe(XqTranspositionTable *table, uint64_t key, unsigned depth, int alpha, int beta,
-                     int ply, int *score, XqMove *hash_move, bool *has_hash_move,
+                     int *score, XqMove *hash_move, bool *has_hash_move,
                      XqSearchScoreKind *score_kind)
 {
     XqTranspositionEntry *entry;
@@ -1036,7 +1015,7 @@ static bool tt_probe(XqTranspositionTable *table, uint64_t key, unsigned depth, 
     if ((unsigned)entry->depth < depth)
         return false;
 
-    cached_score = score_from_tt(entry->score, ply);
+    cached_score = entry->score;
     if (entry->score_kind == XQ_SEARCH_SCORE_EXACT ||
         (entry->score_kind == XQ_SEARCH_SCORE_LOWER_BOUND && cached_score >= beta) ||
         (entry->score_kind == XQ_SEARCH_SCORE_UPPER_BOUND && cached_score <= alpha))
@@ -1119,12 +1098,11 @@ static int tt_retention_score(const XqTranspositionEntry *entry, uint8_t current
  *                   the function does nothing.
  * @param key        Full 64-bit hash of the current position, including the side to move.
  * @param depth      Remaining search depth at the current node; a value of zero is not stored.
- * @param score      Search score at the current ply; mate scores are normalized before storage.
- * @param ply        Number of plies from the search root to the current node.
+ * @param score      Side-to-move search score, stored unchanged, including fixed win/loss scores.
  * @param score_kind Score kind: exact, lower bound, or upper bound.
  * @param best_move  Best move found while searching the current position.
  */
-static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, int score, int ply,
+static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, int score,
                      XqSearchScoreKind score_kind, XqMove best_move)
 {
     XqTranspositionBucket *bucket;
@@ -1138,7 +1116,7 @@ static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, 
         return;
 
     incoming.key = key;
-    incoming.score = score_to_tt(score, ply);
+    incoming.score = score;
     incoming.best_move = best_move;
     incoming.depth = depth > UINT16_MAX ? UINT16_MAX : (uint16_t)depth;
     incoming.generation = table->generation;
@@ -1271,7 +1249,8 @@ int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective
  * @brief Evaluates a position through the configured engine adapter.
  *
  * If `engine` provides a custom static evaluator, the function invokes it with the adapter's user
- * data. Otherwise, it falls back to `xq_engine_default_static_evaluate()`.
+ * data. Otherwise, it falls back to `xq_engine_default_static_evaluate()`. Both are clamped to
+ * [-XQ_MAX_STATIC_SCORE, XQ_MAX_STATIC_SCORE] so static estimates cannot claim a proven win/loss.
  *
  * @param engine      Engine adapter that may provide a custom evaluator; may be null.
  * @param pos         Position to evaluate; must not be null.
@@ -1281,9 +1260,15 @@ int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective
 static int static_evaluate(const XqEngineAdapter *engine, const XqPosition *pos,
                            XqColor perspective)
 {
-    if (engine != NULL && engine->static_evaluate != NULL)
-        return engine->static_evaluate(pos, perspective, engine->user);
-    return xq_engine_default_static_evaluate(pos, perspective, NULL);
+    int score = engine != NULL && engine->static_evaluate != NULL
+                    ? engine->static_evaluate(pos, perspective, engine->user)
+                    : xq_engine_default_static_evaluate(pos, perspective, NULL);
+
+    if (score > XQ_MAX_STATIC_SCORE)
+        return XQ_MAX_STATIC_SCORE;
+    if (score < -XQ_MAX_STATIC_SCORE)
+        return -XQ_MAX_STATIC_SCORE;
+    return score;
 }
 
 /**
@@ -1576,9 +1561,8 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
  * the moves most likely to cause large score swings, so those are the continuations searched here.
  *
  * `depth` is the internal quiescence depth. It decreases by one at each recursive call, and the
- * function falls back to static evaluation after `XQ_MAX_QUIESCENCE_DEPTH` plies. `ply` is the
- * current node's distance from the root of the full search. It increases at each recursive call and
- * is used to encode mate distance.
+ * function falls back to static evaluation after `XQ_MAX_QUIESCENCE_DEPTH` plies. Win and loss
+ * scores are fixed and do not depend on the node's distance from the root.
  *
  * Before generating moves, an attacked opponent king is scored as a win by king capture on the
  * next ply. This rejects a preceding pseudo-legal move that left its own king attacked, even when
@@ -1593,14 +1577,13 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
  * @param engine  Engine adapter used for static evaluation and move ordering; may be null.
  * @param pos     Current position; must not be null and is restored before the function returns.
  * @param depth   Internal quiescence depth, decreasing from zero into negative values.
- * @param ply     Number of plies from the root of the full search to the current node.
  * @param alpha   Lower bound of the current alpha-beta search window.
  * @param beta    Upper bound of the current alpha-beta search window.
  * @param context Search context used for node counting and time control; may be null.
  * @return        Quiescence score from the side-to-move perspective, or zero if the search is
  *                stopped by the time limit.
  */
-static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth, int ply, int alpha,
+static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth, int alpha,
                       int beta, SearchContext *context)
 {
     XqMoveList list;
@@ -1613,7 +1596,7 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
         return 0;
 
     if (xq_position_in_check(pos, xq_color_opponent(pos->side_to_move)))
-        return XQ_MATE_SCORE - (ply + 1);
+        return XQ_MATE_SCORE;
 
     in_check = xq_position_in_check(pos, pos->side_to_move);
     if (in_check)
@@ -1621,7 +1604,7 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
     else
         xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
-        return -XQ_MATE_SCORE + ply + 2;
+        return -XQ_MATE_SCORE;
 
     if (depth <= -XQ_MAX_QUIESCENCE_DEPTH)
         return static_evaluate(engine, pos, pos->side_to_move);
@@ -1646,12 +1629,14 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
             continue;
 
         xq_position_make_move(pos, list.moves[i]);
-        score = -quiescence(engine, pos, depth - 1, ply + 1, -beta, -alpha, context);
+        score = -quiescence(engine, pos, depth - 1, -beta, -alpha, context);
         xq_position_unmake_move(pos, list.moves[i]);
         if (context != NULL && context->stopped)
             return 0;
         if (score > best)
             best = score;
+        if (score_proves_win(score, alpha))
+            return best;
         if (score >= beta)
             return best;
         if (score > alpha)
@@ -1686,12 +1671,11 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  *
  * More specifically, while evaluating a MAX node, each completed child can only raise the known
  * lower bound of its parent. For example, after node 2 produces `x`, node 1 is known to be at least
- * `x`. The remaining children of a MAX node can therefore be skipped only after one child raises
- * the parent score to at least `beta`. This is the beta cutoff. If a child's score instead falls
- * inside
- * `(alpha, beta)`, the intersection between the parent's newly established range and the search
- * window remains inside `(alpha, beta)`, so `alpha` can be raised to that child's score. The logic
- * for a MIN node is symmetric with signs reversed.
+ * `x`. Raising the parent score to at least `beta` lets the search skip the remaining children of a
+ * MAX node. This is the beta cutoff. If a child's score instead falls inside `(alpha, beta)`, the
+ * intersection between the parent's newly established range and the search window remains inside
+ * `(alpha, beta)`, so `alpha` can be raised to that child's score. The logic for a MIN node is
+ * symmetric with signs reversed.
  *
  * Negamax simplifies the minimax implementation by negating the opponent's position score, thereby
  * expressing both sides as maximizers with the same code path.
@@ -1703,7 +1687,9 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  *
  * The function probes the transposition table before generating moves, orders a valid hash move and
  * the previous iteration's principal-variation move first, and stores the resulting exact score or
- * bound after the node has been searched.
+ * bound after the node has been searched. A completed candidate proving +XQ_MATE_SCORE reaches the
+ * maximum possible value: store it as EXACT and return immediately, regardless of beta. A fail-low
+ * upper bound at that value alone is not proof of a win.
  *
  * Time control is shared across recursive calls, including quiescence search, through `context`. On
  * entry, `search_enter_node()` counts the node and checks for a stop request. With a time limit
@@ -1725,7 +1711,6 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  * @param pos           Current position; must not be null and is restored before the function
  *                      returns.
  * @param depth         Remaining normal-search depth. At zero, quiescence search is entered.
- * @param ply           Number of plies from the search root to the current node.
  * @param alpha         Lower bound of the current alpha-beta search window.
  * @param beta          Upper bound of the current alpha-beta search window.
  * @param pv_hint       Optional principal-variation moves from the previous iteration.
@@ -1736,8 +1721,8 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  *                      stopped by the time limit.
  */
 static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, XqPosition *pos,
-                   unsigned depth, int ply, int alpha, int beta, const XqMove *pv_hint,
-                   int pv_hint_count, PrincipalVariation *pv_out, SearchContext *context)
+                   unsigned depth, int alpha, int beta, const XqMove *pv_hint, int pv_hint_count,
+                   PrincipalVariation *pv_out, SearchContext *context)
 {
     XqMoveList list;
     int best = INT_MIN / 2;
@@ -1759,13 +1744,13 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
         return 0;
 
     if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
-        return -XQ_MATE_SCORE + ply;
+        return -XQ_MATE_SCORE;
 
     if (depth == 0)
-        return quiescence(engine, pos, 0, ply, alpha, beta, context);
+        return quiescence(engine, pos, 0, alpha, beta, context);
 
     key = xq_position_hash(pos);
-    if (tt_probe(table, key, depth, alpha, beta, ply, &cached_score, &hash_move, &has_hash_move,
+    if (tt_probe(table, key, depth, alpha, beta, &cached_score, &hash_move, &has_hash_move,
                  &cached_kind))
     {
         if (pv_out != NULL && cached_kind == XQ_SEARCH_SCORE_EXACT)
@@ -1775,7 +1760,7 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
 
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
-        return -XQ_MATE_SCORE + ply + 2;
+        return -XQ_MATE_SCORE;
     order_moves(engine, pos, &list);
 
     /* For example, suppose the requested depth is 6, the window is [50, 100], and the table
@@ -1802,8 +1787,8 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
         }
 
         xq_position_make_move(pos, list.moves[i]);
-        score = -negamax(engine, table, pos, depth - 1, ply + 1, -beta, -alpha, child_hint,
-                         child_hint_count, pv_out != NULL ? &child_pv : NULL, context);
+        score = -negamax(engine, table, pos, depth - 1, -beta, -alpha, child_hint, child_hint_count,
+                         pv_out != NULL ? &child_pv : NULL, context);
         xq_position_unmake_move(pos, list.moves[i]);
         if (context != NULL && context->stopped)
             return 0;
@@ -1814,6 +1799,11 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
             has_best_move = true;
             if (pv_out != NULL)
                 build_principal_variation(pv_out, list.moves[i], &child_pv);
+        }
+        if (score_proves_win(score, alpha))
+        {
+            tt_store(table, key, depth, best, XQ_SEARCH_SCORE_EXACT, node_best_move);
+            return best;
         }
         if (score > alpha)
             alpha = score;
@@ -1831,7 +1821,7 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
             score_kind = XQ_SEARCH_SCORE_LOWER_BOUND;
         else
             score_kind = XQ_SEARCH_SCORE_EXACT;
-        tt_store(table, key, depth, best, ply, score_kind, node_best_move);
+        tt_store(table, key, depth, best, score_kind, node_best_move);
     }
 
     return best;
@@ -1992,9 +1982,9 @@ static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMove
  *
  * The function searches only legal root moves from depth 1 through the requested maximum depth.
  * Scores from all root moves in the previous completed iteration determine their ordering in the
- * next iteration, while the previous principal variation supplies an additional ordering hint.
- * A completed root candidate with score >= XQ_MATE_THRESHOLD is selected immediately, before the
- * next time check, without waiting for the remaining candidates or looking for a faster mate.
+ * next iteration, while the previous principal variation supplies an additional ordering hint. A
+ * completed root candidate with score == XQ_MATE_SCORE is selected immediately, before the next
+ * time check, without waiting for the remaining candidates or looking for a faster mate.
  *
  * At the first detected deadline, an unfinished iteration strictly above the completed-root
  * threshold may finish, then supplies the result without starting another iteration. Otherwise, the
@@ -2102,7 +2092,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             }
 
             xq_position_make_move(pos, root_moves[i].move);
-            score = -negamax(engine, table, pos, current_depth - 1, 1, -beta, -alpha, child_hint,
+            score = -negamax(engine, table, pos, current_depth - 1, -beta, -alpha, child_hint,
                              child_hint_count, &child_pv, &context);
             xq_position_unmake_move(pos, root_moves[i].move);
 
@@ -2123,7 +2113,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             }
 
             /* Only a completed, non-interrupted candidate can establish a winning move. */
-            if (score >= XQ_MATE_THRESHOLD)
+            if (score == XQ_MATE_SCORE)
             {
                 winning_move_found = true;
                 break;
@@ -2141,7 +2131,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
                 root_moves[i].score = INT_MIN / 2;
                 root_moves[i].completed_depth = 0;
             }
-            /* Remaining alternatives could mate faster, so do not cache the root as EXACT. */
+            /* Keep root cache writes restricted to fully searched iterations. */
             break;
         }
 
@@ -2164,7 +2154,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
         previous_pv = current_pv;
         /* A history-dependent root result must not enter the position-only cache. */
         if (!filtered_cycles)
-            tt_store(table, root_key, current_depth, root_moves[0].score, 0, XQ_SEARCH_SCORE_EXACT,
+            tt_store(table, root_key, current_depth, root_moves[0].score, XQ_SEARCH_SCORE_EXACT,
                      root_moves[0].move);
 
         if (winning_move_found || context.stopped || context.deadline_reached ||
@@ -2343,7 +2333,7 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
         int score;
 
         xq_position_make_move(pos, list.moves[i]);
-        score = -negamax(engine, NULL, pos, depth - 1, 1, -beta, -alpha, NULL, 0, NULL, NULL);
+        score = -negamax(engine, NULL, pos, depth - 1, -beta, -alpha, NULL, 0, NULL, NULL);
         xq_position_unmake_move(pos, list.moves[i]);
 
         explained->move = list.moves[i];
@@ -2361,6 +2351,12 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
             alpha = score;
             result->best_index = result->count;
             explained->score_kind = XQ_SEARCH_SCORE_EXACT;
+        }
+        if (score_proves_win(score, alpha_before))
+        {
+            explained->caused_cutoff = score >= beta;
+            ++result->count;
+            break;
         }
         if (alpha >= beta)
         {
@@ -2427,7 +2423,7 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
     result->in_check = xq_position_in_check(pos, pos->side_to_move);
     if (xq_position_in_check(pos, xq_color_opponent(pos->side_to_move)))
     {
-        result->final_score = XQ_MATE_SCORE - 1;
+        result->final_score = XQ_MATE_SCORE;
         return true;
     }
     if (result->in_check)
@@ -2436,7 +2432,7 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
         xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
     {
-        result->final_score = -XQ_MATE_SCORE + 2;
+        result->final_score = -XQ_MATE_SCORE;
         return true;
     }
 
@@ -2472,11 +2468,11 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
 
         if (list.moves[i].captured != XQ_EMPTY_PIECE &&
             xq_piece_type(list.moves[i].captured) == XQ_KING)
-            score = XQ_MATE_SCORE - 1;
+            score = XQ_MATE_SCORE;
         else
         {
             xq_position_make_move(pos, list.moves[i]);
-            score = -quiescence(engine, pos, -1, 1, -beta, -alpha, NULL);
+            score = -quiescence(engine, pos, -1, -beta, -alpha, NULL);
             xq_position_unmake_move(pos, list.moves[i]);
         }
 
@@ -2494,6 +2490,15 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
         {
             best = score;
             result->best_index = result->count;
+        }
+        if (score_proves_win(score, alpha_before))
+        {
+            explained->score_kind = XQ_SEARCH_SCORE_EXACT;
+            explained->caused_cutoff = score >= beta;
+            explained->is_best = true;
+            ++result->count;
+            result->final_score = best;
+            return true;
         }
         if (score >= beta)
         {
@@ -2639,9 +2644,9 @@ static void trace_order(const XqEngineAdapter *engine, const XqPosition *pos, Xq
  * @brief Classifies a completed search score relative to its original alpha-beta window.
  *
  * A score at or above beta is a lower bound (fail-high); a score at or below alpha is an upper
- * bound (fail-low). Only a score strictly inside the window is classified as exact. Equality with
- * either endpoint is therefore treated as a bound. This function only classifies the supplied
- * value; it does not verify that the search completed or that the score is valid.
+ * bound (fail-low). A winning score above alpha proves the maximum possible value and is exact,
+ * even when it fails high. Otherwise only a score strictly inside the window is exact. This
+ * function does not verify that the search completed or that the score is valid.
  *
  * @param score Completed search score, expressed from the same perspective as alpha and beta.
  * @param alpha Lower window bound before the search, not the alpha updated using this score.
@@ -2650,6 +2655,8 @@ static void trace_order(const XqEngineAdapter *engine, const XqPosition *pos, Xq
  */
 static XqSearchScoreKind trace_score_kind(int score, int alpha, int beta)
 {
+    if (score_proves_win(score, alpha))
+        return XQ_SEARCH_SCORE_EXACT;
     return score >= beta    ? XQ_SEARCH_SCORE_LOWER_BOUND
            : score <= alpha ? XQ_SEARCH_SCORE_UPPER_BOUND
                             : XQ_SEARCH_SCORE_EXACT;
@@ -2771,28 +2778,27 @@ static int trace_finish(ExplainContext *context, bool record, int score)
  * @brief Probes once and snapshots the cache entry used for a node's explanation.
  *
  * tt_probe alone updates probe/hit/cutoff counters and the entry's generation. The subsequent
- * read-only lookup copies depth and the ply-adjusted score even when the entry cannot return
- * directly. It adds no probe counters and happens before any descendant can overwrite the entry.
+ * read-only lookup copies depth and the stored score even when the entry cannot return directly. It
+ * adds no probe counters and happens before any descendant can overwrite the entry.
  *
  * @param context Explanation context holding the optional shared transposition table.
  * @param key     Position hash of the node being entered.
  * @param depth   Required normal-search depth; must be positive.
- * @param ply     Node's distance from the search root, for mate-score conversion.
  * @param alpha   Node's incoming lower window bound.
  * @param beta    Node's incoming upper window bound.
  * @param info    Snapshot output; must not be null and is initialized even without a table.
  * @return        True if the cached score can return directly, false otherwise.
  */
-static bool tt_probe_for_explain(ExplainContext *context, uint64_t key, unsigned depth, int ply,
-                                 int alpha, int beta, XqExplainTtInfo *info)
+static bool tt_probe_for_explain(ExplainContext *context, uint64_t key, unsigned depth, int alpha,
+                                 int beta, XqExplainTtInfo *info)
 {
     XqTranspositionEntry *entry;
     bool cutoff;
     memset(info, 0, sizeof(*info));
     if (context->table == NULL)
         return false;
-    cutoff = tt_probe(context->table, key, depth, alpha, beta, ply, &info->score, &info->best_move,
-                      NULL, &info->score_kind);
+    cutoff = tt_probe(context->table, key, depth, alpha, beta, &info->score, &info->best_move, NULL,
+                      &info->score_kind);
     entry = tt_find_entry(context->table, key);
     if (entry == NULL)
     {
@@ -2801,7 +2807,7 @@ static bool tt_probe_for_explain(ExplainContext *context, uint64_t key, unsigned
     }
     info->status = cutoff ? XQ_EXPLAIN_TT_CUTOFF : XQ_EXPLAIN_TT_HIT;
     info->depth = entry->depth;
-    info->score = score_from_tt(entry->score, ply);
+    info->score = entry->score;
     return cutoff;
 }
 
@@ -2853,7 +2859,7 @@ static void trace_tt_block(ExplainContext *context, unsigned depth, int ply, int
  * @param engine        Adapter supplying evaluation and ordering callbacks; may be null.
  * @param pos           Position to search; must not be null and is restored before returning.
  * @param depth         Remaining normal-search depth; only positive-depth targets are recorded.
- * @param ply           Distance from the root, for path matching and mate-distance scores.
+ * @param ply           Distance from the root, used for path matching.
  * @param alpha         Lower bound of the incoming search window.
  * @param beta          Upper bound of the incoming search window.
  * @param pv_hint       Optional previous-iteration PV ordering hint.
@@ -2892,7 +2898,7 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
     if (depth == 0 ||
         (entry_tt == NULL && (!context->trace->matching || (size_t)ply > context->trace->count)))
     {
-        return negamax(engine, context->table, pos, depth, ply, alpha, beta, pv_hint, pv_hint_count,
+        return negamax(engine, context->table, pos, depth, alpha, beta, pv_hint, pv_hint_count,
                        pv_out, search);
     }
 
@@ -2902,10 +2908,10 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
         return 0;
     record = trace_begin(context, ply, depth, alpha, beta);
     if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
-        return trace_finish(context, record, -XQ_MATE_SCORE + ply);
+        return trace_finish(context, record, -XQ_MATE_SCORE);
 
     key = xq_position_hash(pos);
-    if (tt_probe_for_explain(context, key, depth, ply, alpha, beta, &info))
+    if (tt_probe_for_explain(context, key, depth, alpha, beta, &info))
     {
         if (entry_tt != NULL)
             *entry_tt = info;
@@ -2923,7 +2929,7 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
 
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
-        return trace_finish(context, record, -XQ_MATE_SCORE + ply + 2);
+        return trace_finish(context, record, -XQ_MATE_SCORE);
     trace_order(engine, pos, &list, context, record);
     if (info.status == XQ_EXPLAIN_TT_HIT)
         info.hash_move_used = prioritize_move(&list, info.best_move);
@@ -2966,14 +2972,19 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
             if (pv_out != NULL)
                 build_principal_variation(pv_out, list.moves[i], &child_pv);
         }
+        if (score_proves_win(score, alpha))
+        {
+            tt_store(context->table, key, depth, best, XQ_SEARCH_SCORE_EXACT, best_move);
+            return trace_finish(context, record, best);
+        }
         if (score > alpha)
             alpha = score;
         if (alpha >= beta)
             break;
     }
     if (has_best_move)
-        tt_store(context->table, key, depth, best, ply,
-                 trace_score_kind(best, alpha_original, beta), best_move);
+        tt_store(context->table, key, depth, best, trace_score_kind(best, alpha_original, beta),
+                 best_move);
     return trace_finish(context, record, best);
 }
 
@@ -3004,7 +3015,7 @@ static void trace_root_cache(ExplainContext *context, uint64_t key, bool hash_mo
     }
     info->status = XQ_EXPLAIN_TT_HIT;
     info->depth = entry->depth;
-    info->score = score_from_tt(entry->score, 0);
+    info->score = entry->score;
     info->score_kind = (XqSearchScoreKind)entry->score_kind;
     info->best_move = entry->best_move;
     info->hash_move_used = hash_move_used;
@@ -3251,7 +3262,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             if (completed_roots == list.count)
                 trace_root_finish(explain, alpha);
             /* Only a completed, non-interrupted candidate can establish a winning move. */
-            if (score >= XQ_MATE_THRESHOLD)
+            if (score == XQ_MATE_SCORE)
             {
                 winning_move_found = true;
                 break;
@@ -3269,7 +3280,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
                 root_moves[i].score = INT_MIN / 2;
                 root_moves[i].completed_depth = 0;
             }
-            /* Remaining alternatives could mate faster, so do not cache the root as EXACT. */
+            /* Keep root cache writes restricted to fully searched iterations. */
             break;
         }
 
@@ -3292,7 +3303,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
         previous_pv = current_pv;
         /* A history-dependent root result must not enter the position-only cache. */
         if (!filtered_cycles)
-            tt_store(table, root_key, current_depth, root_moves[0].score, 0, XQ_SEARCH_SCORE_EXACT,
+            tt_store(table, root_key, current_depth, root_moves[0].score, XQ_SEARCH_SCORE_EXACT,
                      root_moves[0].move);
 
         if (winning_move_found || context.stopped || context.deadline_reached ||

@@ -7,6 +7,8 @@
 #include "xiangqi/position.h"
 #include "xiangqi/types.h"
 
+/* Built-in search clamps static evaluations to [-28999, 28999]. Proven wins/losses
+ * use fixed +30000/-30000 scores with no mate distance. Direct evaluator calls are unchanged. */
 typedef int (*XqEvaluateFn)(const XqPosition *pos, XqColor perspective, void *user);
 typedef bool (*XqSearchFn)(const XqPosition *pos, unsigned depth, XqMove *best_move, void *user);
 typedef int (*XqMoveScoreFn)(const XqPosition *pos, XqMove move, void *user);
@@ -121,7 +123,7 @@ typedef enum XqExplainTtStatus
 
 /* Snapshot of the actual entry probe, before descendant searches can replace it.
  * depth, score, score_kind and best_move are valid for HIT/CUTOFF only. score is
- * restored for the queried ply, from that node's side-to-move perspective.
+ * read unchanged from the table, from that node's side-to-move perspective.
  * hash_move_used means the move was matched and promoted for ordering; a PV
  * hint can subsequently take priority. It is false on a direct cache return. */
 typedef struct XqExplainTtInfo
