@@ -28,7 +28,7 @@ typedef struct XqSearchStats
     bool available;               /* Internal counters are available only for built-in search. */
     unsigned max_started_depth;   /* Deepest iteration in which a root move was searched. */
     unsigned completed_depth;     /* All root moves completed at this depth. */
-    unsigned selected_move_depth; /* Zero for an unsearched fallback move. */
+    unsigned selected_move_depth; /* Selected result depth; zero for an unsearched fallback. */
     uint64_t nodes; /* Entries into negamax and quiescence, including their shared leaf. */
     bool stopped;   /* Time limit reached or search clock failed. */
     bool elapsed_available;
@@ -61,7 +61,6 @@ typedef struct XqSearchLimits
 {
     unsigned max_depth;
     uint64_t time_limit_ms;
-    int depth_bonus;
     XqSearchTimeMode time_mode;
 } XqSearchLimits;
 
@@ -147,15 +146,14 @@ typedef struct XqExplainTtBlock
     XqExplainTtInfo tt;
 } XqExplainTtBlock;
 
-/* Latest completed return for one root move, as used by the CLI's selection policy.
- * score may be a bound and is valid only when completed_depth > 0. During a timeout,
- * candidates may carry different depths; selection_score includes the depth bonus. */
+/* Root candidate from the last complete iteration, or the partial first iteration
+ * when none completed. score may be a bound and is valid only when completed_depth > 0.
+ * All valid scores in the final selection snapshot belong to the same iteration. */
 typedef struct XqRootMoveExplain
 {
     XqMove move;
     int score;
     unsigned completed_depth;
-    int64_t selection_score;
 } XqRootMoveExplain;
 
 /* Final root decision, independent of the retained target-node visit. The root cache
@@ -164,10 +162,8 @@ typedef struct XqRootMoveExplain
 typedef struct XqRootSearchExplain
 {
     bool move_available;
-    bool used_timeout_selection;
     XqMove selected_move;
     int selected_index;
-    int depth_bonus;
     int count;
     XqRootMoveExplain moves[XQ_MAX_MOVES];
     XqExplainTtInfo ordering_tt;
@@ -226,7 +222,7 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
 XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table, const char *path);
 XqSearchLimits xq_search_limits_default(void);
 /* limits 为 NULL 时使用默认限制；搜索深度由 limits->max_depth 指定。 */
-/* 时间限制和深度奖励仅适用于内置搜索；自定义 search 回调仍自行管理时间。 */
+/* 时间限制仅适用于内置搜索；自定义 search 回调仍自行管理时间。 */
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
                               const XqSearchLimits *limits, XqMove *best_move);
 /* stats may be NULL; otherwise initialized on every return, including failure.
@@ -241,7 +237,8 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
 
 /* Observe the exact legal from/to path (NULL for an empty path), searching from pos.
  * Uses an independent root driver aligned with CLI search, including history filtering,
- * PV/root ordering, cache generations, time checks and timeout selection with depth_bonus.
+ * PV/root ordering, cache generations, time checks and fallback to the last complete iteration.
+ * If none completed, select the best completed first-iteration candidate or an unsearched fallback.
  * Production builtin_search, negamax and quiescence carry no explanation hooks.
  * Iterations always start at 1; limits is required with max_depth >= 1, and time_limit_ms=0
  * disables the deadline. Evaluation/ordering callbacks, table and history are used;

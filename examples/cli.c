@@ -289,9 +289,9 @@ static void write_search_detail(FILE **log, const XqPosition *pos,
                  "fen_before: %s\nsuccess: %s\nselected_move: %s\n",
             (unsigned)pos->fullmove_number, color_name(pos->side_to_move), fen,
             found ? "yes" : "no", found ? xq_move_to_string(best, move, sizeof(move)) : "none");
-    fprintf(out, "depth_limit: %u\ntime_limit_ms: %" PRIu64 "\ntime_mode: %s\ndepth_bonus: %d\n",
+    fprintf(out, "depth_limit: %u\ntime_limit_ms: %" PRIu64 "\ntime_mode: %s\n",
             limits->max_depth, limits->time_limit_ms,
-            limits->time_mode == XQ_SEARCH_TIME_CPU ? "cpu" : "monotonic", limits->depth_bonus);
+            limits->time_mode == XQ_SEARCH_TIME_CPU ? "cpu" : "monotonic");
     fprintf(out, "stats_available: %s\n", stats->available ? "yes" : "no");
     if (stats->available)
         fprintf(out, "max_started_depth: %u\ncompleted_depth: %u\nselected_move_depth: %u\n"

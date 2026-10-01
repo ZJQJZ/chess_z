@@ -301,7 +301,7 @@ static int64_t search_time_ms(XqSearchTimeMode mode)
  * If the clock cannot be read for a timed search, the search is marked as stopped.
  *
  * @param context Search context to initialize; must not be null.
- * @param limits  Depth, time, bonus, and timing mode configuration; must not be null.
+ * @param limits  Depth, time, and timing mode configuration; must not be null.
  */
 static void search_context_init(SearchContext *context, const XqSearchLimits *limits)
 {
@@ -851,8 +851,8 @@ done:
 /**
  * @brief Creates a default limit configuration for the built-in search.
  *
- * The default configuration limits the search to depth 10 and 3 seconds, uses a monotonic wall
- * clock, and awards each root move a 70-point depth-confidence bonus per additional completed ply.
+ * The default configuration limits the search to depth 10 and 3 seconds, using a monotonic wall
+ * clock.
  *
  * @return The default limit configuration.
  */
@@ -862,7 +862,6 @@ XqSearchLimits xq_search_limits_default(void)
 
     limits.max_depth = 10;
     limits.time_limit_ms = 3000;
-    limits.depth_bonus = 70;
     limits.time_mode = XQ_SEARCH_TIME_MONOTONIC;
     return limits;
 }
@@ -1820,47 +1819,6 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
 }
 
 /**
- * @brief Selects a root move after the search has timed out.
- *
- * Each candidate receives an adjusted score of `score + completed_depth * depth_bonus`. Ties in
- * adjusted score favor the move searched to a greater completed depth. If both score and depth are
- * tied, the earlier move in the list is kept.
- *
- * Moves with a `completed_depth` of zero do not participate. If no move completed a search, the
- * first move in the list is used as a fallback.
- *
- * @param moves       Root moves and their most recently completed scores and depths; must not be
- *                    null.
- * @param count       Number of root moves; must be greater than zero.
- * @param depth_bonus Confidence bonus added for each completed ply of search.
- * @return            Root move selected by adjusted score and the stable tie-breaking rules.
- */
-static XqMove select_timed_root_move(const ScoredMove *moves, int count, int depth_bonus)
-{
-    int best_index = -1;
-    int64_t best_adjusted = INT64_MIN;
-    int i;
-
-    for (i = 0; i < count; ++i)
-    {
-        int64_t adjusted;
-
-        if (moves[i].completed_depth == 0)
-            continue;
-        adjusted = (int64_t)moves[i].score + (int64_t)moves[i].completed_depth * depth_bonus;
-        if (best_index < 0 || adjusted > best_adjusted ||
-            (adjusted == best_adjusted &&
-             moves[i].completed_depth > moves[best_index].completed_depth))
-        {
-            best_index = i;
-            best_adjusted = adjusted;
-        }
-    }
-
-    return moves[best_index >= 0 ? best_index : 0].move;
-}
-
-/**
  * @brief Computes the rolling hash of the move sequence between two recorded positions.
  *
  * Position indices are used as boundaries: the path includes moves in entries `begin + 1` through
@@ -2017,8 +1975,9 @@ static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMove
  * Scores from all root moves in the previous completed iteration determine their ordering in the
  * next iteration, while the previous principal variation supplies an additional ordering hint.
  *
- * If the time limit expires during an iteration, the function selects among the root moves whose
- * searches completed.
+ * If the time limit expires during an iteration, the last complete iteration supplies the move and
+ * candidate scores. If no iteration completed, select the best completed first-iteration candidate,
+ * or the initial fallback when no candidate completed. Equal scores retain search order.
  *
  * Before iterative deepening, real-game history excludes moves that close three identical cycles.
  * If every legal move loses this way, the original first move is returned without searching.
@@ -2027,7 +1986,7 @@ static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMove
  *                  table access; may be null.
  * @param pos       Position to search; must not be null and is restored before the function
  *                  returns.
- * @param limits    Depth, time, depth-bonus, and clock-mode configuration; must not be null.
+ * @param limits    Depth, time, and clock-mode configuration; must not be null.
  * @param best_move Output that receives the selected move; must not be null.
  * @param stats     Optional, zero-initialized output for built-in search counters.
  * @return          True if at least one root move exists and a move is selected; false if the
@@ -2038,6 +1997,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
 {
     XqMoveList list;
     ScoredMove root_moves[XQ_MAX_MOVES];
+    ScoredMove completed_moves[XQ_MAX_MOVES];
     PrincipalVariation previous_pv = {0};
     XqTranspositionTable *table = engine != NULL ? engine->transposition_table : NULL;
     uint64_t root_key;
@@ -2083,6 +2043,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
         int alpha = INT_MIN / 2;
         int beta = INT_MAX / 2;
         int completed_roots = 0;
+        int current_best_index = 0;
 
         if (current_depth > 1)
             tt_new_generation(table);
@@ -2118,6 +2079,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             ++completed_roots;
             if (score > alpha)
             {
+                current_best_index = i;
                 alpha = score;
                 build_principal_variation(&current_pv, root_moves[i].move, &child_pv);
             }
@@ -2126,17 +2088,21 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
                 break;
         }
 
-        /* The clock may expire just after the last root move completed. */
-        if (stats != NULL && completed_roots == list.count)
-            stats->completed_depth = current_depth;
-
-        if (context.stopped)
+        if (completed_roots != list.count)
         {
-            *best_move = select_timed_root_move(root_moves, list.count, limits->depth_bonus);
+            if (current_depth > 1)
+                memcpy(root_moves, completed_moves, (size_t)list.count * sizeof(*root_moves));
+            else if (completed_roots > 0)
+                *best_move = root_moves[current_best_index].move;
+            /* Keep the last complete iteration, or only completed first-iteration candidates. */
             break;
         }
 
+        /* Commit a full iteration even if the final clock check just detected a timeout. */
+        if (stats != NULL)
+            stats->completed_depth = current_depth;
         order_root_moves(root_moves, list.count);
+        memcpy(completed_moves, root_moves, (size_t)list.count * sizeof(*root_moves));
         *best_move = root_moves[0].move;
         previous_pv = current_pv;
         /* A history-dependent root result must not enter the position-only cache. */
@@ -2144,7 +2110,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             tt_store(table, root_key, current_depth, root_moves[0].score, 0, XQ_SEARCH_SCORE_EXACT,
                      root_moves[0].move);
 
-        if (current_depth == depth)
+        if (context.stopped || current_depth == depth)
             break;
     }
 
@@ -2821,8 +2787,8 @@ static void trace_tt_block(ExplainContext *context, unsigned depth, int ply, int
  * actual entry probe is observed exactly once. Other branches delegate to ordinary negamax using
  * the same table. Depth-zero leaves never probe the table or become explanation targets.
  *
- * Node entry uses the same periodic time check as ordinary negamax. The explanation root driver owns
- * forced checks; tracing adds none. Interrupted child scores are discarded after restoring the
+ * Node entry uses the same periodic time check as ordinary negamax. The explanation root driver
+ * owns forced checks; tracing adds none. Interrupted child scores are discarded after restoring the
  * board and prefix state, and interrupted nodes are not stored. Quiescence remains unchanged.
  *
  * @param engine        Adapter supplying evaluation and ordering callbacks; may be null.
@@ -2867,8 +2833,8 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
     if (depth == 0 ||
         (entry_tt == NULL && (!context->trace->matching || (size_t)ply > context->trace->count)))
     {
-        return negamax(engine, context->table, pos, depth, ply, alpha, beta, pv_hint,
-                        pv_hint_count, pv_out, search);
+        return negamax(engine, context->table, pos, depth, ply, alpha, beta, pv_hint, pv_hint_count,
+                       pv_out, search);
     }
 
     if (pv_out != NULL)
@@ -3009,28 +2975,25 @@ static void trace_root_terminal(ExplainContext *context)
 }
 
 /**
- * @brief Copies the explanation driver's final root choice and the scores used to select it.
+ * @brief Copies the final root choice and the candidate snapshot used for selection.
  *
- * On timeout, each row retains its own latest completed depth. The selection score is the
- * recursive return plus depth * depth_bonus; otherwise it is the unadjusted return. Unsearched
- * rows have completed_depth zero and do not supply a valid score. No selection is recomputed here.
+ * Rows come from the last complete iteration, or the partial first iteration when none completed.
+ * Unsearched rows have completed_depth zero and do not supply a valid score. No selection is
+ * recomputed here; scores may be bounds within this single iteration.
  *
- * @param context     Explanation context with the driver's live stop state; must not be null.
- * @param moves       Driver's current root candidates; may be null when count is zero.
- * @param count       Number of candidates, between zero and XQ_MAX_MOVES.
- * @param selected    Actual move selected by the driver, including an unsearched fallback.
- * @param depth_bonus Driver's configured confidence bonus per completed ply.
+ * @param context  Explanation context; must not be null.
+ * @param moves    Selected iteration's root candidates; may be null when count is zero.
+ * @param count    Number of candidates, between zero and XQ_MAX_MOVES.
+ * @param selected Actual move selected by the driver, including an unsearched fallback.
  */
 static void trace_root_selection(ExplainContext *context, const ScoredMove *moves, int count,
-                                 XqMove selected, int depth_bonus)
+                                 XqMove selected)
 {
     XqRootSearchExplain *root = &context->root;
     int i;
     root->move_available = true;
-    root->used_timeout_selection = count > 0 && context->search->stopped;
     root->selected_move = selected;
     root->selected_index = -1;
-    root->depth_bonus = depth_bonus;
     root->count = count;
     for (i = 0; i < count; ++i)
     {
@@ -3038,9 +3001,6 @@ static void trace_root_selection(ExplainContext *context, const ScoredMove *move
         row->move = moves[i].move;
         row->score = moves[i].score;
         row->completed_depth = moves[i].completed_depth;
-        if (row->completed_depth != 0)
-            row->selection_score = (int64_t)row->score +
-                (root->used_timeout_selection ? (int64_t)row->completed_depth * depth_bonus : 0);
         if (moves_equal(row->move, selected))
             root->selected_index = i;
     }
@@ -3065,9 +3025,9 @@ static void trace_root_selection(ExplainContext *context, const ScoredMove *move
  * @param context    Explanation context borrowing the driver's SearchContext; must not be null.
  * @return           Root-side recursive score; invalid if context->search->stopped is true.
  */
-static int search_root_move_for_explain(const XqEngineAdapter *engine, XqPosition *pos,
-                                        XqMove move, unsigned depth, int alpha, int beta,
-                                        const XqMove *hint, int hint_count, PrincipalVariation *pv,
+static int search_root_move_for_explain(const XqEngineAdapter *engine, XqPosition *pos, XqMove move,
+                                        unsigned depth, int alpha, int beta, const XqMove *hint,
+                                        int hint_count, PrincipalVariation *pv,
                                         ExplainContext *context)
 {
     XqExplainTtInfo child_tt;
@@ -3075,8 +3035,8 @@ static int search_root_move_for_explain(const XqEngineAdapter *engine, XqPositio
     bool matching = trace_push(context, 0, move);
     int score;
     xq_position_make_move(pos, move);
-    score = -negamax_for_explain(engine, pos, depth - 1, 1, -beta, -alpha, hint, hint_count,
-                                 pv, context, record ? &child_tt : NULL);
+    score = -negamax_for_explain(engine, pos, depth - 1, 1, -beta, -alpha, hint, hint_count, pv,
+                                 context, record ? &child_tt : NULL);
     xq_position_unmake_move(pos, move);
     trace_pop(context, matching);
     if (!context->search->stopped)
@@ -3094,11 +3054,12 @@ static int search_root_move_for_explain(const XqEngineAdapter *engine, XqPositio
  *
  * A completed root visit is saved before the final clock check, so a deadline reached just after
  * the last candidate does not discard that visit. Final move selection is captured separately
- * from the retained target visit and may use mixed-depth returns after an interrupted iteration.
+ * from the retained target visit and uses the last complete iteration or the partial first one.
  *
  * @param engine    Adapter supplying evaluation, ordering, optional cache and history; may be null.
  * @param pos       Root position; restored before returning. A null position returns false.
- * @param limits    Search limits; must not be null. Uses builtin_search's depth/time/bonus rules.
+ * @param limits    Search limits; must not be null. Uses builtin_search's depth/time limits and
+ *                  fallback to the last complete iteration.
  * @param best_move Selected root move, including an unsearched fallback; must not be null.
  * @param stats     Optional, zero-initialized search statistics.
  * @param explain   Initialized explanation context; must not be null. Borrows the local search
@@ -3111,6 +3072,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
 {
     XqMoveList list;
     ScoredMove root_moves[XQ_MAX_MOVES];
+    ScoredMove completed_moves[XQ_MAX_MOVES];
     PrincipalVariation previous_pv = {0};
     XqTranspositionTable *table = engine != NULL ? engine->transposition_table : NULL;
     uint64_t root_key;
@@ -3150,7 +3112,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
     filtered_cycles = filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
     if (list.count == 0)
     {
-        trace_root_selection(explain, NULL, 0, *best_move, limits->depth_bonus);
+        trace_root_selection(explain, NULL, 0, *best_move);
         return true; /* All legal moves lose: retain the original first move. */
     }
 
@@ -3168,6 +3130,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
         int alpha = INT_MIN / 2;
         int beta = INT_MAX / 2;
         int completed_roots = 0;
+        int current_best_index = 0;
 
         if (current_depth > 1)
             tt_new_generation(table);
@@ -3191,9 +3154,9 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
                 child_hint_count = previous_pv.count - 1;
             }
 
-            score = search_root_move_for_explain(engine, pos, root_moves[i].move,
-                                                 current_depth, alpha, beta, child_hint,
-                                                 child_hint_count, &child_pv, explain);
+            score = search_root_move_for_explain(engine, pos, root_moves[i].move, current_depth,
+                                                 alpha, beta, child_hint, child_hint_count,
+                                                 &child_pv, explain);
 
             if (context.stopped)
                 break;
@@ -3203,6 +3166,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             ++completed_roots;
             if (score > alpha)
             {
+                current_best_index = i;
                 alpha = score;
                 build_principal_variation(&current_pv, root_moves[i].move, &child_pv);
             }
@@ -3214,17 +3178,21 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
                 break;
         }
 
-        /* The clock may expire just after the last root move completed. */
-        if (stats != NULL && completed_roots == list.count)
-            stats->completed_depth = current_depth;
-
-        if (context.stopped)
+        if (completed_roots != list.count)
         {
-            *best_move = select_timed_root_move(root_moves, list.count, limits->depth_bonus);
+            if (current_depth > 1)
+                memcpy(root_moves, completed_moves, (size_t)list.count * sizeof(*root_moves));
+            else if (completed_roots > 0)
+                *best_move = root_moves[current_best_index].move;
+            /* Keep the last complete iteration, or only completed first-iteration candidates. */
             break;
         }
 
+        /* Commit a full iteration even if the final clock check just detected a timeout. */
+        if (stats != NULL)
+            stats->completed_depth = current_depth;
         order_root_moves(root_moves, list.count);
+        memcpy(completed_moves, root_moves, (size_t)list.count * sizeof(*root_moves));
         *best_move = root_moves[0].move;
         previous_pv = current_pv;
         /* A history-dependent root result must not enter the position-only cache. */
@@ -3232,11 +3200,11 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             tt_store(table, root_key, current_depth, root_moves[0].score, 0, XQ_SEARCH_SCORE_EXACT,
                      root_moves[0].move);
 
-        if (current_depth == depth)
+        if (context.stopped || current_depth == depth)
             break;
     }
 
-    trace_root_selection(explain, root_moves, list.count, *best_move, limits->depth_bonus);
+    trace_root_selection(explain, root_moves, list.count, *best_move);
     if (stats != NULL)
     {
         stats->nodes = context.nodes;
@@ -3266,10 +3234,10 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
  * allow it. Tracing neither adds probes nor introduces extra clock checks. Recording costs wall
  * time, so separate timed runs need not stop at the same node or select the same move.
  *
- * result->root reports the actual final root selection, including mixed-depth candidate returns
- * and the configured depth bonus on timeout. This is separate from the retained target visit:
- * result->node.best_index identifies the best candidate of that visit, not the final chosen root
- * move. Keep the latest complete target visit even if a later visit is interrupted; when none
+ * result->root reports the actual final root selection and its candidate snapshot from the last
+ * complete iteration, or the partial first iteration. This is separate from the retained target
+ * visit: result->node.best_index identifies the best candidate of that visit, not the final chosen
+ * root move. Keep the latest complete target visit even if a later visit is interrupted; when none
  * completed, return the latest partial visit. Target and child cache snapshots belong to that
  * visit. The initial root ordering lookup is preserved separately in root.ordering_tt; the root
  * target's tt is not-probed after iteration one because the root is not queried again.
@@ -3287,7 +3255,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
  * @param pos        Root position, restored before returning; must not be null.
  * @param limits     Required limits with max_depth >= 1. Iterations run from one to max_depth;
  *                   time_limit_ms zero disables the deadline, otherwise all iterations share it.
- *                   depth_bonus and time_mode have the same meaning as in ordinary search.
+ *                   time_mode has the same meaning as in ordinary search.
  * @param path       Legal from/to sequence from the root, not validated here; may be null only
  *                   when path_count is zero. No extra search is made to reach this path.
  * @param path_count Number of moves in path; must not exceed INT_MAX.
@@ -3325,9 +3293,8 @@ bool xq_engine_explain_path(const XqEngineAdapter *engine, XqPosition *pos,
     context.trace = &trace;
     context.table = engine != NULL ? engine->transposition_table : NULL;
     context.root.selected_index = -1;
-    context.root.depth_bonus = limits->depth_bonus;
-    context.root.ordering_tt.status = context.table != NULL ? XQ_EXPLAIN_TT_NOT_PROBED
-                                                          : XQ_EXPLAIN_TT_DISABLED;
+    context.root.ordering_tt.status =
+        context.table != NULL ? XQ_EXPLAIN_TT_NOT_PROBED : XQ_EXPLAIN_TT_DISABLED;
     result->tt.status = context.table != NULL ? XQ_EXPLAIN_TT_NOT_PROBED : XQ_EXPLAIN_TT_DISABLED;
     stats.available = true;
     stats.cache_available = context.table != NULL;

@@ -31,7 +31,7 @@ static void print_usage(const char *program)
     printf("  Any of these options prints one target node and exits. Unvisited paths are not searched separately.\n");
     printf("  Single-shot search follows CLI: iterative deepening, default depth 10 and time 3000 ms.\n");
     printf("  An empty transposition table is used unless --tt-file loads one. Root cache is ordering-only.\n");
-    printf("  Final root selection is separate from the retained target visit; timeout uses a depth bonus.\n");
+    printf("  Final root selection is separate from the retained target visit; timeout falls back to the last complete iteration.\n");
     printf("  Depth is measured from the root; interactive mode keeps its default depth of 4.\n");
     printf("  Path targets require remaining depth >= 1; single-shot mode rejects --depth 0.\n");
     printf("  N=0 is supported only by the original interactive quiescence explanation.\n");
@@ -640,10 +640,12 @@ static void print_tt_block(const XqExplainTtBlock *block, const ExplainOptions *
     printf("The ancestor returned directly from the table; the target was not reached in that iteration.\n");
 }
 
-/* The final root decision may use mixed-depth returns from an interrupted iteration. */
+/* Show the candidate snapshot that actually supplied the final root decision. */
 static void print_root_selection(const XqPathExplainResult *result)
 {
     const XqRootSearchExplain *root = &result->root;
+    const XqSearchStats *stats = &result->stats;
+    const char *policy;
     char move[8];
     int i;
     if (!root->move_available)
@@ -651,27 +653,30 @@ static void print_root_selection(const XqPathExplainResult *result)
         printf("root_selection: no legal root move\n");
         return;
     }
-    printf("root_selection selected_move=%s selected_move_depth=%u policy=%s depth_bonus=%d\n",
+    if (stats->selected_move_depth == 0)
+        policy = "fallback";
+    else if (stats->completed_depth == 0)
+        policy = "partial-first-iteration";
+    else if (stats->stopped && stats->max_started_depth > stats->completed_depth)
+        policy = "timeout-completed-iteration";
+    else
+        policy = "completed-iteration";
+    printf("root_selection selected_move=%s selected_move_depth=%u policy=%s\n",
            xq_move_to_string(root->selected_move, move, sizeof(move)),
-           result->stats.selected_move_depth,
-           result->stats.selected_move_depth == 0 ? "fallback" :
-           root->used_timeout_selection ? "timeout-depth-bonus" : "completed-iteration",
-           root->depth_bonus);
-    if (!root->used_timeout_selection || root->count == 0)
+           stats->selected_move_depth, policy);
+    if (!stats->stopped || root->count == 0)
         return;
-    printf("Root selection uses each move's latest completed return, possibly from different depths.\n"
-           "Scores below use the root side's perspective.\n"
-           "selection_score = score + completed_depth * depth_bonus; returns may be bounds.\n");
-    printf("%-6s %-9s %-16s %-17s %s\n", "move", "score", "completed_depth",
-           "selection_score", "selected");
+    printf("Root candidates below belong to the iteration used for the final selection.\n"
+           "Scores use the root side's perspective and may be bounds; unsearched rows have no score.\n");
+    printf("%-6s %-9s %-16s %s\n", "move", "score", "completed_depth", "selected");
     for (i = 0; i < root->count; ++i)
     {
         const XqRootMoveExplain *row = &root->moves[i];
         printf("%-6s ", xq_move_to_string(row->move, move, sizeof(move)));
         if (row->completed_depth != 0)
-            printf("%-9d %-16u %-17" PRId64, row->score, row->completed_depth, row->selection_score);
+            printf("%-9d %-16u", row->score, row->completed_depth);
         else
-            printf("%-9s %-16u %-17s", "-", 0u, "-");
+            printf("%-9s %-16u", "-", 0u);
         printf(" %s\n", i == root->selected_index ? "yes" : "");
     }
 }
