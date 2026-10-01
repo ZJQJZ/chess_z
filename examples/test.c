@@ -113,7 +113,8 @@ int main()
     // const char *chinese_fen = "cmxsj1x2/1C2s4/7cm/z7z/9/6P2/B3z3B/X6P1/4S4/3S1J1C1 r - -";
     // const char *chinese_fen = "cmxsjsx1c/9/8p/2C5z/6z2/4P1p2/z3B3m/X1M1P3M/6C2/3SJSX2 r - -";
     // const char *chinese_fen = "cmxsjsx1c/8p/9/4C3z/6z2/4P1p2/z3B3m/X1M1P3M/6C2/3SJSX2 r - -";
-    const char *chinese_fen = "2xj1s3/4s4/m7x/z3z3z/2B6/3mp1B2/B2c4B/4P3X/4M2C1/2X1JP1M1 r - -";
+    // const char *chinese_fen = "2xj1s3/4s4/m7x/z3z3z/2B6/3mp1B2/B2c4B/4P3X/4M2C1/2X1JP1M1 r - -";
+    const char *chinese_fen = "2xsjs2c/3C1C3/c7x/z3zmz1z/2z6/4p4/B5p2/X1M1P1P1X/4S4/4JS3 b - -";
 
     char english_fen[128];
     XqPosition pos;
