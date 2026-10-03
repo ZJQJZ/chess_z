@@ -373,6 +373,111 @@ int main()
 
     85
     3a1k3/2R1a4/3cb1n2/1C2N4/2b1C3R/9/9/9/r1r2p3/4K4 r - -
+
+    86
+    5k1n1/c3a4/5aR1b/6N2/2r5C/9/9/9/3p1p3/4K1R2 r - -
+
+    87
+    2b1ka3/4a3c/4b4/6n2/7RN/9/9/3CCR3/2rp1p3/4KAr1c r - -
+
+    88
+    2bak4/1C2a1n2/4b2Rr/4p4/2P3N2/9/5n3/2C1B4/4A4/4KAB1c r - -
+
+    89
+    1rb4C1/5k3/2Ncb4/9/9/3r5/9/5CR2/4p4/5K1p1 r - -
+
+    90
+    3akarr1/1NC2P2C/9/9/R8/9/6p2/4B4/2n1p4/5K3 r - -
+
+    91
+    2Rakc3/4aR3/2P1b1n2/4C4/6b2/2B6/4c4/2n1B3C/1r2A1p2/4KA3 r - -
+
+    92
+    5k3/2PR5/5a3/1c7/4PN3/9/9/9/4p1r2/3c1K3 r - -
+
+    93
+    6b2/3ka4/4ba3/9/9/6R2/6p2/5Rn2/9/3AKA1rc r - -
+
+    94
+    2bak3C/4a4/4c3b/6R2/9/4P2R1/r8/2n1B4/3r5/4KAB2 r - -
+
+    95
+    5a3/3k3N1/1R1cba3/6N2/5r3/9/9/9/4p4/3K2B2 r - -
+
+    96
+    3k1ab2/1R1Na4/4b4/7n1/8C/9/9/r8/3p5/4KA3 r - -
+
+    97
+    2b6/3ka2R1/5a3/N8/6N2/9/9/4Bp3/3r5/c4K3 r - -
+
+    98
+    4kab2/9/3abR3/1N1N5/9/9/9/7r1/3p5/4K1p2 r - -
+
+    99
+    2b6/c1P1ak3/1NP4Rc/9/4RPb2/9/6n2/4B4/2p3p1r/3rCK3 r - -
+
+    100
+    2nnPab2/3k5/3ab4/C3p4/4Rcp2/1N3r3/9/4Bp1R1/4r4/5K3 r - -
+
+    101
+    2baka3/3P3N1/bN7/7nc/9/4C1P2/P5n1P/B3R3B/4Apr2/2RAK3c r - -
+
+    102
+    1nb2kr2/3Pa2R1/3nba3/N3C2C1/6r2/9/9/9/9/5K3 r - -
+
+    103
+    4ka3/4a4/b3c4/nr7/2p3b2/2PR5/4C4/Bp2C4/4A4/c3KAB2 r - -
+
+    104
+    3akab2/9/9/1n5N1/2p5C/7cR/9/4B4/4p4/1n1K2B2 r - -
+
+    105
+    5a3/9/3kb4/2N6/9/6C2/7R1/1n1p5/4p4/5K3 r - -
+
+    106
+    2b2k3/1R2a1P2/3a5/4p1N2/6b2/9/3nP4/4C1C2/3rAp3/c1nAK4 r - -
+
+    107
+    2b2k3/1R2a1P2/3a5/4p1N2/6b2/9/3nP4/4C1C2/3rAp3/c1nAK4 r - -
+
+    108
+    C3k4/4a1r2/5a3/1N7/1Cp6/1R7/9/3p5/4p3r/3K5 r - -
+
+    109
+    2ba1k3/4a4/9/1CR1C4/9/2B6/2p6/3KBA3/r3r3c/6R2 r - -
+
+    110
+    2bak4/3Ra2R1/2n2c2C/5rpNn/2b6/9/4PC3/2r1BA3/4Ap3/c3K4 r - -
+
+    111
+    9/1RcPck3/b2aPNP2/1R7/9/C1N6/C8/3n4p/3nr2r1/5K1p1 r - -
+
+    112
+    1n2ka3/R3a1P2/1P2b1n1C/5R3/2b1P4/1N7/9/5p3/4r4/3p1K3 r - -
+    
+    113
+    3a4R/1C2k4/3N5/9/9/r8/9/3p5/4p4/3K5 r - -
+
+    114
+    c4a3/2N1knR2/9/4P4/7C1/6n2/9/1r1p5/4p4/3K5 r - -
+    
+    115
+    4kabC1/4a4/4b4/1R7/4P1N2/2N6/5n3/5p3/4p2r1/5K3 r - -
+
+    116
+    9/4a4/3k1a3/1NP1p4/9/8C/4P4/cr1AKA3/5r3/2n6 r - -
+
+    117
+    4kaPP1/c2Pa2nR/4b1P1r/6n2/6bN1/9/4C1R2/9/1r1p1p3/4K4 r - -
+
+    118
+    2rk2N2/5P3/1n7/C5p1p/9/9/R8/9/3p1p1c1/4K1p2 r - -
+
+    119
+    C1bac1RN1/r2Rak3/7n1/1rP6/2N1P1p2/9/9/2n6/5p3/4Kc3 r - -
+
+    120
+    4P3C/R8/2N1k1CNb/4p1rr1/9/9/9/3n5/4p4/3K5 r - -
     */
 
 
