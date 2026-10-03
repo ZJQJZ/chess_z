@@ -41,14 +41,14 @@ static void print_usage(const char *program)
     printf("usage: %s [--fen FEN] [--engine red|black] [--depth N] [--time-ms MS] [--tt-file PATH] [--search-detail]\n", program);
     printf("\n");
     printf("options:\n");
-    printf("  -f, --fen FEN           initialize the position from FEN\n");
-    printf("  -e, --engine COLOR      choose the engine side: red or black\n");
-    printf("      --depth N           maximum search depth in plies (positive integer; default 10)\n");
-    printf("      --time-ms MS        default thinking time per engine move (positive integer milliseconds)\n");
-    printf("                         a nearly complete iteration may finish after this budget\n");
-    printf("      --tt-file PATH      load a saved transposition table before the first search\n");
-    printf("      --search-detail     append each engine search to build/search_detail.txt\n");
-    printf("  -h, --help              show this help\n");
+    printf("  %-21s  %s\n", "-f, --fen FEN", "initialize the position from FEN");
+    printf("  %-21s  %s\n", "-e, --engine COLOR", "choose the engine side: red or black");
+    printf("  %-21s  %s\n", "    --depth N", "maximum search depth in plies (positive integer; default 10)");
+    printf("  %-21s  %s\n", "    --time-ms MS", "default thinking time per engine move (positive integer milliseconds)");
+    printf("  %-21s  %s\n", "", "a nearly complete iteration may finish after this budget");
+    printf("  %-21s  %s\n", "    --tt-file PATH", "load a saved transposition table before the first search");
+    printf("  %-21s  %s\n", "    --search-detail", "append each engine search to build/search_detail.txt");
+    printf("  %-21s  %s\n", "-h, --help", "show this help");
     printf("\n");
     printf("FEN strings containing spaces must be quoted.\n");
 }
@@ -222,15 +222,15 @@ static void print_help(void)
     printf("commands:\n");
     printf("  a0a1 [time_ms]  move; optional positive integer time limit for the next engine reply\n");
     printf("                  e.g. a0a1 2000 (2 seconds); omit time to use the default\n");
-    printf("  a0a1 a9a8      play your move and specify the engine reply, without searching\n");
+    printf("  a0a1 a9a8       play your move and specify the engine reply, without searching\n");
     printf("                  both moves must be legal; invalid input leaves the whole turn unchanged\n");
     printf("                  exactly two moves; no third move or additional time argument\n");
-    printf("  fen   print current FEN\n");
-    printf("  moves print legal moves\n");
-    printf("  undo  take back your last move and the automatic or specified engine reply (alias: u)\n");
-    printf("  flip  rotate the board display 180 degrees; move coordinates stay unchanged\n");
-    printf("  save-tt PATH  save the current transposition table (paths may contain spaces)\n");
-    printf("  quit  exit\n");
+    printf("  fen             print current FEN\n");
+    printf("  moves           print legal moves\n");
+    printf("  undo            take back your last move and the automatic or specified engine reply (alias: u)\n");
+    printf("  flip            rotate the board display 180 degrees; move coordinates stay unchanged\n");
+    printf("  save-tt PATH    save the current transposition table (paths may contain spaces)\n");
+    printf("  quit            exit\n");
 }
 
 static const char *tt_io_status_text(XqTranspositionIoStatus status)
