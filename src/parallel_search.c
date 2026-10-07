@@ -289,9 +289,9 @@ static void refresh_window(Search *search, Node *node, unsigned worker)
  *
  * For an unfinished node, the caller must have checked that no ancestor has finished and refreshed
  * the window under `search->mutex`, without releasing the mutex since. Only the node's own interval
- * may have changed in between. This allows `check_node()` to delegate its final check here and
- * `search_range()` to recheck after aggregation without rescanning ancestors. This function does
- * not detect ancestor cancellation, refresh the window, or wait for helpers to release the node.
+ * may have changed in between. This allows `check_node()` to delegate its final check here. This
+ * function does not detect ancestor cancellation, refresh the window, or wait for helpers to
+ * release the node.
  *
  * The caller must hold `search->mutex` throughout this call, including the synchronous trace
  * callback and condition-variable notification. Completion does not imply helpers have stopped; the
@@ -432,17 +432,16 @@ static Interval search_node(Search *, const XqPosition *, Node *, XqMove, unsign
  * board, makes the move, and calls `search_node()` with one less remaining depth. Board operations
  * and recursive search run without holding the search mutex.
  *
- * After each child returns, reacquires the mutex and checks the parent again: another thread may
- * have finished it during the recursive search. Only stores the child's interval if the parent
- * still needs work and `child.cancelled` is `false`. Cancelled or no-longer-needed results are
- * discarded rather than used as scores.
+ * After each child returns, reacquires the mutex and stores its interval unless `child.cancelled`
+ * is true. Already-computed valid results are accepted even if this node or an ancestor has
+ * finished in the meantime; cancelled results are never used as scores.
  *
  * Updates `best_index` using child lower bounds for MAX and child upper bounds for MIN. Equal
  * bounds retain the move whose result was accepted first, regardless of when its search started.
  * Calls `aggregate()` to recompute the parent's interval, emits a `submit` event associated with
- * the child move, checks this node's updated interval against its already-refreshed window, and
- * broadcasts `search->changed`. Ancestor state cannot change during this critical section, so
- * there is no need to refresh the window or check ancestors again after aggregation.
+ * the child move, then calls `check_node()` once to refresh the window, observe ancestor
+ * completion, and check the updated interval. This check also runs when the child was cancelled.
+ * Broadcasts `search->changed` before releasing the mutex.
  *
  * The caller must not hold `search->mutex` on entry. The node, its parent chain, position, and move
  * list must remain valid throughout this call; the position and move list must remain unchanged.
@@ -477,7 +476,7 @@ static void search_range(Search *search, Node *node, int begin, int end, unsigne
                             worker, NULL);
 
         pthread_mutex_lock(&search->mutex);
-        if (!check_node(search, node, worker) && !child.cancelled)
+        if (!child.cancelled)
         {
             node->children[i] = child;
             /* On ties, retain the move whose result was accepted first, rather than the one whose
@@ -487,10 +486,10 @@ static void search_range(Search *search, Node *node, int begin, int end, unsigne
                 (!node->maximizing && child.upper < node->children[node->best_index].upper))
                 node->best_index = i;
             aggregate(node);
-            emit(search, node, worker, "submit", &node->moves.moves[i]);
-            (void)check_interval(search, node, worker);
-            pthread_cond_broadcast(&search->changed);
+            emit(search, node, worker, "submit", &node->moves.moves[i])
         }
+        (void)check_node(search, node, worker);
+        pthread_cond_broadcast(&search->changed);
         pthread_mutex_unlock(&search->mutex);
     }
 }
