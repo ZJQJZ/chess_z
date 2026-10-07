@@ -373,7 +373,7 @@ static void test_quiescence_checkmate(void) {
     assert(result.best_index >= 0);
     assert(result.moves[result.best_index].move.from == xq_square_make(4, 2));
     assert(result.moves[result.best_index].move.to == xq_square_make(4, 1));
-    assert(result.final_score == 29999);
+    assert(result.final_score == 30000); /* Fixed win score, independent of mate distance. */
     assert(memcmp(&pos, &before, sizeof(pos)) == 0);
 }
 

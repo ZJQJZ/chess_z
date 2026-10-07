@@ -6,7 +6,7 @@
 - 同步维护 `board[90]` 邮箱数组，便于规则生成和调试。
 - 支持初始局面、FEN 读写、走子、合法着法生成、将军检测和 perft。
 - 提供 `XqEngineAdapter`，后续可以接入外部象棋 AI 搜索/评估函数。
-- 内置一个很小的材料与合法着法机动性评估 + negamax 搜索，主要用于框架冒烟测试。
+- 内置子力与位置估值、迭代加深 negamax 搜索，以及可选的固定视角并行 Minimax。
 
 ## 目录
 
@@ -38,16 +38,75 @@ ctest --test-dir build
 如果本机只有 GCC，也可以直接编译测试：
 
 ```sh
-gcc -std=c99 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c src/engine.c tests/test_core.c -o build/xiangqi_core_tests
+gcc -std=c99 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c src/history.c src/engine.c tests/test_core.c -o build/xiangqi_core_tests
 ./build/xiangqi_core_tests
 ```
 
 编译交互式人机示例：
 
 ```sh
-gcc -std=c99 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c src/engine.c examples/cli.c -o build/xiangqi_cli
+gcc -pthread -std=c99 -O2 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c examples/cli.c -o build/xiangqi_cli
 ./build/xiangqi_cli
 ```
+
+## 固定视角并行搜索（macOS / Linux）
+
+默认仍使用原引擎。通过 `--search parallel` 选择可读性优先的并行 Minimax：
+
+```sh
+./build/xiangqi_cli --search parallel --depth 3 --threads 4 --split-percent 50 --engine red --search-detail
+./build/xiangqi_cli --search parallel --depth 3 --threads 2 --parallel-trace build/parallel_trace.txt
+```
+
+并行模式默认固定深度 **3**、总线程数 **2**（包括调用线程）、分配比例 **50%**。
+`--depth` 必须为正整数；没有迭代加深或截止时间，会完成该固定深度的求值。
+`--threads 1` 或 `--split-percent 0` 可用于同一算法的串行对照。
+比例范围为 0..100；每个节点至多向一个空闲线程分配一次，从着法列表尾部
+取 `ceil(孩子数量 × 比例 / 100)` 个，并至少留一个给当前线程。辅助线程内部仍可继续分裂。
+没有空闲线程时串行继续；不创建积压队列，也不进行任务窃取。
+
+实现位于 `src/parallel_search.c`，接口为 `include/xiangqi/parallel_search.h` 中的
+`xq_engine_parallel_search`。所有分数固定站在本次根方的视角：根方是 MAX，对方是 MIN。
+每层生成合法着法、按生成顺序搜索，叶子直接静态估值；不使用 PV、排序、缓存、
+静态搜索延伸和历史循环过滤。没有合法着法判负，胜负分为 ±30000，普通估值截断至 ±28999。
+自定义估值回调及其用户数据必须支持并发调用；输入棋盘不会被修改。
+
+每个节点单独保存已证实区间 `[lower, upper]`。MAX 对孩子的上下界分别取最大，MIN 分别取最小；
+尚未搜索的孩子保留完整未知区间。严格 MAX 祖先的下界最大值提供 alpha，严格 MIN 祖先的
+上界最小值提供 beta。运行中的分支在节点入口、领取着法、提交结果和等待唤醒时沿父链
+读取最新边界，因此其他线程更新祖先后，已经开始的深层搜索也能利用新门槛剪枝。
+本节点值域与祖先窗口分开：剪枝返回已证实区间，取消不作为分数返回。
+同分保留首先证实的最优着法，线程调度可能改变同分选择，但不改变根方分数。
+
+并行模式不支持 `--time-ms`、`--tt-file`、走法后附加时间或 `save-tt`；显式请求会被拒绝，
+交互拒绝发生在提交走法之前。普通走棋、指定电脑应手、悔棋、翻转照常使用。
+原模式默认深度 10 和限时行为保持不变。Windows 可以编译、使用原引擎，新模式返回不支持。
+
+`--search-detail` 追加独立的并行摘要，包含根分数、深度、线程数、比例、节点数、分裂次数、
+观察到的边界变化次数（包括首次继承）、已进入节点的取消次数和墙钟耗时。
+`--parallel-trace PATH` 追加逐事件记录：每次 CLI 启动有 session 分隔，每次搜索有编号，
+事件序号在本次搜索内严格递增；记录节点、父节点、工作线程、MAX/MIN、着法、值域、
+alpha/beta 和提供它们的祖先编号。编号 0 表示没有祖先/没有有限边界来源。
+`dispatch` 的 worker 是接收批次的线程，move 是批次首着；`submit` 的 move 是完成的孩子着法，
+其余事件的 move 是进入当前节点的着法。事件回调由搜索锁串行调用，不得等待搜索线程或重入搜索。
+日志打不开或写入失败只关闭日志；比较性能时应关闭逐事件日志。
+
+并行控制使用单个互斥锁，优先保证可读性。棋盘生成、估值和递归计算在锁外执行，
+每个任务持有独立棋盘。它不保证比原引擎更快，浅树上调度及额外分支搜索可能更慢。
+
+独立验证（不依赖 CMake）：
+
+```sh
+gcc -pthread -DXQ_PARALLEL_TESTING -std=c99 -O1 -g -Iinclude src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c tests/test_parallel.c -o build/xiangqi_parallel_tests
+./build/xiangqi_parallel_tests
+python3 tests/test_parallel_cli.py build/xiangqi_cli
+```
+
+测试用无剪枝 Minimax 检查分数和最优着法，并用同步屏障验证运行中跨多层的 alpha/beta 更新。
+测试钩子仅在 `XQ_PARALLEL_TESTING` 构建中存在。用 Clang 在上述测试命令增加
+`-fsanitize=thread` 可检查竞态；另行增加 `-fsanitize=address,undefined` 可检查内存和未定义行为。
+
+## 原引擎的限时搜索与对局操作
 
 启动时可用 `--time-ms` 设置整局默认的每步思考时间（正整数，单位毫秒），例如 2 秒：
 
