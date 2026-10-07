@@ -83,6 +83,9 @@ typedef struct Node
     bool maximizing;
     Interval value;
     Interval children[XQ_MAX_MOVES];
+    int submitted_count;
+    int submitted_bound; /* MAX: maximum submitted upper bound; MIN: minimum submitted lower bound.
+                          */
     int best_index;
     int alpha, beta;
     uint64_t alpha_source, beta_source;
@@ -373,51 +376,50 @@ static bool check_node(Search *search, Node *node, unsigned worker)
 }
 
 /**
- * @brief Recomputes a node's proven score interval from all stored child intervals.
+ * @brief Incorporates one newly submitted child interval in constant time.
  *
  * A MAX node's score is the maximum child score, so its lower and upper bounds are respectively the
  * maximum child lower bound and the maximum child upper bound. Symmetrically, a MIN node takes the
  * minimum of each bound. All scores use the root side's perspective.
  *
- * Includes every entry in `children` corresponding to `moves`, even if its result has not yet been
- * submitted. Such entries retain the unknown interval `[-WIN, WIN]`: an unknown child keeps a MAX
- * node's upper bound at `WIN` and a MIN node's lower bound at `-WIN`. An accepted child can still
- * improve a MAX node's lower bound or a MIN node's upper bound before all children finish.
+ * Updates a MAX node's lower bound or a MIN node's upper bound directly from the new child. The
+ * opposite bound is accumulated in `submitted_bound`, initialized to `-WIN` for MAX and `WIN` for
+ * MIN. Until every child has submitted a valid result, unknown children keep the node's MAX upper
+ * bound at `WIN` or MIN lower bound at `-WIN`. The last submission replaces that unknown bound with
+ * `submitted_bound`.
  *
- * Each stored interval must be valid. The caller must exclude cancelled results before storing
- * them; this function does not inspect `cancelled`. It updates only `node->value.lower` and
- * `node->value.upper`, leaving child intervals, `best_index`, and the inherited `alpha`/`beta`
- * window unchanged. It does not check for completion, emit events, or notify waiting threads.
+ * Each child must be submitted exactly once, and cancelled results must be excluded. The owner's
+ * and helper's disjoint ranges ensure this. Updates the interval and submission counters, leaving
+ * child storage, `best_index`, and the inherited alpha-beta window unchanged. Does not check for
+ * completion, emit events, or notify waiting threads.
  *
- * The caller must hold the search mutex while reading child intervals and updating the node.
+ * The caller must hold the search mutex while updating the node.
  *
- * @param node Node with a non-empty move list and initialized child intervals; must not be null.
+ * @param node  Node with a non-empty move list and initialized aggregation state; must not be null.
+ * @param child Newly submitted valid child interval, not previously included in the aggregation.
  */
-static void aggregate(Node *node)
+static void aggregate(Node *node, Interval child)
 {
-    int lower = node->maximizing ? -WIN : WIN;
-    int upper = lower;
-    int i;
-    for (i = 0; i < node->moves.count; ++i)
+    assert(!child.cancelled && node->submitted_count < node->moves.count);
+    ++node->submitted_count;
+    if (node->maximizing)
     {
-        Interval child = node->children[i];
-        if (node->maximizing)
-        {
-            if (child.lower > lower)
-                lower = child.lower;
-            if (child.upper > upper)
-                upper = child.upper;
-        }
-        else
-        {
-            if (child.lower < lower)
-                lower = child.lower;
-            if (child.upper < upper)
-                upper = child.upper;
-        }
+        if (child.lower > node->value.lower)
+            node->value.lower = child.lower;
+        if (child.upper > node->submitted_bound)
+            node->submitted_bound = child.upper;
+        if (node->submitted_count == node->moves.count)
+            node->value.upper = node->submitted_bound;
     }
-    node->value.lower = lower;
-    node->value.upper = upper;
+    else
+    {
+        if (child.upper < node->value.upper)
+            node->value.upper = child.upper;
+        if (child.lower < node->submitted_bound)
+            node->submitted_bound = child.lower;
+        if (node->submitted_count == node->moves.count)
+            node->value.lower = node->submitted_bound;
+    }
 }
 
 static Interval search_node(Search *, const XqPosition *, Node *, XqMove, unsigned, unsigned,
@@ -438,10 +440,10 @@ static Interval search_node(Search *, const XqPosition *, Node *, XqMove, unsign
  *
  * Updates `best_index` using child lower bounds for MAX and child upper bounds for MIN. Equal
  * bounds retain the move whose result was accepted first, regardless of when its search started.
- * Calls `aggregate()` to recompute the parent's interval, emits a `submit` event associated with
- * the child move, then calls `check_node()` once to refresh the window, observe ancestor
- * completion, and check the updated interval. This check also runs when the child was cancelled.
- * Broadcasts `search->changed` before releasing the mutex.
+ * Calls `aggregate()` to incrementally update the parent's interval, emits a `submit` event for the
+ * child move, then calls `check_node()` once to refresh the window, observe ancestor completion,
+ * and check the updated interval. This check also runs when the child was cancelled. Broadcasts
+ * `search->changed` before releasing the mutex.
  *
  * The caller must not hold `search->mutex` on entry. The node, its parent chain, position, and move
  * list must remain valid throughout this call; the position and move list must remain unchanged.
@@ -485,8 +487,8 @@ static void search_range(Search *search, Node *node, int begin, int end, unsigne
                 (node->maximizing && child.lower > node->children[node->best_index].lower) ||
                 (!node->maximizing && child.upper < node->children[node->best_index].upper))
                 node->best_index = i;
-            aggregate(node);
-            emit(search, node, worker, "submit", &node->moves.moves[i])
+            aggregate(node, child);
+            emit(search, node, worker, "submit", &node->moves.moves[i]);
         }
         (void)check_node(search, node, worker);
         pthread_cond_broadcast(&search->changed);
@@ -669,6 +671,7 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
     node.incoming = incoming;
     node.depth = depth;
     node.maximizing = position->side_to_move == search->root_color;
+    node.submitted_bound = node.maximizing ? -WIN : WIN;
     node.value.lower = -WIN;
     node.value.upper = WIN;
     node.best_index = -1;
