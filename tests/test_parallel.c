@@ -18,6 +18,8 @@ static bool paused, released, observed;
 static uint64_t target_node, paused_node;
 static unsigned target_depth;
 static int create_count, fail_after = -1;
+static bool inspect_pseudo_moves;
+static unsigned illegal_leaves, illegal_internal_nodes, both_kings_attacked;
 
 int xq_parallel_test_create(pthread_t *thread, void *(*entry)(void *), void *user)
 {
@@ -37,8 +39,17 @@ static void await_flag(const bool *flag)
 
 void xq_parallel_test_checkpoint(const XqParallelEvent *event, const XqPosition *pos)
 {
-    (void)pos;
     pthread_mutex_lock(&gate);
+    if (inspect_pseudo_moves && event->parent_id != 0 &&
+        xq_position_in_check(pos, xq_color_opponent(pos->side_to_move)))
+    {
+        if (event->depth == 0)
+            ++illegal_leaves;
+        else
+            ++illegal_internal_nodes;
+        if (xq_position_in_check(pos, pos->side_to_move))
+            ++both_kings_attacked;
+    }
     if (synchronization_mode != 0 && target_node != 0)
     {
         if (event->worker_id == 1 && event->depth == 0 && !paused)
@@ -99,6 +110,16 @@ static int zero_evaluate(const XqPosition *pos, XqColor color, void *user)
 {
     (void)pos; (void)color; (void)user;
     return 0;
+}
+
+static int safe_evaluate(const XqPosition *pos, XqColor color, void *user)
+{
+    XqMoveList legal;
+    /* Illegal pseudo-legal branches and terminal leaves must never reach evaluation. */
+    assert(!xq_position_in_check(pos, xq_color_opponent(pos->side_to_move)));
+    xq_generate_legal(pos, &legal);
+    assert(legal.count > 0);
+    return xq_engine_default_static_evaluate(pos, color, user);
 }
 
 /* 独立参考：没有 alpha/beta、线程、缓存、排序或任何剪枝。 */
@@ -180,16 +201,23 @@ static void test_positions(void)
         "4k4/9/9/9/9/9/9/9/4R4/3K5 r - -", /* King capture. */
         "3k5/9/9/9/4p4/9/9/r8/c8/R3K4 r - -",
         "4k4/9/9/9/9/9/9/9/9/3K5 r - -", /* Equal scores. */
+        "4k4/9/9/9/9/9/9/4r4/3rPr3/4K4 b - -", /* Mate at the horizon. */
+        "3k5/9/9/9/9/9/9/9/2r2r3/4K4 b - -", /* Stalemate at the horizon. */
+        "4k4/9/9/9/R8/9/9/1r7/9/3K5 r - -", /* Ignoring check can attack both kings. */
+        "4k4/9/9/9/9/9/9/9/4R4/4K4 r - -", /* Moving the blocker exposes facing kings. */
     };
     unsigned threads[] = {1, 2, 4}, ratios[] = {0, 1, 50, 100};
     size_t f, t, r;
     unsigned depth;
+    inspect_pseudo_moves = true;
     for (f = 0; f < sizeof(fens) / sizeof(fens[0]); ++f)
         for (depth = 1; depth <= 3; ++depth)
             for (t = 0; t < sizeof(threads) / sizeof(threads[0]); ++t)
                 for (r = 0; r < sizeof(ratios) / sizeof(ratios[0]); ++r)
                     compare(fens[f], depth, threads[t], ratios[r],
-                            f == 7 ? zero_evaluate : xq_engine_default_static_evaluate, NULL);
+                            f == 7 ? zero_evaluate : safe_evaluate, NULL);
+    inspect_pseudo_moves = false;
+    assert(illegal_leaves > 0 && illegal_internal_nodes > 0 && both_kings_attacked > 0);
 }
 
 static void test_live_updates(void)

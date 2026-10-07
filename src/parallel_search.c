@@ -614,10 +614,17 @@ static int split_node(Search *search, Node *node)
  * Registers the node and emits `enter`, then uses `check_node()` to observe ancestor completion and
  * refresh inherited bounds at search checkpoints.
  *
- * Checks terminal positions before the depth limit. A missing king loses for its side, and a side
- * with no legal moves loses whether in check or stalemated; terminal scores are `-WIN` or `WIN`
- * from the root perspective. At `depth == 0`, a non-terminal position is evaluated using
- * `search->evaluate` and clamped to `[-STATIC_LIMIT, STATIC_LIMIT]`. Accepted terminal and leaf
+ * The root generates legal moves so even a forced loss returns a legal choice. Descendants search
+ * pseudo-legal moves: if the previous mover's king is attacked, that move loses immediately,
+ * including at depth zero and when both kings are attacked. This is checked before evaluation or
+ * move generation, following the king-capture rule used by the built-in engine's quiescence.
+ *
+ * Checks terminal positions before the depth limit. A missing king loses for its side. At depth
+ * zero, tests pseudo-legal moves only until the first legal continuation is found, preserving mate
+ * and stalemate detection without constructing a full legal list. A non-terminal leaf is evaluated
+ * using `search->evaluate` and clamped to `[-STATIC_LIMIT, STATIC_LIMIT]`. At positive depth, a
+ * node with no legal continuation loses because every pseudo-legal child loses (or its move list is
+ * empty). Terminal scores are `-WIN` or `WIN` from the root perspective; accepted terminal and leaf
  * scores produce exact intervals `[score, score]`.
  *
  * For a continuing internal node, initializes all child intervals as unknown and calls
@@ -699,9 +706,20 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
         score = WIN;
         leaf = true;
     }
+    else if (parent != NULL &&
+             xq_position_in_check(position, xq_color_opponent(position->side_to_move)))
+    {
+        /* The previous pseudo-legal move exposed its own king. The current side wins even if its
+         * own king is also attacked; do not let a leaf evaluation hide the illegal move. */
+        score = node.maximizing ? WIN : -WIN;
+        leaf = true;
+    }
     else
     {
-        xq_generate_legal(position, &node.moves);
+        if (parent == NULL)
+            xq_generate_legal(position, &node.moves);
+        else
+            xq_generate_pseudo_legal(position, &node.moves);
         if (node.moves.count == 0)
         {
             score = node.maximizing ? -WIN : WIN;
@@ -709,11 +727,23 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
         }
         else if (depth == 0)
         {
-            score = search->evaluate(position, search->root_color, search->evaluate_user);
-            if (score > STATIC_LIMIT)
-                score = STATIC_LIMIT;
-            if (score < -STATIC_LIMIT)
-                score = -STATIC_LIMIT;
+            /* A non-empty pseudo-legal list can still be mate or stalemate. Only existence of a
+             * legal move matters here, so stop at the first one rather than filtering the list. */
+            score = node.maximizing ? -WIN : WIN;
+            for (i = 0; i < node.moves.count; ++i)
+            {
+                XqPosition next = *position;
+                if (xq_position_make_move(&next, node.moves.moves[i]) &&
+                    !xq_position_in_check(&next, position->side_to_move))
+                {
+                    score = search->evaluate(position, search->root_color, search->evaluate_user);
+                    if (score > STATIC_LIMIT)
+                        score = STATIC_LIMIT;
+                    if (score < -STATIC_LIMIT)
+                        score = -STATIC_LIMIT;
+                    break;
+                }
+            }
             leaf = true;
         }
     }
