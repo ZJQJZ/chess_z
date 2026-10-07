@@ -19,6 +19,7 @@ TAB_SIZE = 8
 _TAG_RE = re.compile(
     r"^(?P<leader>[ \t]*\*[ \t]*)(?P<tag>"
     r"@brief\b|@return\b|"
+    r"@retval[ \t]+(?P<retval_name>\S+)|"
     r"@param(?:[ \t]*\[(?P<param_direction>[^\]\r\n]+)\])?"
     r"[ \t]+(?P<param_name>\S+)"
     r")(?P<separator>[ \t]*)(?P<body>.*)$"
@@ -28,7 +29,7 @@ _LIST_RE = re.compile(r"(?:[-+*]|\d+[.)])[ \t]+")
 _FENCE_RE = re.compile(r"(?:```|~~~)")
 _URL_RE = re.compile(r"(?:https?|ftp)://|www\.", re.IGNORECASE)
 _SINGLE_LINE_DOC_RE = re.compile(
-    r"^(?P<indent>[ \t]*)/\*\*[ \t]*(?P<content>@(?:brief|return|param)\b.*?)"
+    r"^(?P<indent>[ \t]*)/\*\*[ \t]*(?P<content>@(?:brief|return|retval|param)\b.*?)"
     r"[ \t]*\*/$"
 )
 
@@ -206,6 +207,9 @@ def _format_doc_comment(
 
     def render_tag_prefix(match: re.Match[str]) -> str:
         leader = match.group("leader")
+        return_value = match.group("retval_name")
+        if return_value is not None:
+            return leader + "@retval " + return_value
         parameter_name = match.group("param_name")
         if parameter_name is None:
             return leader + match.group("tag")
@@ -402,7 +406,7 @@ def _atomic_write(path: Path, content: bytes, mode: int) -> None:
 
 def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Format @brief, @param and @return paragraphs in one C file."
+        description="Format @brief, @param, @return and @retval paragraphs in one C file."
     )
     parser.add_argument("file", type=Path, help="UTF-8 .c file to modify in place")
     return parser
