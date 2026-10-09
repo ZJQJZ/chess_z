@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(chess_z C)
 
-set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
@@ -88,7 +88,7 @@ if(Python3_Interpreter_FOUND)
 endif()
 
 if(NOT WIN32)
-    # Compile the search with private scheduling/failure hooks for deterministic tests.
+    # Compile the search with private position-inspection/thread-creation failure hooks.
     add_executable(xiangqi_parallel_tests tests/test_parallel.c src/parallel_search.c)
     target_compile_definitions(xiangqi_parallel_tests PRIVATE XQ_PARALLEL_TESTING)
     target_link_libraries(xiangqi_parallel_tests PRIVATE xiangqi)

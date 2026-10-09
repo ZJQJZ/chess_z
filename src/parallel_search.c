@@ -13,14 +13,13 @@
  *
  * The default configuration searches to a fixed depth of 3 plies, uses 2 threads including the
  * calling thread, and assigns 50 percent of a node's children to an available helper thread when
- * splitting is possible. Event tracing is disabled, with both the callback and its user data set to
- * null. The search has no time limit.
+ * splitting is possible. The search has no time limit.
  *
  * @return The default parallel-search configuration.
  */
 XqParallelOptions xq_parallel_options_default(void)
 {
-    XqParallelOptions options = {3, 2, 50, NULL, NULL};
+    XqParallelOptions options = {3, 2, 50};
     return options;
 }
 
@@ -52,7 +51,7 @@ const char *xq_parallel_status_text(XqParallelStatus status)
 
 #ifndef _WIN32
 #include <pthread.h>
-#include <time.h>
+#include <stdatomic.h>
 
 enum
 {
@@ -68,28 +67,43 @@ typedef struct Interval
                        interval aggregation. */
 } Interval;
 
-/* The node is owned by the thread that creates it; helper threads only borrow it. The owner must
- * wait for helpers to finish using the node before returning. Fields such as position, moves and
- * depth remain unchanged after the node is shared; bounds, child results and completion state are
- * protected by the shared search mutex. */
+/* Returned and submitted intervals are ordinary values. Only shared bounds are atomic. */
+typedef struct AtomicInterval
+{
+    atomic_int lower, upper;
+} AtomicInterval;
+
+typedef enum NodeState
+{
+    NODE_RUNNING,
+    NODE_FINISHED,
+    NODE_CANCELLED
+} NodeState;
+
+/* Keep check_node and aggregate genuinely lock-free on supported targets rather than allowing a
+ * library-backed atomic int to silently acquire an internal lock. */
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "parallel search requires lock-free atomic int");
+
+/* The owner keeps this stack-allocated node and its parent chain alive until its helper exits.
+ * Position, moves, depth, parent and maximizing are immutable once shared. Bounds, window and state
+ * use atomic access, as do submission counters and best_index. Each child slot has one writer and
+ * is immutable after publication through best_index. Only helper_active uses the search mutex.
+ * State combines finished/cancelled in one atomic transition so readers never see a partial stop.
+ */
 typedef struct Node
 {
     struct Node *parent;
     XqPosition position;
     XqMoveList moves;
-    XqMove incoming;
     unsigned depth;
-    uint64_t id;
     bool maximizing;
-    Interval value;
+    AtomicInterval value;
     Interval children[XQ_MAX_MOVES];
-    int submitted_count;
-    int submitted_bound; /* MAX: maximum submitted upper bound; MIN: minimum submitted lower bound.
-                          */
-    int best_index;
-    int alpha, beta;
-    uint64_t alpha_source, beta_source;
-    bool finished;
+    atomic_int submitted_count;
+    atomic_int submitted_bound; /* MAX: maximum submitted upper bound; MIN: minimum lower bound. */
+    atomic_int best_index;
+    atomic_int alpha, beta;
+    atomic_int state;
     bool helper_active;
 } Node;
 
@@ -97,7 +111,6 @@ typedef struct Worker
 {
     struct Search *search;
     pthread_t thread;
-    unsigned id;
     bool busy; /* Reserved under the mutex; includes assigned tasks that have not started yet. */
     Node *node;
     int begin, end;
@@ -111,388 +124,219 @@ typedef struct Search
     unsigned worker_count;
     bool shutdown;
     XqParallelOptions options;
-    XqParallelResult stats;
     XqColor root_color;
     XqEvaluateFn evaluate;
     void *evaluate_user;
-    uint64_t next_node, next_event;
 } Search;
 
+/**
+ * @brief Copies a completed node's result after all of its helper work has exited.
+ *
+ * Completion alone does not freeze the bounds: an in-flight helper may still submit a valid child
+ * result. The owner must wait for helper_active to become false under the search mutex before
+ * calling this function, unless the node has never been shared.
+ *
+ * @param node Completed, quiescent node; must not be null and must remain alive during the call.
+ * @return     Plain interval whose cancelled flag is derived from the single completion state.
+ */
+static Interval node_value(const Node *node)
+{
+    int state = atomic_load_explicit(&node->state, memory_order_acquire);
+    Interval value = {atomic_load_explicit(&node->value.lower, memory_order_relaxed),
+                      atomic_load_explicit(&node->value.upper, memory_order_relaxed),
+                      state == NODE_CANCELLED};
+    assert(state != NODE_RUNNING);
+    return value;
+}
+
+/**
+ * @brief Atomically updates a shared bound toward its maximum or minimum.
+ *
+ * @param bound     Atomic score, accumulated bound or window threshold; must not be null.
+ * @param candidate Value to incorporate without overwriting a stronger concurrent update.
+ * @param increase  True for maximum, false for minimum.
+ * @return          The candidate successfully published, or an already stronger observed bound.
+ */
+static int tighten_bound(atomic_int *bound, int candidate, bool increase)
+{
+    int current = atomic_load_explicit(bound, memory_order_relaxed);
+    while (increase ? candidate > current : candidate < current)
+    {
+        if (atomic_compare_exchange_weak_explicit(bound, &current, candidate, memory_order_relaxed,
+                                                  memory_order_relaxed))
+            return candidate;
+    }
+    return current;
+}
+
+/**
+ * @brief Refreshes the window and publishes completion or cancellation without taking any lock.
+ *
+ * Scans strict ancestors for completion and proven thresholds, then tightens atomic alpha/beta with
+ * CAS. Bounds and thresholds only tighten, so mixed or stale observations remain conservative: they
+ * can cause extra work but cannot justify an invalid cutoff. The node's own proven bounds are never
+ * replaced by inherited thresholds.
+ *
+ * If an ancestor has stopped, proposes NODE_CANCELLED. Otherwise an exact interval or a cutoff
+ * proposes NODE_FINISHED. One CAS changes NODE_RUNNING to the chosen terminal state; the first
+ * completion wins, and later checks cannot change a valid result into a cancelled result or vice
+ * versa. There is no separate finished/cancelled publication window and no locked confirmation.
+ *
+ * This function makes no callbacks and sends no condition-variable notifications. Waiters depend
+ * only on worker assignment, pool shutdown or helper_active, whose changes and notifications remain
+ * under the search mutex. Running descendants observe ancestor completion at their checkpoints.
+ *
+ * @param node Node to check and update; must not be null. The node and its parent chain must remain
+ *             alive throughout the call. Their non-atomic metadata must already be initialized.
+ * @return     True if the node has stopped, including cancellation; false if no stop was observed.
+ *             A true result does not mean helpers have exited: the owner must still wait for them
+ *             before copying the result or releasing the node.
+ */
+static bool check_node(Node *node)
+{
+    const Node *ancestor;
+    int alpha = -INFINITY_SCORE, beta = INFINITY_SCORE;
+    int lower, upper, desired, expected = NODE_RUNNING;
+    bool cancelled = false;
+    if (atomic_load_explicit(&node->state, memory_order_acquire) != NODE_RUNNING)
+        return true;
+    for (ancestor = node->parent; ancestor != NULL; ancestor = ancestor->parent)
+    {
+        int bound;
+        if (atomic_load_explicit(&ancestor->state, memory_order_acquire) != NODE_RUNNING)
+            cancelled = true;
+        if (ancestor->maximizing)
+        {
+            bound = atomic_load_explicit(&ancestor->value.lower, memory_order_relaxed);
+            if (bound > alpha)
+                alpha = bound;
+        }
+        else
+        {
+            bound = atomic_load_explicit(&ancestor->value.upper, memory_order_relaxed);
+            if (bound < beta)
+                beta = bound;
+        }
+    }
+    alpha = tighten_bound(&node->alpha, alpha, true);
+    beta = tighten_bound(&node->beta, beta, false);
+    lower = atomic_load_explicit(&node->value.lower, memory_order_relaxed);
+    upper = atomic_load_explicit(&node->value.upper, memory_order_relaxed);
+    if (cancelled)
+        desired = NODE_CANCELLED;
+    else if (lower == upper || upper <= alpha || lower >= beta)
+        desired = NODE_FINISHED;
+    else
+        return atomic_load_explicit(&node->state, memory_order_acquire) != NODE_RUNNING;
+
+    /* Failure means another checker already published an immutable terminal state. */
+    (void)atomic_compare_exchange_strong_explicit(&node->state, &expected, desired,
+                                                  memory_order_release, memory_order_relaxed);
+    return true;
+}
+
 #ifdef XQ_PARALLEL_TESTING
-/* Test barriers run only after the mutex is released; these hooks are absent from production
- * builds. */
-extern void xq_parallel_test_checkpoint(const XqParallelEvent *, const XqPosition *);
+/* Private inspection/failure hooks, absent from production builds. Checkpoints run outside locks.
+ */
+extern void xq_parallel_test_checkpoint(const XqPosition *, unsigned);
 extern int xq_parallel_test_create(pthread_t *, void *(*)(void *), void *);
 #endif
 
 /**
- * @brief Reads the monotonic wall clock and converts it to integer milliseconds.
- *
- * Uses `clock_gettime(CLOCK_MONOTONIC)` to measure elapsed search time, including time spent
- * waiting for helper threads. The clock is unaffected by changes to the system date or time zone.
- * Fractional milliseconds are discarded when converting seconds and nanoseconds.
- *
- * @return Milliseconds elapsed since an unspecified fixed reference point, or `-1` if the clock
- *         cannot be read. This is not calendar time; subtract two readings to measure duration.
- */
-static int64_t wall_ms(void)
-{
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-        return -1;
-    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
-}
-
-/**
- * @brief Copies a search node's current state into an event record.
- *
- * The snapshot contains the node and parent IDs, remaining depth, MAX/MIN role, proven score
- * interval, and the currently stored alpha-beta window with its ancestor source IDs. All scores use
- * the root side's perspective. The function copies these values without refreshing the window.
- *
- * For a non-root node, `move` is the incoming move from its parent and `move_available` is `true`.
- * The root has no incoming move, so `move_available` is `false` and `move` must be ignored.
- * `emit()` may subsequently replace these fields with a child move for a `dispatch` or `submit`
- * event.
- *
- * The caller must hold the search mutex so the shared node state remains consistent while copied.
- * The node is left unchanged. The event `sequence` remains zero until assigned by `emit()`; `kind`
- * is a borrowed string pointer, while the other fields are copied by value.
- *
- * @param node   Node whose state is recorded; must not be null.
- * @param worker ID of the worker producing the event, which need not own the node.
- * @param kind   Event type string; must remain valid while the returned event is used.
- * @return       Event snapshot by value, with `sequence` initialized to zero.
- */
-static XqParallelEvent event_snapshot(const Node *node, unsigned worker, const char *kind)
-{
-    XqParallelEvent event = {0};
-    event.kind = kind;
-    event.node_id = node->id;
-    event.parent_id = node->parent != NULL ? node->parent->id : 0;
-    event.worker_id = worker;
-    event.depth = node->depth;
-    event.maximizing = node->maximizing;
-    event.move_available = node->parent != NULL;
-    event.move = node->incoming;
-    event.lower = node->value.lower;
-    event.upper = node->value.upper;
-    event.alpha = node->alpha;
-    event.beta = node->beta;
-    event.alpha_source = node->alpha_source;
-    event.beta_source = node->beta_source;
-    return event;
-}
-
-/**
- * @brief Creates a numbered search event and delivers it to the configured trace callback.
- *
- * Copies the node's current state using `event_snapshot()`, then increments the shared event
- * counter and assigns the new value to the event `sequence`. This counter advances even when no
- * trace callback is configured.
- *
- * If `child` is non-null, its move is copied into the event and `move_available` is set to `true`,
- * replacing the snapshot's incoming move. This associates `dispatch` and `submit` events with a
- * child move, including events at the root. Otherwise, the snapshot's move fields are retained.
- *
- * The caller must hold `search->mutex` throughout this call. The trace callback runs synchronously
- * under that mutex and receives `trace_user` unchanged; it must not wait for search work or reenter
- * this search. The event is local to this function, so a callback retaining it must copy the record
- * rather than retain its address. The `kind` string is borrowed and is not copied.
- *
- * @param search Search state containing the event counter and trace configuration; must not be
- *               null.
- * @param node   Node associated with the event; must not be null and is left unchanged.
- * @param worker ID of the worker recorded for the event, which need not own the node.
- * @param kind   Event type string; must remain valid while the event or a retained copy is used.
- * @param child  Optional child move to associate with the event; null retains the incoming move.
- */
-static void emit(Search *search, const Node *node, unsigned worker, const char *kind,
-                 const XqMove *child)
-{
-    XqParallelEvent event = event_snapshot(node, worker, kind);
-    event.sequence = ++search->next_event;
-    if (child != NULL)
-    {
-        event.move_available = true;
-        event.move = *child;
-    }
-    if (search->options.trace != NULL)
-        search->options.trace(&event, search->options.trace_user);
-}
-
-/**
- * @brief Refreshes a node's alpha-beta window from the latest proven ancestor bounds.
- *
- * Walks the parent chain starting at `node->parent`. `alpha` is the maximum proven lower bound
- * among MAX ancestors: those ancestors can choose another MIN child instead of this branch.
- * Symmetrically, `beta` is the minimum proven upper bound among MIN ancestors, which can choose
- * another MAX child. All scores use the root side's perspective.
- *
- * Only strict ancestors contribute. The node's own `value` is its proven score interval, not an
- * inherited search threshold, and is neither read nor modified here. If no ancestor of the
- * corresponding type exists, the bound remains `-INFINITY_SCORE` or `INFINITY_SCORE`, with a source
- * ID of `0`. Equal ancestor bounds retain the nearest ancestor as their source.
- *
- * Always updates `alpha_source` and `beta_source`, even if only the source IDs change. If either
- * bound changes numerically, also updates `alpha` and `beta`, increments
- * `search->stats.bound_updates`, and emits a `refresh` event containing the new window and sources.
- * This function does not itself prune or finish the node.
- *
- * The caller must hold `search->mutex` throughout this call so ancestor bounds are read
- * consistently and the node's window, statistics, and event are updated under the same lock.
- *
- * @param search Shared search state containing the mutex, statistics, and trace configuration; must
- *               not be null.
- * @param node   Node whose window and source IDs are refreshed; must not be null.
- * @param worker ID recorded for a possible `refresh` event, which need not own the node.
- */
-static void refresh_window(Search *search, Node *node, unsigned worker)
-{
-    Node *ancestor;
-    int alpha = -INFINITY_SCORE, beta = INFINITY_SCORE;
-    uint64_t alpha_source = 0, beta_source = 0;
-    for (ancestor = node->parent; ancestor != NULL; ancestor = ancestor->parent)
-    {
-        if (ancestor->maximizing && ancestor->value.lower > alpha)
-        {
-            alpha = ancestor->value.lower;
-            alpha_source = ancestor->id;
-        }
-        if (!ancestor->maximizing && ancestor->value.upper < beta)
-        {
-            beta = ancestor->value.upper;
-            beta_source = ancestor->id;
-        }
-    }
-    node->alpha_source = alpha_source;
-    node->beta_source = beta_source;
-    if (alpha != node->alpha || beta != node->beta)
-    {
-        node->alpha = alpha;
-        node->beta = beta;
-        ++search->stats.bound_updates;
-        emit(search, node, worker, "refresh", NULL);
-    }
-}
-
-/**
- * @brief Checks completion using only the node's proven interval and stored search window.
- *
- * Returns immediately if `node->finished` is already `true`, without emitting another event or
- * notification. Otherwise, equal `value.lower` and `value.upper` establish an exact score. If
- * `value.upper <= alpha`, a MAX ancestor already has an alternative at least as good as this branch
- * can achieve. If `value.lower >= beta`, a MIN ancestor already has an alternative no worse for
- * that side. Either inequality permits pruning with a possibly non-exact score interval.
- *
- * On completion, sets `finished`, emits `exact` if the bounds are equal or `cutoff` otherwise, and
- * broadcasts `search->changed`. Leaves the score interval, cancellation marker, and stored
- * alpha-beta window unchanged; ancestor thresholds are never substituted for proven score bounds.
- * If no completion condition holds, leaves the node unchanged and returns `false`.
- *
- * For an unfinished node, the caller must have checked that no ancestor has finished and refreshed
- * the window under `search->mutex`, without releasing the mutex since. Only the node's own interval
- * may have changed in between. This allows `check_node()` to delegate its final check here. This
- * function does not detect ancestor cancellation, refresh the window, or wait for helpers to
- * release the node.
- *
- * The caller must hold `search->mutex` throughout this call, including the synchronous trace
- * callback and condition-variable notification. Completion does not imply helpers have stopped; the
- * owner must still wait for them before returning and releasing the node's storage.
- *
- * @param search Shared search state containing synchronization and trace configuration; must not be
- *               null.
- * @param node   Node whose interval is checked against its stored window; must not be null.
- * @param worker ID recorded for a completion event, which need not own the node.
- * @return       `true` if the node is finished, including a previously cancelled node; `false` if
- *               search should continue. Inspect `node->value.cancelled` before using its score.
- */
-static bool check_interval(Search *search, Node *node, unsigned worker)
-{
-    if (node->finished)
-        return true;
-    /* Tightening the window does not by itself make the node's proven interval exact. */
-    if (node->value.lower == node->value.upper || node->value.upper <= node->alpha ||
-        node->value.lower >= node->beta)
-    {
-        node->finished = true;
-        emit(search, node, worker, node->value.lower == node->value.upper ? "exact" : "cutoff",
-             NULL);
-        pthread_cond_broadcast(&search->changed);
-    }
-    return node->finished;
-}
-
-/**
- * @brief Checks whether a node can stop after observing the latest ancestor state and bounds.
- *
- * Returns immediately if `node->finished` is already `true`. Otherwise, refreshes the inherited
- * window using `refresh_window()` and checks all strict ancestors. If any ancestor has finished,
- * this branch is no longer needed: sets `finished` and `value.cancelled`, increments
- * `search->stats.cancelled_tasks`, and emits a `cancel` event. A cancelled result must not
- * participate in its parent's score aggregation.
- *
- * If no ancestor has finished, tests the node's own proven interval. Equal `value.lower` and
- * `value.upper` establish an exact score. If `value.upper <= alpha`, a MAX ancestor already has an
- * alternative at least as good as this branch can achieve. Symmetrically, if `value.lower >= beta`,
- * a MIN ancestor already has an alternative no worse for that side. Either inequality permits
- * pruning while retaining the node's valid, possibly non-exact interval. The inherited thresholds
- * are never substituted for the node's own bounds.
- *
- * Marks a newly completed node as `finished`, emits `exact` or `cutoff` as appropriate, and
- * broadcasts `search->changed` on each new completion or cancellation. Waiting threads must recheck
- * their conditions; running descendants observe completion at later checkpoints. This function does
- * not wait for helper tasks or release the node's storage.
- *
- * The caller must hold `search->mutex` throughout this call, including event callbacks and
- * condition-variable notifications.
- *
- * @param search Shared search state containing synchronization, statistics, and trace
- *               configuration; must not be null.
- * @param node   Node to check and possibly mark as finished or cancelled; must not be null.
- * @param worker ID recorded for events produced by this check, which need not own the node.
- * @return       `true` if the node is finished, including cancellation; `false` if search should
- *               continue. Inspect `node->value.cancelled` to distinguish cancellation from a valid
- *               score interval.
- */
-static bool check_node(Search *search, Node *node, unsigned worker)
-{
-    Node *ancestor;
-    if (node->finished)
-        return true;
-    refresh_window(search, node, worker);
-    for (ancestor = node->parent; ancestor != NULL; ancestor = ancestor->parent)
-        if (ancestor->finished)
-        {
-            node->finished = true;
-            node->value.cancelled = true;
-            ++search->stats.cancelled_tasks;
-            emit(search, node, worker, "cancel", NULL);
-            pthread_cond_broadcast(&search->changed);
-            return true;
-        }
-
-    return check_interval(search, node, worker);
-}
-
-/**
- * @brief Incorporates one newly submitted child interval in constant time.
+ * @brief Publishes one child result and aggregates its interval without acquiring a lock.
  *
  * A MAX node's score is the maximum child score, so its lower and upper bounds are respectively the
  * maximum child lower bound and the maximum child upper bound. Symmetrically, a MIN node takes the
  * minimum of each bound. All scores use the root side's perspective.
  *
- * Updates a MAX node's lower bound or a MIN node's upper bound directly from the new child. The
- * opposite bound is accumulated in `submitted_bound`, initialized to `-WIN` for MAX and `WIN` for
- * MIN. Until every child has submitted a valid result, unknown children keep the node's MAX upper
- * bound at `WIN` or MIN lower bound at `-WIN`. The last submission replaces that unknown bound with
- * `submitted_bound`.
+ * Writes the exclusively owned child slot, then publishes its index with a release CAS if it
+ * improves the best bound. Acquiring best_index before inspecting another slot makes its contents
+ * visible. Slots are never rewritten; ties retain the first successfully published best index.
  *
- * Each child must be submitted exactly once, and cancelled results must be excluded. The owner's
- * and helper's disjoint ranges ensure this. Updates the interval and submission counters, leaving
- * child storage, `best_index`, and the inherited alpha-beta window unchanged. Does not check for
- * completion, emit events, or notify waiting threads.
+ * CAS updates the MAX lower bound or MIN upper bound, and the opposite bound accumulated in
+ * submitted_bound (initially -WIN for MAX, WIN for MIN). Only after these updates does an acq_rel
+ * fetch-add publish this submission. The last submitter acquires all preceding submissions through
+ * the counter's RMW chain, then publishes the final MAX upper bound or MIN lower bound. Reading
+ * submitted_bound before that acquire would risk publishing an incomplete aggregate.
  *
- * The caller must hold the search mutex while updating the node.
+ * Each child must be submitted exactly once; cancelled results must be excluded. The owner's and
+ * helper's disjoint batches ensure exclusive slot ownership. A completed node may still accept
+ * in-flight valid submissions. This function does not check completion or change alpha/beta.
  *
  * @param node  Node with a non-empty move list and initialized aggregation state; must not be null.
+ *              Keep it alive until all concurrent submissions have returned.
+ * @param index Child slot exclusively owned by this caller, in [0, node->moves.count).
  * @param child Newly submitted valid child interval, not previously included in the aggregation.
  */
-static void aggregate(Node *node, Interval child)
+static void aggregate(Node *node, int index, Interval child)
 {
-    assert(!child.cancelled && node->submitted_count < node->moves.count);
-    ++node->submitted_count;
+    int best, submitted;
+    assert(!child.cancelled && index >= 0 && index < node->moves.count);
+    node->children[index] = child;
+    best = atomic_load_explicit(&node->best_index, memory_order_acquire);
+    while (best < 0 || (node->maximizing && child.lower > node->children[best].lower) ||
+           (!node->maximizing && child.upper < node->children[best].upper))
+    {
+        /* A failed CAS acquires the newly observed best slot before the next comparison. */
+        if (atomic_compare_exchange_weak_explicit(&node->best_index, &best, index,
+                                                  memory_order_acq_rel, memory_order_acquire))
+            break;
+    }
+
     if (node->maximizing)
     {
-        if (child.lower > node->value.lower)
-            node->value.lower = child.lower;
-        if (child.upper > node->submitted_bound)
-            node->submitted_bound = child.upper;
-        if (node->submitted_count == node->moves.count)
-            node->value.upper = node->submitted_bound;
+        (void)tighten_bound(&node->value.lower, child.lower, true);
+        (void)tighten_bound(&node->submitted_bound, child.upper, true);
     }
     else
     {
-        if (child.upper < node->value.upper)
-            node->value.upper = child.upper;
-        if (child.lower < node->submitted_bound)
-            node->submitted_bound = child.lower;
-        if (node->submitted_count == node->moves.count)
-            node->value.lower = node->submitted_bound;
+        (void)tighten_bound(&node->value.upper, child.upper, false);
+        (void)tighten_bound(&node->submitted_bound, child.lower, false);
+    }
+    submitted = atomic_fetch_add_explicit(&node->submitted_count, 1, memory_order_acq_rel) + 1;
+    assert(submitted <= node->moves.count);
+    if (submitted == node->moves.count)
+    {
+        int bound = atomic_load_explicit(&node->submitted_bound, memory_order_relaxed);
+        if (node->maximizing)
+            (void)tighten_bound(&node->value.upper, bound, false);
+        else
+            (void)tighten_bound(&node->value.lower, bound, true);
     }
 }
 
-static Interval search_node(Search *, const XqPosition *, Node *, XqMove, unsigned, unsigned,
-                            XqMove *);
+static Interval search_node(Search *, const XqPosition *, Node *, unsigned, XqMove *);
 
 /**
- * @brief Searches a contiguous batch of child moves and submits useful results to their parent.
+ * @brief Searches a disjoint batch of child moves, checking completion outside the search mutex.
  *
- * Processes move indices in `[begin, end)` in generation order. The node's owner and its helper
- * receive disjoint batches. Before each move, checks the node under `search->mutex` and stops the
- * batch if the node has finished or been cancelled. Copies `node->position` into a fresh local
- * board, makes the move, and calls `search_node()` with one less remaining depth. Board operations
- * and recursive search run without holding the search mutex.
+ * Copies the position for each move and recursively searches it. Valid child intervals are
+ * submitted once through lock-free aggregate(); cancelled results are excluded. A completed node
+ * can still accept valid in-flight submissions. check_node() then refreshes its window and
+ * atomically publishes any completion or cancellation.
  *
- * After each child returns, reacquires the mutex and stores its interval unless `child.cancelled`
- * is true. Already-computed valid results are accepted even if this node or an ancestor has
- * finished in the meantime; cancelled results are never used as scores.
- *
- * Updates `best_index` using child lower bounds for MAX and child upper bounds for MIN. Equal
- * bounds retain the move whose result was accepted first, regardless of when its search started.
- * Calls `aggregate()` to incrementally update the parent's interval, emits a `submit` event for the
- * child move, then calls `check_node()` once to refresh the window, observe ancestor completion,
- * and check the updated interval. This check also runs when the child was cancelled. Broadcasts
- * `search->changed` before releasing the mutex.
- *
- * The caller must not hold `search->mutex` on entry. The node, its parent chain, position, and move
- * list must remain valid throughout this call; the position and move list must remain unchanged.
- * This function does not release the node or mark a helper as idle; the caller manages those
- * lifetimes and scheduling states.
- *
- * @param search Shared search state; must not be null.
- * @param node   Parent node with initialized child intervals and positive remaining depth; must not
- *               be null.
- * @param begin  Inclusive start index, satisfying `0 <= begin <= end`.
- * @param end    Exclusive end index, satisfying `end <= node->moves.count`.
- * @param worker ID of the worker executing this batch, which need not own the node.
+ * @param search Shared search state; must not be null. Caller must not hold its mutex.
+ * @param node   Parent with generated moves and positive depth; keep it and its parent chain alive.
+ * @param begin  Inclusive start index of this thread's batch.
+ * @param end    Exclusive end index, with 0 <= begin <= end <= node->moves.count.
  */
-static void search_range(Search *search, Node *node, int begin, int end, unsigned worker)
+static void search_range(Search *search, Node *node, int begin, int end)
 {
     int i;
     for (i = begin; i < end; ++i)
     {
         XqPosition child_position;
         Interval child;
-        pthread_mutex_lock(&search->mutex);
-        if (check_node(search, node, worker))
-        {
-            pthread_mutex_unlock(&search->mutex);
+        if (check_node(node))
             break;
-        }
-        pthread_mutex_unlock(&search->mutex);
 
         child_position = node->position;
         xq_position_make_move(&child_position, node->moves.moves[i]);
-        child = search_node(search, &child_position, node, node->moves.moves[i], node->depth - 1,
-                            worker, NULL);
+        child = search_node(search, &child_position, node, node->depth - 1, NULL);
 
-        pthread_mutex_lock(&search->mutex);
         if (!child.cancelled)
-        {
-            node->children[i] = child;
-            /* On ties, retain the move whose result was accepted first, rather than the one whose
-             * search started first. */
-            if (node->best_index < 0 ||
-                (node->maximizing && child.lower > node->children[node->best_index].lower) ||
-                (!node->maximizing && child.upper < node->children[node->best_index].upper))
-                node->best_index = i;
-            aggregate(node, child);
-            emit(search, node, worker, "submit", &node->moves.moves[i]);
-        }
-        (void)check_node(search, node, worker);
-        pthread_cond_broadcast(&search->changed);
-        pthread_mutex_unlock(&search->mutex);
+            aggregate(node, i, child);
+        (void)check_node(node);
     }
 }
 
@@ -537,7 +381,7 @@ static void *worker_main(void *argument)
             break;
         node = worker->node;
         pthread_mutex_unlock(&search->mutex);
-        search_range(search, node, worker->begin, worker->end, worker->id);
+        search_range(search, node, worker->begin, worker->end);
         pthread_mutex_lock(&search->mutex);
         node->helper_active = false;
         worker->node = NULL;
@@ -561,9 +405,8 @@ static void *worker_main(void *argument)
  * disjoint. Dispatch does not wait for a first child result.
  *
  * Sets `worker->busy` before notification so another dispatcher cannot reserve the same worker,
- * stores the borrowed node and batch range, and sets `node->helper_active`. Increments
- * `search->stats.splits`, emits a `dispatch` event with the receiving worker's ID and the first
- * move in its batch, and broadcasts `search->changed` to wake waiting workers.
+ * stores the borrowed node and batch range, sets `node->helper_active`, and broadcasts
+ * `search->changed` to wake waiting workers.
  *
  * Only already-created, idle workers receive tasks; there is no pending-task queue. If reservation
  * fails, the current thread keeps searching instead of waiting for a worker. Thus nested splits
@@ -598,8 +441,6 @@ static int split_node(Search *search, Node *node)
             worker->begin = count - assigned;
             worker->end = count;
             node->helper_active = true;
-            ++search->stats.splits;
-            emit(search, node, worker->id, "dispatch", &node->moves.moves[worker->begin]);
             pthread_cond_broadcast(&search->changed);
             return worker->begin;
         }
@@ -612,8 +453,8 @@ static int split_node(Search *search, Node *node)
  * Creates a local `Node` with a copy of `position`, an initially unknown interval `[-WIN, WIN]`,
  * and a link to `parent`. A node is MAX when its side to move equals `search->root_color` and MIN
  * otherwise; all scores retain the root side's perspective without negation or window flipping.
- * Registers the node and emits `enter`, then uses `check_node()` to observe ancestor completion and
- * refresh inherited bounds at search checkpoints.
+ * Uses lock-free `check_node()` to refresh inherited bounds and publish completion or cancellation
+ * at search checkpoints. Terminal checks and leaf evaluation require no search mutex.
  *
  * The root generates legal moves so even a forced loss returns a legal choice. Descendants search
  * pseudo-legal moves: if the previous mover's king is attacked, that move loses immediately,
@@ -631,68 +472,55 @@ static int split_node(Search *search, Node *node)
  * For a continuing internal node, initializes all child intervals as unknown and calls
  * `split_node()` once to assign a tail batch if a helper is available. Searches the retained front
  * batch using `search_range()`, which submits child results and checks updated bounds. After its
- * own batch ends, continues checking the node while waiting for any helper to exit. Even a finished
- * or cancelled node must wait until `helper_active` is `false` before returning, because the helper
+ * own batch ends, waits for any helper to exit, then checks the node again. Even a finished or
+ * cancelled node must wait until `helper_active` is `false` before returning, because the helper
  * borrows this stack-allocated node and may still access it.
  *
  * A valid cutoff result retains the node's proven interval rather than substituting an ancestor
- * threshold. If an ancestor has finished, returns an interval marked `cancelled`, which callers
- * must exclude from score aggregation. The root has no ancestor thresholds and returns an exact
- * score. For a searched root with a selected child, writes `best_move` if requested; the child's
- * proven lower bound witnesses the root score. Early returns leave that output unchanged.
+ * threshold. If ancestor completion causes cancellation before a normal completion is published,
+ * returns an interval marked `cancelled`, which callers must exclude from score aggregation. The
+ * root has no ancestor thresholds and returns an exact score. For a searched root with a selected
+ * child, writes `best_move` if requested; the child's proven lower bound witnesses the root score.
+ * Early returns leave that output unchanged.
  *
- * The caller must not hold `search->mutex` on entry. Shared state, events, and scheduling are
- * protected by that mutex; move generation, evaluation, and recursive computation run without it.
- * Running operations are not interrupted asynchronously, so ancestor changes are observed at later
+ * The caller must not hold `search->mutex` on entry. Scheduling and waiting for helpers use that
+ * mutex; child aggregation, node checks, move generation and evaluation run without it. Running
+ * operations are not interrupted asynchronously, so ancestor changes are observed at later
  * checkpoints. The input position is read-only, and its parent chain must remain valid throughout
  * the call. Custom evaluation callbacks must support concurrent invocation.
  *
  * @param search    Initialized shared search state; must not be null.
  * @param position  Position to search; must not be null and must remain unchanged during the call.
  * @param parent    Parent node, or `NULL` for the root.
- * @param incoming  Move from the parent to this position; ignored as an incoming move at the root.
  * @param depth     Remaining search depth; `0` evaluates a non-terminal leaf.
- * @param worker    ID of the worker executing this call.
  * @param best_move Optional root move output; pass `NULL` for recursive child searches.
  * @return          Proven interval, exact or bounded, if `cancelled` is `false`; otherwise a
  *                  cancellation marker whose score bounds must not be used.
  */
 static Interval search_node(Search *search, const XqPosition *position, Node *parent,
-                            XqMove incoming, unsigned depth, unsigned worker, XqMove *best_move)
+                            unsigned depth, XqMove *best_move)
 {
     Node node = {0};
     int score = 0, end, i;
     bool leaf = false;
-#ifdef XQ_PARALLEL_TESTING
-    XqParallelEvent checkpoint;
-#endif
     node.parent = parent;
     node.position = *position;
-    node.incoming = incoming;
     node.depth = depth;
     node.maximizing = position->side_to_move == search->root_color;
-    node.submitted_bound = node.maximizing ? -WIN : WIN;
-    node.value.lower = -WIN;
-    node.value.upper = WIN;
-    node.best_index = -1;
-    node.alpha = -INFINITY_SCORE;
-    node.beta = INFINITY_SCORE;
+    atomic_init(&node.submitted_count, 0);
+    atomic_init(&node.submitted_bound, node.maximizing ? -WIN : WIN);
+    atomic_init(&node.value.lower, -WIN);
+    atomic_init(&node.value.upper, WIN);
+    atomic_init(&node.state, NODE_RUNNING);
+    atomic_init(&node.best_index, -1);
+    atomic_init(&node.alpha, -INFINITY_SCORE);
+    atomic_init(&node.beta, INFINITY_SCORE);
 
-    pthread_mutex_lock(&search->mutex);
-    node.id = ++search->next_node;
-    ++search->stats.nodes;
-    emit(search, &node, worker, "enter", NULL);
-    if (check_node(search, &node, worker))
-    {
-        pthread_mutex_unlock(&search->mutex);
-        return node.value;
-    }
+    if (check_node(&node))
+        return node_value(&node);
 #ifdef XQ_PARALLEL_TESTING
-    checkpoint = event_snapshot(&node, worker, "checkpoint");
-#endif
-    pthread_mutex_unlock(&search->mutex);
-#ifdef XQ_PARALLEL_TESTING
-    xq_parallel_test_checkpoint(&checkpoint, position);
+    if (parent != NULL)
+        xq_parallel_test_checkpoint(position, depth);
 #endif
 
     /* Check terminal positions before the depth limit: even at depth zero, checkmate must not be
@@ -750,41 +578,45 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
         }
     }
 
-    pthread_mutex_lock(&search->mutex);
-    if (!check_node(search, &node, worker) && leaf)
+    if (check_node(&node))
+        return node_value(&node);
+    if (leaf)
     {
-        node.value.lower = node.value.upper = score;
-        (void)check_node(search, &node, worker);
-    }
-    if (node.finished)
-    {
-        pthread_mutex_unlock(&search->mutex);
-        return node.value;
+        /* The node has not been shared; no helper can access it yet. */
+        atomic_store_explicit(&node.value.lower, score, memory_order_relaxed);
+        atomic_store_explicit(&node.value.upper, score, memory_order_relaxed);
+        (void)check_node(&node);
+        return node_value(&node);
     }
     for (i = 0; i < node.moves.count; ++i)
         node.children[i] = (Interval){-WIN, WIN, false};
+    pthread_mutex_lock(&search->mutex);
     end = split_node(search, &node);
     pthread_mutex_unlock(&search->mutex);
 
-    search_range(search, &node, 0, end, worker);
+    search_range(search, &node, 0, end);
 
     pthread_mutex_lock(&search->mutex);
+    /* Only helper exit satisfies this wait. Completion is not a wait predicate, so publishing
+     * it without the mutex cannot lose a wakeup. Helpers observe cancellation themselves. */
     while (node.helper_active)
-    {
-        (void)check_node(search, &node, worker);
         pthread_cond_wait(&search->changed, &search->mutex);
-    }
-    (void)check_node(search, &node, worker);
-    /* Once all children have returned valid intervals, the node either has an exact score or
-     * satisfies an ancestor's cutoff threshold. */
-    assert(node.finished);
-    if (best_move != NULL && node.best_index >= 0)
-    {
-        assert(node.children[node.best_index].lower == node.value.lower);
-        *best_move = node.moves.moves[node.best_index];
-    }
     pthread_mutex_unlock(&search->mutex);
-    return node.value;
+
+    /* This node is now quiescent; all helper accesses and result submissions precede the unlock. */
+    (void)check_node(&node);
+    assert(atomic_load_explicit(&node.state, memory_order_acquire) != NODE_RUNNING);
+    if (best_move != NULL)
+    {
+        int best = atomic_load_explicit(&node.best_index, memory_order_acquire);
+        if (best >= 0)
+        {
+            assert(node.children[best].lower ==
+                   atomic_load_explicit(&node.value.lower, memory_order_relaxed));
+            *best_move = node.moves.moves[best];
+        }
+    }
+    return node_value(&node);
 }
 
 /**
@@ -830,10 +662,10 @@ static void stop_pool(Search *search)
  *
  * Copies the supplied options, or uses `xq_parallel_options_default()` when `options` is null.
  * Depth and total thread count must be at least one, and the split percentage must be in 0..100.
- * The calling thread searches the root as worker 0; on POSIX platforms, creates `thread_count - 1`
- * helpers before starting the search. A split percentage of zero disables task splitting, not
- * helper creation. The search is synchronous, has no deadline or quiescence search, and does not
- * use the engine adapter's cache or history.
+ * The calling thread searches the root; on POSIX platforms, creates `thread_count - 1` helpers
+ * before starting the search. A split percentage of zero disables task splitting, not helper
+ * creation. The search is synchronous, has no deadline or quiescence search, and does not use the
+ * engine adapter's cache or history.
  *
  * All scores use the root side-to-move's perspective. A null evaluator selects
  * `xq_engine_default_static_evaluate`; ordinary leaf scores are clamped to [-STATIC_LIMIT,
@@ -844,16 +676,13 @@ static void stop_pool(Search *search)
  * before using `best_move`. Equal-score move selection may depend on thread scheduling.
  *
  * Evaluators run outside the search mutex and may be called concurrently; the callback and its user
- * data must support this and must not modify positions. Optional trace callbacks run serially under
- * the search mutex, possibly on different threads, and must not wait for search work or reenter
- * this search. A trace callback retaining an event must copy it.
+ * data must support this and must not modify positions.
  *
  * Zeroes a non-null `result` before validating arguments, leaving it zeroed on failure. On success,
- * fills the move, score, configured thread count, and search statistics. Elapsed milliseconds
- * include pool creation and teardown, and are valid only when `elapsed_available` is true; an
- * unavailable clock does not fail the search. Joins all created helpers and releases initialized
- * resources before returning, including after partial thread-creation failure. The input position
- * is never modified, and no helper remains running after the call.
+ * fills the move and score. No trace, timing or search counters are collected. Joins all created
+ * helpers and releases initialized resources before returning, including after partial
+ * thread-creation failure. The input position is never modified, and no helper remains running
+ * after the call.
  *
  * @param pos                           Root position; must not be null and must remain valid and
  *                                      unchanged during the call. Its side to move must be XQ_RED
@@ -892,9 +721,8 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
     {
         Search search = {0};
         Interval value;
-        XqMove best = {0}, incoming = {0};
+        XqMove best = {0};
         unsigned i;
-        int64_t start = wall_ms(), end;
         search.options = effective;
         search.root_color = pos->side_to_move;
         search.evaluate = evaluate != NULL ? evaluate : xq_engine_default_static_evaluate;
@@ -920,7 +748,6 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
             Worker *worker = &search.workers[i];
             int error;
             worker->search = &search;
-            worker->id = i + 1;
 #ifdef XQ_PARALLEL_TESTING
             error = xq_parallel_test_create(&worker->thread, worker_main, worker);
 #else
@@ -933,20 +760,12 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
             }
             ++search.worker_count;
         }
-        value = search_node(&search, pos, NULL, incoming, effective.depth, 0, &best);
+        value = search_node(&search, pos, NULL, effective.depth, &best);
         assert(!value.cancelled && value.lower == value.upper);
-        /* All helper tasks have finished; only the calling thread will access the statistics from
-         * now on. */
-        *result = search.stats;
         result->score = value.lower;
         result->best_move = best;
         result->move_available = best.from != best.to;
-        result->thread_count = effective.thread_count;
         stop_pool(&search);
-        end = wall_ms();
-        result->elapsed_available = start >= 0 && end >= start;
-        if (result->elapsed_available)
-            result->elapsed_ms = (uint64_t)(end - start);
         return XQ_PARALLEL_OK;
     }
 #endif

@@ -45,7 +45,6 @@ static void print_usage(const char *program)
     printf("  --search builtin|parallel  search implementation (default builtin)\n");
     printf("  --threads N                parallel threads including caller (default 2)\n");
     printf("  --split-percent P          parallel batch percentage, 0..100 (default 50)\n");
-    printf("  --parallel-trace PATH      append parallel boundary events\n");
     printf("  parallel: fixed depth (default 3), no time limit or transposition table\n");
     printf("  %-21s  %s\n", "-f, --fen FEN", "initialize the position from FEN");
     printf("  %-21s  %s\n", "-e, --engine COLOR", "choose the engine side: red or black");
@@ -444,38 +443,6 @@ static bool undo_last_turn(XqPosition *pos, const XqPosition *initial,
     return true;
 }
 
-/* Event callbacks are serialized by the parallel search mutex. */
-typedef struct ParallelLog
-{
-    FILE *file;
-    uint64_t search_id;
-} ParallelLog;
-
-static void write_parallel_event(const XqParallelEvent *event, void *user)
-{
-    ParallelLog *log = user;
-    char move[8];
-    if (log->file == NULL)
-        return;
-    fprintf(log->file,
-            "search=%" PRIu64 " event=%" PRIu64 " kind=%s node=%" PRIu64
-            " parent=%" PRIu64 " worker=%u depth=%u type=%s move=%s"
-            " lower=%d upper=%d alpha=%d beta=%d alpha_source=%" PRIu64
-            " beta_source=%" PRIu64 "\n",
-            log->search_id, event->sequence, event->kind, event->node_id,
-            event->parent_id, event->worker_id, event->depth,
-            event->maximizing ? "MAX" : "MIN",
-            event->move_available ? xq_move_to_string(event->move, move, sizeof(move)) : "none",
-            event->lower, event->upper, event->alpha, event->beta,
-            event->alpha_source, event->beta_source);
-    if (ferror(log->file))
-    {
-        fprintf(stderr, "warning: parallel trace write failed; tracing disabled\n");
-        fclose(log->file);
-        log->file = NULL;
-    }
-}
-
 static void write_parallel_detail(FILE **log, const XqPosition *pos,
                                   const XqParallelOptions *options,
                                   XqParallelStatus status, const XqParallelResult *result)
@@ -485,17 +452,10 @@ static void write_parallel_detail(FILE **log, const XqPosition *pos,
         strcpy(fen, "unavailable");
     fprintf(*log, "\n--- parallel engine search ---\nsearch_mode: parallel\n"
             "fen_before: %s\nstatus: %s\nselected_move: %s\nscore: %d\n"
-            "depth: %u\nthreads: %u\nsplit_percent: %u\nnodes: %" PRIu64
-            "\nsplits: %" PRIu64 "\nbound_updates: %" PRIu64
-            "\ncancelled_tasks: %" PRIu64 "\n",
+            "depth: %u\nthreads: %u\nsplit_percent: %u\n",
             fen, xq_parallel_status_text(status),
             result->move_available ? xq_move_to_string(result->best_move, move, sizeof(move)) : "none",
-            result->score, options->depth, options->thread_count, options->split_percent,
-            result->nodes, result->splits, result->bound_updates, result->cancelled_tasks);
-    if (result->elapsed_available)
-        fprintf(*log, "elapsed_ms: %" PRIu64 "\n", result->elapsed_ms);
-    else
-        fprintf(*log, "elapsed_ms: unavailable\n");
+            result->score, options->depth, options->thread_count, options->split_percent);
     flush_search_detail(log);
 }
 
@@ -512,8 +472,6 @@ int main(int argc, char **argv)
     bool parallel = false, explicit_depth = false, explicit_time = false;
     bool parallel_options_set = false;
     XqParallelOptions parallel_options = xq_parallel_options_default();
-    ParallelLog parallel_log = {0};
-    const char *parallel_trace_path = NULL;
     bool search_detail = false;
     bool board_flipped = false;
     FILE *search_log = NULL;
@@ -559,17 +517,6 @@ int main(int argc, char **argv)
             }
             if (percentage) parallel_options.split_percent = value;
             else parallel_options.thread_count = value;
-            parallel_options_set = true;
-            continue;
-        }
-        if (strcmp(argv[i], "--parallel-trace") == 0)
-        {
-            if (++i >= argc || argv[i][0] == '\0')
-            {
-                fprintf(stderr, "error: --parallel-trace requires a path\n");
-                return EXIT_FAILURE;
-            }
-            parallel_trace_path = argv[i];
             parallel_options_set = true;
             continue;
         }
@@ -712,18 +659,6 @@ int main(int argc, char **argv)
 
     if (search_detail)
         search_log = open_search_detail(&pos, engine_color);
-    if (parallel_trace_path != NULL)
-    {
-        parallel_log.file = fopen(parallel_trace_path, "a");
-        if (parallel_log.file == NULL)
-            fprintf(stderr, "warning: cannot open parallel trace: %s; tracing disabled\n", strerror(errno));
-        else
-        {
-            fprintf(parallel_log.file, "\n=== parallel trace session ===\n");
-            parallel_options.trace = write_parallel_event;
-            parallel_options.trace_user = &parallel_log;
-        }
-    }
     if (parallel)
         printf("Search mode: parallel, fixed depth %u, threads %u, split %u%%; no time limit or cache.\n",
                parallel_options.depth, parallel_options.thread_count, parallel_options.split_percent);
@@ -757,7 +692,6 @@ int main(int argc, char **argv)
             {
                 XqParallelResult result;
                 XqParallelStatus status;
-                ++parallel_log.search_id;
                 status = xq_engine_parallel_search(&pos, &parallel_options, NULL, NULL, &result);
                 found = status == XQ_PARALLEL_OK && result.move_available;
                 best = result.best_move;
@@ -768,12 +702,6 @@ int main(int argc, char **argv)
                 }
                 if (search_log != NULL)
                     write_parallel_detail(&search_log, &pos, &parallel_options, status, &result);
-                if (parallel_log.file != NULL && fflush(parallel_log.file) != 0)
-                {
-                    fprintf(stderr, "warning: parallel trace flush failed; tracing disabled\n");
-                    fclose(parallel_log.file);
-                    parallel_log.file = NULL;
-                }
             }
             else
             {
@@ -953,8 +881,6 @@ int main(int argc, char **argv)
 
     xq_transposition_table_destroy(table);
     xq_history_destroy(&history);
-    if (parallel_log.file != NULL && fclose(parallel_log.file) != 0)
-        fprintf(stderr, "warning: cannot close parallel trace\n");
     if (search_log != NULL && fclose(search_log) == EOF)
         fprintf(stderr, "warning: cannot close %s\n", search_detail_path);
     return exit_status;
