@@ -134,14 +134,15 @@ typedef struct Search
  *
  * Completion alone does not freeze the bounds: an in-flight helper may still submit a valid child
  * result. The owner must wait for helper_active to become false under the search mutex before
- * calling this function, unless the node has never been shared.
+ * calling this function, unless the node has never been shared. That mutex synchronization (or
+ * exclusive ownership) makes the result visible; these loads need only relaxed ordering.
  *
  * @param node Completed, quiescent node; must not be null and must remain alive during the call.
  * @return     Plain interval whose cancelled flag is derived from the single completion state.
  */
 static Interval node_value(const Node *node)
 {
-    int state = atomic_load_explicit(&node->state, memory_order_acquire);
+    int state = atomic_load_explicit(&node->state, memory_order_relaxed);
     Interval value = {atomic_load_explicit(&node->value.lower, memory_order_relaxed),
                       atomic_load_explicit(&node->value.upper, memory_order_relaxed),
                       state == NODE_CANCELLED};
@@ -181,6 +182,8 @@ static int tighten_bound(atomic_int *bound, int candidate, bool increase)
  * proposes NODE_FINISHED. One CAS changes NODE_RUNNING to the chosen terminal state; the first
  * completion wins, and later checks cannot change a valid result into a cancelled result or vice
  * versa. There is no separate finished/cancelled publication window and no locked confirmation.
+ * State is only a stop marker, not a publication mechanism for result data, so its loads and CAS
+ * use relaxed ordering. Results are copied only after helper-exit synchronization or before sharing.
  *
  * This function makes no callbacks and sends no condition-variable notifications. Waiters depend
  * only on worker assignment, pool shutdown or helper_active, whose changes and notifications remain
@@ -198,12 +201,12 @@ static bool check_node(Node *node)
     int alpha = -INFINITY_SCORE, beta = INFINITY_SCORE;
     int lower, upper, desired, expected = NODE_RUNNING;
     bool cancelled = false;
-    if (atomic_load_explicit(&node->state, memory_order_acquire) != NODE_RUNNING)
+    if (atomic_load_explicit(&node->state, memory_order_relaxed) != NODE_RUNNING)
         return true;
     for (ancestor = node->parent; ancestor != NULL; ancestor = ancestor->parent)
     {
         int bound;
-        if (atomic_load_explicit(&ancestor->state, memory_order_acquire) != NODE_RUNNING)
+        if (atomic_load_explicit(&ancestor->state, memory_order_relaxed) != NODE_RUNNING)
             cancelled = true;
         if (ancestor->maximizing)
         {
@@ -227,11 +230,11 @@ static bool check_node(Node *node)
     else if (lower == upper || upper <= alpha || lower >= beta)
         desired = NODE_FINISHED;
     else
-        return atomic_load_explicit(&node->state, memory_order_acquire) != NODE_RUNNING;
+        return atomic_load_explicit(&node->state, memory_order_relaxed) != NODE_RUNNING;
 
     /* Failure means another checker already published an immutable terminal state. */
     (void)atomic_compare_exchange_strong_explicit(&node->state, &expected, desired,
-                                                  memory_order_release, memory_order_relaxed);
+                                                  memory_order_relaxed, memory_order_relaxed);
     return true;
 }
 
@@ -594,10 +597,11 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
 
     /* This node is now quiescent; all helper accesses and result submissions precede the unlock. */
     (void)check_node(&node);
-    assert(atomic_load_explicit(&node.state, memory_order_acquire) != NODE_RUNNING);
+    assert(atomic_load_explicit(&node.state, memory_order_relaxed) != NODE_RUNNING);
     if (best_move != NULL)
     {
-        int best = atomic_load_explicit(&node.best_index, memory_order_acquire);
+        /* Helper-exit synchronization already makes the selected child slot visible. */
+        int best = atomic_load_explicit(&node.best_index, memory_order_relaxed);
         if (best >= 0)
         {
             assert(node.children[best].lower ==
