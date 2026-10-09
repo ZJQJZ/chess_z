@@ -88,9 +88,7 @@ if(Python3_Interpreter_FOUND)
 endif()
 
 if(NOT WIN32)
-    # Compile the search with private position-inspection/thread-creation failure hooks.
-    add_executable(xiangqi_parallel_tests tests/test_parallel.c src/parallel_search.c)
-    target_compile_definitions(xiangqi_parallel_tests PRIVATE XQ_PARALLEL_TESTING)
+    add_executable(xiangqi_parallel_tests tests/test_parallel.c)
     target_link_libraries(xiangqi_parallel_tests PRIVATE xiangqi)
     xq_enable_warnings(xiangqi_parallel_tests)
     if(MSVC)

@@ -235,13 +235,6 @@ static bool check_node(Node *node)
     return true;
 }
 
-#ifdef XQ_PARALLEL_TESTING
-/* Private inspection/failure hooks, absent from production builds. Checkpoints run outside locks.
- */
-extern void xq_parallel_test_checkpoint(const XqPosition *, unsigned);
-extern int xq_parallel_test_create(pthread_t *, void *(*)(void *), void *);
-#endif
-
 /**
  * @brief Publishes one child result and aggregates its interval without acquiring a lock.
  *
@@ -518,10 +511,6 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
 
     if (check_node(&node))
         return node_value(&node);
-#ifdef XQ_PARALLEL_TESTING
-    if (parent != NULL)
-        xq_parallel_test_checkpoint(position, depth);
-#endif
 
     /* Check terminal positions before the depth limit: even at depth zero, checkmate must not be
      * treated as an ordinary static evaluation. */
@@ -748,11 +737,7 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
             Worker *worker = &search.workers[i];
             int error;
             worker->search = &search;
-#ifdef XQ_PARALLEL_TESTING
-            error = xq_parallel_test_create(&worker->thread, worker_main, worker);
-#else
             error = pthread_create(&worker->thread, NULL, worker_main, worker);
-#endif
             if (error != 0)
             {
                 stop_pool(&search);

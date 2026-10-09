@@ -106,13 +106,13 @@ release/acquire CAS 发布对应结果，避免索引与评分不一致，同分
 独立验证（不依赖 CMake）：
 
 ```sh
-gcc -pthread -DXQ_PARALLEL_TESTING -std=c11 -O1 -g -Iinclude src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c tests/test_parallel.c -o build/xiangqi_parallel_tests
+gcc -pthread -std=c11 -O1 -g -Iinclude src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c tests/test_parallel.c -o build/xiangqi_parallel_tests
 ./build/xiangqi_parallel_tests
 python3 tests/test_parallel_cli.py build/xiangqi_cli
 ```
 
-测试用无剪枝 Minimax 检查不同线程数、分配比例下的分数和最优着法，并覆盖线程创建失败与伪合法分支。
-测试钩子仅在 `XQ_PARALLEL_TESTING` 构建中存在。用 Clang 在上述测试命令增加
+测试通过公开接口，用无剪枝 Minimax 检查不同线程数、分配比例下的分数和最优着法，并覆盖参数错误与伪合法分支。
+搜索实现不包含测试钩子。用 Clang 在上述测试命令增加
 `-fsanitize=thread` 可检查竞态；另行增加 `-fsanitize=address,undefined` 可检查内存和未定义行为。
 
 ## 原引擎的限时搜索与对局操作

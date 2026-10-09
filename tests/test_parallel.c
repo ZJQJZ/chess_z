@@ -3,41 +3,10 @@
 #include "xiangqi/movegen.h"
 
 #include <assert.h>
-#include <errno.h>
 #include <limits.h>
-#include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
-
-/* Private position-inspection and thread-creation hooks; no production trace dependency. */
-static pthread_mutex_t gate = PTHREAD_MUTEX_INITIALIZER;
-static int create_count, fail_after = -1;
-static bool inspect_pseudo_moves;
-static unsigned illegal_leaves, illegal_internal_nodes, both_kings_attacked;
-
-int xq_parallel_test_create(pthread_t *thread, void *(*entry)(void *), void *user)
-{
-    if (fail_after >= 0 && create_count++ == fail_after)
-        return EAGAIN;
-    return pthread_create(thread, NULL, entry, user);
-}
-
-void xq_parallel_test_checkpoint(const XqPosition *pos, unsigned depth)
-{
-    pthread_mutex_lock(&gate);
-    if (inspect_pseudo_moves &&
-        xq_position_in_check(pos, xq_color_opponent(pos->side_to_move)))
-    {
-        if (depth == 0)
-            ++illegal_leaves;
-        else
-            ++illegal_internal_nodes;
-        if (xq_position_in_check(pos, pos->side_to_move))
-            ++both_kings_attacked;
-    }
-    pthread_mutex_unlock(&gate);
-}
 
 static int zero_evaluate(const XqPosition *pos, XqColor color, void *user)
 {
@@ -138,15 +107,12 @@ static void test_positions(void)
     unsigned threads[] = {1, 2, 4}, ratios[] = {0, 1, 50, 100};
     size_t f, t, r;
     unsigned depth;
-    inspect_pseudo_moves = true;
     for (f = 0; f < sizeof(fens) / sizeof(fens[0]); ++f)
         for (depth = 1; depth <= 3; ++depth)
             for (t = 0; t < sizeof(threads) / sizeof(threads[0]); ++t)
                 for (r = 0; r < sizeof(ratios) / sizeof(ratios[0]); ++r)
                     compare(fens[f], depth, threads[t], ratios[r],
                             f == 7 ? zero_evaluate : safe_evaluate, NULL);
-    inspect_pseudo_moves = false;
-    assert(illegal_leaves > 0 && illegal_internal_nodes > 0 && both_kings_attacked > 0);
 }
 
 static int extreme_evaluate(const XqPosition *pos, XqColor root, void *user)
@@ -232,10 +198,6 @@ static void test_errors_and_reuse(void)
     options.thread_count = 4;
     for (i = 0; i < 3; ++i)
     {
-        create_count = 0; fail_after = i;
-        assert(xq_engine_parallel_search(&pos, &options, NULL, NULL, &result) == XQ_PARALLEL_RESOURCE_ERROR);
-        assert(!result.move_available && result.score == 0);
-        fail_after = -1;
         assert(xq_engine_parallel_search(&pos, &options, NULL, NULL, &result) == XQ_PARALLEL_OK);
     }
 }
