@@ -183,7 +183,8 @@ static int tighten_bound(atomic_int *bound, int candidate, bool increase)
  * completion wins, and later checks cannot change a valid result into a cancelled result or vice
  * versa. There is no separate finished/cancelled publication window and no locked confirmation.
  * State is only a stop marker, not a publication mechanism for result data, so its loads and CAS
- * use relaxed ordering. Results are copied only after helper-exit synchronization or before sharing.
+ * use relaxed ordering. Results are copied only after helper-exit synchronization or before
+ * sharing.
  *
  * This function makes no callbacks and sends no condition-variable notifications. Waiters depend
  * only on worker assignment, pool shutdown or helper_active, whose changes and notifications remain
