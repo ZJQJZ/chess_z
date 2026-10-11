@@ -52,6 +52,118 @@ const char *xq_parallel_status_text(XqParallelStatus status)
 #ifndef _WIN32
 #include <pthread.h>
 #include <stdatomic.h>
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#else
+#include <errno.h>
+#include <semaphore.h>
+#endif
+
+/* Notifications persist until consumed, including when posted before a wait. These wrappers avoid
+ * explicit scheduling mutexes; the platform semaphore implementation need not be lock-free. */
+typedef struct SearchSemaphore
+{
+#ifdef __APPLE__
+    dispatch_semaphore_t handle;
+#else
+    sem_t handle;
+#endif
+} SearchSemaphore;
+
+/**
+ * @brief Initializes a counting semaphore with no pending notifications.
+ *
+ * Uses a Dispatch semaphore on macOS and an unnamed, process-local POSIX semaphore elsewhere. The
+ * initial count is zero, so a wait blocks until a notification is posted. A notification posted
+ * before a wait remains available for that wait to consume, preventing lost wakeups.
+ *
+ * Initialize before sharing with other threads; do not reinitialize a live semaphore. On success,
+ * the caller must eventually call search_semaphore_destroy() after all users have finished. On
+ * failure, the semaphore must not be waited on, posted to, or destroyed.
+ *
+ * @param semaphore Non-null storage that remains at a stable address throughout its use.
+ * @return          True on successful initialization; false if the platform call fails.
+ */
+static bool search_semaphore_init(SearchSemaphore *semaphore)
+{
+#ifdef __APPLE__
+    semaphore->handle = dispatch_semaphore_create(0);
+    return semaphore->handle != NULL;
+#else
+    return sem_init(&semaphore->handle, 0, 0) == 0;
+#endif
+}
+
+/**
+ * @brief Consumes one notification, blocking the calling thread until one is available.
+ *
+ * Returns immediately if a previous post left a notification available; otherwise waits without a
+ * deadline. Uses DISPATCH_TIME_FOREVER on macOS and retries POSIX sem_wait() when interrupted by a
+ * signal (EINTR). An unexpected wait failure aborts the process because continuing without
+ * consuming a notification would invalidate the task or completion handshake.
+ *
+ * Returning does not identify the event: the caller must acquire the corresponding worker state or
+ * shutdown flag before deciding how to proceed. This function does not change those states.
+ *
+ * @param semaphore Non-null, successfully initialized semaphore; keep it alive throughout the wait.
+ */
+static void search_semaphore_wait(SearchSemaphore *semaphore)
+{
+#ifdef __APPLE__
+    if (dispatch_semaphore_wait(semaphore->handle, DISPATCH_TIME_FOREVER) != 0)
+        abort();
+#else
+    while (sem_wait(&semaphore->handle) != 0)
+        if (errno != EINTR)
+            abort();
+#endif
+}
+
+/**
+ * @brief Posts one notification, waking a waiter or retaining it for a later wait.
+ *
+ * Does not wait for the receiver to consume the notification or finish its work. The caller must
+ * publish the associated task, completion or shutdown state before posting. Unlike a condition
+ * variable notification, a post is not lost when the receiving thread has not started waiting.
+ *
+ * The Dispatch return value only indicates whether a waiter was woken and is ignored. A POSIX
+ * sem_post() failure aborts the process because the receiver could otherwise remain blocked.
+ *
+ * @param semaphore Non-null, successfully initialized semaphore; keep it alive throughout the post.
+ */
+static void search_semaphore_post(SearchSemaphore *semaphore)
+{
+#ifdef __APPLE__
+    /* The return value reports whether a waiter was woken, not an error. */
+    (void)dispatch_semaphore_signal(semaphore->handle);
+#else
+    if (sem_post(&semaphore->handle) != 0)
+        abort();
+#endif
+}
+
+/**
+ * @brief Releases the resources of a successfully initialized, unused semaphore.
+ *
+ * Releases the Dispatch object on macOS or destroys the unnamed POSIX semaphore elsewhere. A POSIX
+ * destruction failure aborts the process. The containing SearchSemaphore storage is not freed, and
+ * its handle must not be used again unless successfully reinitialized.
+ *
+ * The caller must ensure all users have finished and no further waits or posts can occur. This
+ * function does not wake waiters or join threads; pool teardown joins workers before calling it.
+ * Call exactly once per successful initialization, including cleanup after partial pool creation.
+ *
+ * @param semaphore Non-null, initialized semaphore with no active or future users.
+ */
+static void search_semaphore_destroy(SearchSemaphore *semaphore)
+{
+#ifdef __APPLE__
+    dispatch_release(semaphore->handle);
+#else
+    if (sem_destroy(&semaphore->handle) != 0)
+        abort();
+#endif
+}
 
 enum
 {
@@ -80,15 +192,16 @@ typedef enum NodeState
     NODE_CANCELLED
 } NodeState;
 
-/* Keep check_node and aggregate genuinely lock-free on supported targets rather than allowing a
- * library-backed atomic int to silently acquire an internal lock. */
+/* Keep node updates and worker-state transitions genuinely lock-free on supported targets rather
+ * than allowing a library-backed atomic int to silently acquire an internal lock. */
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "parallel search requires lock-free atomic int");
 
-/* The owner keeps this stack-allocated node and its parent chain alive until its helper exits.
+/* The owner keeps this stack-allocated node and its parent chain alive until its helper completes.
  * Position, moves, depth, parent and maximizing are immutable once shared. Bounds, window and state
  * use atomic access, as do submission counters and best_index. Each child slot has one writer and
- * is immutable after publication through best_index. Only helper_active uses the search mutex.
- * State combines finished/cancelled in one atomic transition so readers never see a partial stop.
+ * is immutable after publication through best_index. Helper completion is acquired through its
+ * worker state after consuming the completion notification, before the owner returns. State
+ * combines finished/cancelled in one atomic transition so readers never see a partial stop.
  */
 typedef struct Node
 {
@@ -104,25 +217,35 @@ typedef struct Node
     atomic_int best_index;
     atomic_int alpha, beta;
     atomic_int state;
-    bool helper_active;
 } Node;
+
+typedef enum WorkerState
+{
+    WORKER_IDLE,
+    WORKER_RESERVED,
+    WORKER_READY,
+    WORKER_DONE
+} WorkerState;
 
 typedef struct Worker
 {
     struct Search *search;
     pthread_t thread;
-    bool busy; /* Reserved under the mutex; includes assigned tasks that have not started yet. */
+    atomic_int state;
+    SearchSemaphore task_available;
+    SearchSemaphore task_done;
+    /* Written by the reserving owner, published through READY, cleared before DONE. The owner
+     * consumes task_done before publishing IDLE, so another task cannot steal its notification. */
     Node *node;
     int begin, end;
 } Worker;
 
 typedef struct Search
 {
-    pthread_mutex_t mutex;
-    pthread_cond_t changed;
     Worker *workers;
     unsigned worker_count;
-    bool shutdown;
+    unsigned initialized_worker_count; /* Workers with both semaphores initialized. */
+    atomic_int shutdown;
     XqParallelOptions options;
     XqColor root_color;
     XqEvaluateFn evaluate;
@@ -133,8 +256,8 @@ typedef struct Search
  * @brief Copies a completed node's result after all of its helper work has exited.
  *
  * Completion alone does not freeze the bounds: an in-flight helper may still submit a valid child
- * result. The owner must wait for helper_active to become false under the search mutex before
- * calling this function, unless the node has never been shared. That mutex synchronization (or
+ * result. Unless the node has never been shared, the owner must consume its helper's completion
+ * notification and acquire WORKER_DONE before calling this function. That synchronization (or
  * exclusive ownership) makes the result visible; these loads need only relaxed ordering.
  *
  * @param node Completed, quiescent node; must not be null and must remain alive during the call.
@@ -183,12 +306,12 @@ static int tighten_bound(atomic_int *bound, int candidate, bool increase)
  * completion wins, and later checks cannot change a valid result into a cancelled result or vice
  * versa. There is no separate finished/cancelled publication window and no locked confirmation.
  * State is only a stop marker, not a publication mechanism for result data, so its loads and CAS
- * use relaxed ordering. Results are copied only after helper-exit synchronization or before
+ * use relaxed ordering. Results are copied only after helper-completion synchronization or before
  * sharing.
  *
- * This function makes no callbacks and sends no condition-variable notifications. Waiters depend
- * only on worker assignment, pool shutdown or helper_active, whose changes and notifications remain
- * under the search mutex. Running descendants observe ancestor completion at their checkpoints.
+ * This function makes no callbacks and sends no semaphore notifications. Task, shutdown and helper
+ * completion notifications are handled by the scheduler. Running descendants observe ancestor
+ * completion at their checkpoints.
  *
  * @param node Node to check and update; must not be null. The node and its parent chain must remain
  *             alive throughout the call. Their non-atomic metadata must already be initialized.
@@ -305,14 +428,14 @@ static void aggregate(Node *node, int index, Interval child)
 static Interval search_node(Search *, const XqPosition *, Node *, unsigned, XqMove *);
 
 /**
- * @brief Searches a disjoint batch of child moves, checking completion outside the search mutex.
+ * @brief Searches a disjoint batch of child moves without an explicit scheduling mutex.
  *
  * Copies the position for each move and recursively searches it. Valid child intervals are
  * submitted once through lock-free aggregate(); cancelled results are excluded. A completed node
  * can still accept valid in-flight submissions. check_node() then refreshes its window and
  * atomically publishes any completion or cancellation.
  *
- * @param search Shared search state; must not be null. Caller must not hold its mutex.
+ * @param search Shared search state; must not be null.
  * @param node   Parent with generated moves and positive depth; keep it and its parent chain alive.
  * @param begin  Inclusive start index of this thread's batch.
  * @param end    Exclusive end index, with 0 <= begin <= end <= node->moves.count.
@@ -340,25 +463,16 @@ static void search_range(Search *search, Node *node, int begin, int end)
 /**
  * @brief Runs an auxiliary thread's task loop until the search pool shuts down.
  *
- * Interprets `argument` as the thread's `Worker` record and acquires `search->mutex`. While no task
- * is reserved (`worker->busy` is `false`) and `search->shutdown` is `false`, waits on
- * `search->changed`. `pthread_cond_wait()` atomically releases the mutex and begins waiting, then
- * reacquires it before returning. The loop rechecks the state after every wakeup because
- * notifications may concern other workers or be spurious. Shutdown takes priority over dispatch.
+ * Always consumes a task notification before inspecting shutdown or acquiring WORKER_READY. The
+ * notification is retained if the owner dispatches before this thread starts waiting. READY
+ * publishes all task fields; RESERVED alone does not permit reading them. Shutdown is published
+ * only when no tasks remain (or before any were dispatched) and has its own notification.
  *
- * For an assigned task, borrows `worker->node`, releases the mutex, and calls `search_range()` for
- * the batch `[worker->begin, worker->end)`. The worker remains busy throughout that call, so the
- * scheduler cannot overwrite its task fields. Search results are submitted by `search_range()`
- * rather than returned through this thread entry point.
- *
- * When the batch returns, including early termination due to pruning or cancellation, reacquires
- * the mutex, clears `node->helper_active`, clears `worker->node`, and sets `worker->busy` to
- * `false`. Broadcasts `search->changed` so waiting threads can observe task completion and the
- * worker's availability, then loops to wait for another task. The borrowed node is not freed; its
- * owner must keep it alive until the helper task has released it.
- *
- * On observing `search->shutdown`, releases the mutex and returns, ending this thread. The caller
- * must keep the `Worker` and shared `Search` records alive until the thread is joined.
+ * Runs search_range(), including all nested helper waits, then clears the borrowed task fields and
+ * release-publishes WORKER_DONE before notifying the owner. The owner acquires DONE after consuming
+ * task_done and alone returns the worker to IDLE. Until then it cannot be reassigned. No task
+ * fields or borrowed nodes are accessed after publishing DONE, until a new task arrives. Keep the
+ * Worker and Search records alive until the thread is joined.
  *
  * @param argument Pointer to an initialized `Worker` belonging to the search pool; must not be
  *                 null.
@@ -368,24 +482,19 @@ static void *worker_main(void *argument)
 {
     Worker *worker = argument;
     Search *search = worker->search;
-    pthread_mutex_lock(&search->mutex);
     for (;;)
     {
-        Node *node;
-        while (!worker->busy && !search->shutdown)
-            pthread_cond_wait(&search->changed, &search->mutex);
-        if (search->shutdown)
+        search_semaphore_wait(&worker->task_available);
+        if (atomic_load_explicit(&search->shutdown, memory_order_acquire))
             break;
-        node = worker->node;
-        pthread_mutex_unlock(&search->mutex);
-        search_range(search, node, worker->begin, worker->end);
-        pthread_mutex_lock(&search->mutex);
-        node->helper_active = false;
+        if (atomic_load_explicit(&worker->state, memory_order_acquire) != WORKER_READY)
+            abort();
+        search_range(search, worker->node, worker->begin, worker->end);
         worker->node = NULL;
-        worker->busy = false;
-        pthread_cond_broadcast(&search->changed);
+        worker->begin = worker->end = 0;
+        atomic_store_explicit(&worker->state, WORKER_DONE, memory_order_release);
+        search_semaphore_post(&worker->task_done);
     }
-    pthread_mutex_unlock(&search->mutex);
     return NULL;
 }
 
@@ -401,46 +510,56 @@ static void *worker_main(void *argument)
  * the current thread retains `[0, worker->begin)`, ensuring that both batches are non-empty and
  * disjoint. Dispatch does not wait for a first child result.
  *
- * Sets `worker->busy` before notification so another dispatcher cannot reserve the same worker,
- * stores the borrowed node and batch range, sets `node->helper_active`, and broadcasts
- * `search->changed` to wake waiting workers.
+ * Acquires IDLE with a CAS to RESERVED, ensuring exclusive ownership of task fields and acquiring
+ * the previous owner's release. Stores the borrowed node and batch range, release-publishes READY,
+ * and posts a task notification. The returned helper must be waited for even after pruning; only
+ * its owner may consume the completion notification and release it back to IDLE.
  *
  * Only already-created, idle workers receive tasks; there is no pending-task queue. If reservation
  * fails, the current thread keeps searching instead of waiting for a worker. Thus nested splits
  * cannot create queued tasks that depend on workers already blocked waiting for those tasks.
  *
- * The caller must hold `search->mutex` throughout this call. The node must have no active helper or
- * previously claimed moves and must remain alive until its assigned helper has exited the batch.
- * This function schedules work but does not search moves or wait for the helper to finish.
+ * The node must have no active helper or previously claimed moves and must remain alive until its
+ * assigned helper has completed the batch. This function schedules work but does not search moves
+ * or wait for the helper to finish.
  *
  * @param search Shared search state with validated split options and an initialized worker pool;
  *               must not be null.
  * @param node   Node with a generated move list ready for its initial batch assignment; must not be
  *               null.
+ * @param helper Required owner-local output; receives the reserved worker, or NULL if not split.
  * @return       Exclusive end index of the current thread's batch. Equals `node->moves.count` if no
  *               split occurs; otherwise also equals the helper's inclusive start index.
  */
-static int split_node(Search *search, Node *node)
+static int split_node(Search *search, Node *node, Worker **helper)
 {
     unsigned i;
     int count = node->moves.count;
+    *helper = NULL;
     if (count < 2 || search->options.split_percent == 0)
         return count;
     for (i = 0; i < search->worker_count; ++i)
-        if (!search->workers[i].busy)
+    {
+        Worker *worker = &search->workers[i];
+        int expected = WORKER_IDLE;
+        if (atomic_compare_exchange_strong_explicit(&worker->state, &expected, WORKER_RESERVED,
+                                                    memory_order_acquire, memory_order_relaxed))
         {
-            Worker *worker = &search->workers[i];
             int assigned = (count * (int)search->options.split_percent + 99) / 100;
+            int begin;
             if (assigned >= count)
                 assigned = count - 1;
-            worker->busy = true;
+            begin = count - assigned;
             worker->node = node;
-            worker->begin = count - assigned;
+            worker->begin = begin;
             worker->end = count;
-            node->helper_active = true;
-            pthread_cond_broadcast(&search->changed);
-            return worker->begin;
+            *helper = worker;
+            atomic_store_explicit(&worker->state, WORKER_READY, memory_order_release);
+            search_semaphore_post(&worker->task_available);
+            /* The worker may already have cleared its task fields; return the local copy. */
+            return begin;
         }
+    }
     return count;
 }
 
@@ -451,7 +570,7 @@ static int split_node(Search *search, Node *node)
  * and a link to `parent`. A node is MAX when its side to move equals `search->root_color` and MIN
  * otherwise; all scores retain the root side's perspective without negation or window flipping.
  * Uses lock-free `check_node()` to refresh inherited bounds and publish completion or cancellation
- * at search checkpoints. Terminal checks and leaf evaluation require no search mutex.
+ * at search checkpoints. Scheduling uses atomic worker states and retained semaphore notifications.
  *
  * The root generates legal moves so even a forced loss returns a legal choice. Descendants search
  * pseudo-legal moves: if the previous mover's king is attacked, that move loses immediately,
@@ -469,9 +588,9 @@ static int split_node(Search *search, Node *node)
  * For a continuing internal node, initializes all child intervals as unknown and calls
  * `split_node()` once to assign a tail batch if a helper is available. Searches the retained front
  * batch using `search_range()`, which submits child results and checks updated bounds. After its
- * own batch ends, waits for any helper to exit, then checks the node again. Even a finished or
- * cancelled node must wait until `helper_active` is `false` before returning, because the helper
- * borrows this stack-allocated node and may still access it.
+ * own batch ends, consumes any helper's completion notification and acquires DONE, then releases
+ * that worker back to IDLE and checks the node again. Even a finished or cancelled node must wait
+ * for this handshake, because the helper borrows this stack-allocated node and may still access it.
  *
  * A valid cutoff result retains the node's proven interval rather than substituting an ancestor
  * threshold. If ancestor completion causes cancellation before a normal completion is published,
@@ -480,11 +599,10 @@ static int split_node(Search *search, Node *node)
  * child, writes `best_move` if requested; the child's proven lower bound witnesses the root score.
  * Early returns leave that output unchanged.
  *
- * The caller must not hold `search->mutex` on entry. Scheduling and waiting for helpers use that
- * mutex; child aggregation, node checks, move generation and evaluation run without it. Running
- * operations are not interrupted asynchronously, so ancestor changes are observed at later
- * checkpoints. The input position is read-only, and its parent chain must remain valid throughout
- * the call. Custom evaluation callbacks must support concurrent invocation.
+ * No explicit scheduling mutex is used. Running operations are not interrupted asynchronously, so
+ * ancestor changes are observed at later checkpoints. The input position is read-only, and its
+ * parent chain must remain valid throughout the call. Custom evaluation callbacks must support
+ * concurrent invocation.
  *
  * @param search    Initialized shared search state; must not be null.
  * @param position  Position to search; must not be null and must remain unchanged during the call.
@@ -498,6 +616,7 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
                             unsigned depth, XqMove *best_move)
 {
     Node node = {0};
+    Worker *helper;
     int score = 0, end, i;
     bool leaf = false;
     node.parent = parent;
@@ -583,25 +702,27 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
     }
     for (i = 0; i < node.moves.count; ++i)
         node.children[i] = (Interval){-WIN, WIN, false};
-    pthread_mutex_lock(&search->mutex);
-    end = split_node(search, &node);
-    pthread_mutex_unlock(&search->mutex);
+    end = split_node(search, &node, &helper);
 
     search_range(search, &node, 0, end);
 
-    pthread_mutex_lock(&search->mutex);
-    /* Only helper exit satisfies this wait. Completion is not a wait predicate, so publishing
-     * it without the mutex cannot lose a wakeup. Helpers observe cancellation themselves. */
-    while (node.helper_active)
-        pthread_cond_wait(&search->changed, &search->mutex);
-    pthread_mutex_unlock(&search->mutex);
+    /* Node completion does not release the borrowed node: always consume the helper's notification.
+     * Helpers observe cancellation themselves. A notification posted early remains available. */
+    if (helper != NULL)
+    {
+        search_semaphore_wait(&helper->task_done);
+        if (atomic_load_explicit(&helper->state, memory_order_acquire) != WORKER_DONE)
+            abort();
+        /* Only this owner can recycle the worker, after consuming this task's completion token. */
+        atomic_store_explicit(&helper->state, WORKER_IDLE, memory_order_release);
+    }
 
-    /* This node is now quiescent; all helper accesses and result submissions precede the unlock. */
+    /* This node is now quiescent; acquiring DONE makes all helper result submissions visible. */
     (void)check_node(&node);
     assert(atomic_load_explicit(&node.state, memory_order_relaxed) != NODE_RUNNING);
     if (best_move != NULL)
     {
-        /* Helper-exit synchronization already makes the selected child slot visible. */
+        /* Helper-completion synchronization already makes the selected child slot visible. */
         int best = atomic_load_explicit(&node.best_index, memory_order_relaxed);
         if (best >= 0)
         {
@@ -616,38 +737,34 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
 /**
  * @brief Shuts down the helper pool, joins created threads, and releases search resources.
  *
- * Sets `search->shutdown` under `search->mutex` and broadcasts `search->changed` so idle workers
- * wake, observe shutdown, and exit their task loops. Releases the mutex before calling
- * `pthread_join()`, allowing those workers to acquire it and complete their exit paths. Thread
- * return values are ignored by passing `NULL` to `pthread_join()`.
+ * Release-publishes shutdown and posts one retained task notification per created thread. Joins all
+ * created threads before destroying any semaphores. initialized_worker_count separately tracks
+ * complete semaphore pairs, including a worker whose pthread_create failed. A partially initialized
+ * pair is cleaned up by its initializer before this function is called.
  *
- * Joins only the `search->worker_count` successfully created threads. This supports cleanup after
- * partial thread creation as well as normal search completion. A count of `0` skips joining, and
- * `free(search->workers)` also accepts `NULL` if allocation failed or no helpers were needed. After
- * all workers have exited, frees their records, destroys `search->changed`, and finally destroys
- * `search->mutex`. The caller's `Search` record itself is not freed.
+ * Call from outside the pool only after every task completion has been consumed, or before any
+ * tasks were dispatched. This is not asynchronous search cancellation. shutdown must be
+ * initialized; zero counts and a NULL workers pointer are allowed. Keep Search alive until this
+ * call returns.
  *
- * The caller must be outside the helper threads, must not hold `search->mutex`, and must have
- * successfully initialized both the mutex and condition variable. All search tasks must already be
- * complete, or must not yet have been dispatched; shutdown is not an asynchronous search
- * cancellation mechanism. Keep the shared state alive until this call returns. This cleanup is
- * performed once; the destroyed synchronization objects cannot be reused without reinitialization,
- * and the worker pointer is not reset after freeing it.
- *
- * @param search Search state whose initialized pool resources are to be released; must not be null.
+ * @param search Search state whose pool resources are to be released exactly once; must not be
+ *               null.
  */
 static void stop_pool(Search *search)
 {
     unsigned i;
-    pthread_mutex_lock(&search->mutex);
-    search->shutdown = true;
-    pthread_cond_broadcast(&search->changed);
-    pthread_mutex_unlock(&search->mutex);
+    atomic_store_explicit(&search->shutdown, 1, memory_order_release);
     for (i = 0; i < search->worker_count; ++i)
-        pthread_join(search->workers[i].thread, NULL);
+        search_semaphore_post(&search->workers[i].task_available);
+    for (i = 0; i < search->worker_count; ++i)
+        if (pthread_join(search->workers[i].thread, NULL) != 0)
+            abort();
+    for (i = 0; i < search->initialized_worker_count; ++i)
+    {
+        search_semaphore_destroy(&search->workers[i].task_done);
+        search_semaphore_destroy(&search->workers[i].task_available);
+    }
     free(search->workers);
-    pthread_cond_destroy(&search->changed);
-    pthread_mutex_destroy(&search->mutex);
 }
 #endif
 
@@ -669,8 +786,8 @@ static void stop_pool(Search *search)
  * Terminal roots also succeed but have `move_available == false`; callers must check that flag
  * before using `best_move`. Equal-score move selection may depend on thread scheduling.
  *
- * Evaluators run outside the search mutex and may be called concurrently; the callback and its user
- * data must support this and must not modify positions.
+ * Evaluators may be called concurrently; the callback and its user data must support this and must
+ * not modify positions. Scheduling uses atomic states and semaphores, without explicit mutexes.
  *
  * Zeroes a non-null `result` before validating arguments, leaving it zeroed on failure. On success,
  * fills the move and score. No trace, timing or search counters are collected. Joins all created
@@ -692,7 +809,7 @@ static void stop_pool(Search *search)
  * @retval XQ_PARALLEL_OK               Search completed, including terminal root positions.
  * @retval XQ_PARALLEL_INVALID_ARGUMENT A required pointer is null, an option is out of range, or
  *                                      the root side to move is invalid.
- * @retval XQ_PARALLEL_RESOURCE_ERROR   Mutex/condition initialization, worker allocation, or thread
+ * @retval XQ_PARALLEL_RESOURCE_ERROR   Semaphore initialization, worker allocation, or thread
  *                                      creation failed on a supported platform.
  * @retval XQ_PARALLEL_UNSUPPORTED      Arguments are valid, but the build targets Windows.
  */
@@ -717,17 +834,11 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
         Interval value;
         XqMove best = {0};
         unsigned i;
+        atomic_init(&search.shutdown, 0);
         search.options = effective;
         search.root_color = pos->side_to_move;
         search.evaluate = evaluate != NULL ? evaluate : xq_engine_default_static_evaluate;
         search.evaluate_user = evaluate_user;
-        if (pthread_mutex_init(&search.mutex, NULL) != 0)
-            return XQ_PARALLEL_RESOURCE_ERROR;
-        if (pthread_cond_init(&search.changed, NULL) != 0)
-        {
-            pthread_mutex_destroy(&search.mutex);
-            return XQ_PARALLEL_RESOURCE_ERROR;
-        }
         if (effective.thread_count > 1)
         {
             search.workers = calloc(effective.thread_count - 1, sizeof(*search.workers));
@@ -742,6 +853,19 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
             Worker *worker = &search.workers[i];
             int error;
             worker->search = &search;
+            atomic_init(&worker->state, WORKER_IDLE);
+            if (!search_semaphore_init(&worker->task_available))
+            {
+                stop_pool(&search);
+                return XQ_PARALLEL_RESOURCE_ERROR;
+            }
+            if (!search_semaphore_init(&worker->task_done))
+            {
+                search_semaphore_destroy(&worker->task_available);
+                stop_pool(&search);
+                return XQ_PARALLEL_RESOURCE_ERROR;
+            }
+            ++search.initialized_worker_count;
             error = pthread_create(&worker->thread, NULL, worker_main, worker);
             if (error != 0)
             {
