@@ -102,8 +102,8 @@ static bool search_semaphore_init(SearchSemaphore *semaphore)
  * signal (EINTR). An unexpected wait failure aborts the process because continuing without
  * consuming a notification would invalidate the task or completion handshake.
  *
- * Returning does not identify the event: the caller must acquire the corresponding worker state or
- * shutdown flag before deciding how to proceed. This function does not change those states.
+ * Returning does not identify the event: the caller must acquire the corresponding task, worker or
+ * shutdown state before deciding how to proceed. This function does not change those states.
  *
  * @param semaphore Non-null, successfully initialized semaphore; keep it alive throughout the wait.
  */
@@ -149,9 +149,9 @@ static void search_semaphore_post(SearchSemaphore *semaphore)
  * destruction failure aborts the process. The containing SearchSemaphore storage is not freed, and
  * its handle must not be used again unless successfully reinitialized.
  *
- * The caller must ensure all users have finished and no further waits or posts can occur. This
- * function does not wake waiters or join threads; pool teardown joins workers before calling it.
- * Call exactly once per successful initialization, including cleanup after partial pool creation.
+ * The caller must ensure all users have finished and no further waits or posts can occur. Pool
+ * teardown joins workers first; task-local completion cleanup waits for the final reference. Call
+ * exactly once per successful initialization, including cleanup after partial pool creation.
  *
  * @param semaphore Non-null, initialized semaphore with no active or future users.
  */
@@ -163,6 +163,72 @@ static void search_semaphore_destroy(SearchSemaphore *semaphore)
     if (sem_destroy(&semaphore->handle) != 0)
         abort();
 #endif
+}
+
+/* Each split has its own completion, independent of the worker that executes it. The owner and
+ * worker each hold one reference until their wait/post has returned. This keeps the semaphore alive
+ * even if the owner wakes and returns from its stack frame before the worker's post returns. */
+typedef struct TaskCompletion
+{
+    SearchSemaphore notification;
+    atomic_int finished;
+    atomic_int references;
+} TaskCompletion;
+
+/**
+ * @brief Creates a task-local completion record with one reference for each participant.
+ *
+ * Allocates the record and initializes its notification semaphore with count zero, finished flag
+ * with zero, and reference count with two. The node owner holds one reference; the other is
+ * reserved for the worker and transferred when the task is published through WORKER_READY. Each
+ * participant must call task_completion_release() once, after its last access to the record.
+ *
+ * Called after reserving a worker but before publishing its task. Allocation or semaphore creation
+ * failure leaves no resources behind. The caller must then release the worker reservation and
+ * search the whole batch serially. This function itself neither dispatches nor waits for work.
+ *
+ * @return Initialized completion record, or NULL if memory allocation or semaphore creation fails.
+ */
+static TaskCompletion *task_completion_create(void)
+{
+    TaskCompletion *completion = malloc(sizeof(*completion));
+    if (completion == NULL)
+        return NULL;
+    if (!search_semaphore_init(&completion->notification))
+    {
+        free(completion);
+        return NULL;
+    }
+    atomic_init(&completion->finished, 0);
+    atomic_init(&completion->references, 2);
+    return completion;
+}
+
+/**
+ * @brief Releases one participant's reference and destroys the record after the final release.
+ *
+ * The worker releases after posting the completion notification; the owner releases after consuming
+ * that notification and acquiring the finished flag. Both must finish all accesses, including the
+ * entire semaphore post or wait call, before releasing. Either participant may release first.
+ *
+ * The atomic decrement returns the previous count: a value of one means this release changes it to
+ * zero and must destroy the semaphore and free the record. Release ordering publishes each
+ * participant's preceding accesses; acquire ordering lets the final releaser observe the other
+ * participant's release before destruction. Thus an owner waking before the worker's post returns
+ * cannot destroy a semaphore still in use by that worker.
+ *
+ * This function does not wait for task completion. Call exactly once per held reference and never
+ * access the record through that reference afterward, even if the other participant still holds it.
+ *
+ * @param completion Non-null, initialized record for which the caller holds one live reference.
+ */
+static void task_completion_release(TaskCompletion *completion)
+{
+    if (atomic_fetch_sub_explicit(&completion->references, 1, memory_order_acq_rel) == 1)
+    {
+        search_semaphore_destroy(&completion->notification);
+        free(completion);
+    }
 }
 
 enum
@@ -199,9 +265,9 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "parallel search requires lock-free at
 /* The owner keeps this stack-allocated node and its parent chain alive until its helper completes.
  * Position, moves, depth, parent and maximizing are immutable once shared. Bounds, window and state
  * use atomic access, as do submission counters and best_index. Each child slot has one writer and
- * is immutable after publication through best_index. Helper completion is acquired through its
- * worker state after consuming the completion notification, before the owner returns. State
- * combines finished/cancelled in one atomic transition so readers never see a partial stop.
+ * is immutable after publication through best_index. Helper completion is acquired through its task
+ * completion record after consuming the notification, before the owner returns. State combines
+ * finished/cancelled in one atomic transition so readers never see a partial stop.
  */
 typedef struct Node
 {
@@ -223,8 +289,7 @@ typedef enum WorkerState
 {
     WORKER_IDLE,
     WORKER_RESERVED,
-    WORKER_READY,
-    WORKER_DONE
+    WORKER_READY
 } WorkerState;
 
 typedef struct Worker
@@ -233,9 +298,9 @@ typedef struct Worker
     pthread_t thread;
     atomic_int state;
     SearchSemaphore task_available;
-    SearchSemaphore task_done;
-    /* Written by the reserving owner, published through READY, cleared before DONE. The owner
-     * consumes task_done before publishing IDLE, so another task cannot steal its notification. */
+    /* Written by the reserving owner, published through READY, cleared by the worker before IDLE.
+     * Completion belongs to the task and may outlive the worker's next assignment. */
+    TaskCompletion *completion;
     Node *node;
     int begin, end;
 } Worker;
@@ -244,7 +309,7 @@ typedef struct Search
 {
     Worker *workers;
     unsigned worker_count;
-    unsigned initialized_worker_count; /* Workers with both semaphores initialized. */
+    unsigned initialized_worker_count; /* Workers with their task semaphore initialized. */
     atomic_int shutdown;
     XqParallelOptions options;
     XqColor root_color;
@@ -257,7 +322,7 @@ typedef struct Search
  *
  * Completion alone does not freeze the bounds: an in-flight helper may still submit a valid child
  * result. Unless the node has never been shared, the owner must consume its helper's completion
- * notification and acquire WORKER_DONE before calling this function. That synchronization (or
+ * notification and acquire its finished flag before calling this function. That synchronization (or
  * exclusive ownership) makes the result visible; these loads need only relaxed ordering.
  *
  * @param node Completed, quiescent node; must not be null and must remain alive during the call.
@@ -468,11 +533,11 @@ static void search_range(Search *search, Node *node, int begin, int end)
  * publishes all task fields; RESERVED alone does not permit reading them. Shutdown is published
  * only when no tasks remain (or before any were dispatched) and has its own notification.
  *
- * Runs search_range(), including all nested helper waits, then clears the borrowed task fields and
- * release-publishes WORKER_DONE before notifying the owner. The owner acquires DONE after consuming
- * task_done and alone returns the worker to IDLE. Until then it cannot be reassigned. No task
- * fields or borrowed nodes are accessed after publishing DONE, until a new task arrives. Keep the
- * Worker and Search records alive until the thread is joined.
+ * Runs search_range(), including all nested helper waits, then clears the borrowed task fields,
+ * publishes task completion and returns itself to IDLE without waiting for the owner. Another
+ * dispatcher may immediately overwrite the task fields, so the old completion is held locally while
+ * notifying its owner and releasing the worker's reference. No old task fields or borrowed nodes
+ * are accessed after publishing IDLE. Keep Worker and Search alive until the thread is joined.
  *
  * @param argument Pointer to an initialized `Worker` belonging to the search pool; must not be
  *                 null.
@@ -484,16 +549,23 @@ static void *worker_main(void *argument)
     Search *search = worker->search;
     for (;;)
     {
+        TaskCompletion *completion;
         search_semaphore_wait(&worker->task_available);
         if (atomic_load_explicit(&search->shutdown, memory_order_acquire))
             break;
         if (atomic_load_explicit(&worker->state, memory_order_acquire) != WORKER_READY)
             abort();
+        completion = worker->completion;
         search_range(search, worker->node, worker->begin, worker->end);
         worker->node = NULL;
         worker->begin = worker->end = 0;
-        atomic_store_explicit(&worker->state, WORKER_DONE, memory_order_release);
-        search_semaphore_post(&worker->task_done);
+        worker->completion = NULL;
+        atomic_store_explicit(&completion->finished, 1, memory_order_release);
+        atomic_store_explicit(&worker->state, WORKER_IDLE, memory_order_release);
+        /* Only the captured completion may be used now: worker task fields may already be reused.
+         */
+        search_semaphore_post(&completion->notification);
+        task_completion_release(completion);
     }
     return NULL;
 }
@@ -511,9 +583,10 @@ static void *worker_main(void *argument)
  * disjoint. Dispatch does not wait for a first child result.
  *
  * Acquires IDLE with a CAS to RESERVED, ensuring exclusive ownership of task fields and acquiring
- * the previous owner's release. Stores the borrowed node and batch range, release-publishes READY,
- * and posts a task notification. The returned helper must be waited for even after pruning; only
- * its owner may consume the completion notification and release it back to IDLE.
+ * the previous worker release. Creates a per-task completion, stores the borrowed node and batch
+ * range, release-publishes READY, and posts a task notification. The owner waits on this completion
+ * even after pruning; the worker can return to IDLE independently. If completion allocation or
+ * semaphore initialization fails, releases the reservation and keeps the entire batch serial.
  *
  * Only already-created, idle workers receive tasks; there is no pending-task queue. If reservation
  * fails, the current thread keeps searching instead of waiting for a worker. Thus nested splits
@@ -523,19 +596,20 @@ static void *worker_main(void *argument)
  * assigned helper has completed the batch. This function schedules work but does not search moves
  * or wait for the helper to finish.
  *
- * @param search Shared search state with validated split options and an initialized worker pool;
- *               must not be null.
- * @param node   Node with a generated move list ready for its initial batch assignment; must not be
- *               null.
- * @param helper Required owner-local output; receives the reserved worker, or NULL if not split.
- * @return       Exclusive end index of the current thread's batch. Equals `node->moves.count` if no
- *               split occurs; otherwise also equals the helper's inclusive start index.
+ * @param search  Shared search state with validated split options and an initialized worker pool;
+ *                must not be null.
+ * @param node    Node with a generated move list ready for its initial batch assignment; must not
+ *                be null.
+ * @param pending Required owner-local output; receives this task's completion, or NULL if not
+ *                split.
+ * @return        Exclusive end index of the current thread's batch. Equals `node->moves.count` if
+ *                no split occurs; otherwise also equals the helper's inclusive start index.
  */
-static int split_node(Search *search, Node *node, Worker **helper)
+static int split_node(Search *search, Node *node, TaskCompletion **pending)
 {
     unsigned i;
     int count = node->moves.count;
-    *helper = NULL;
+    *pending = NULL;
     if (count < 2 || search->options.split_percent == 0)
         return count;
     for (i = 0; i < search->worker_count; ++i)
@@ -545,15 +619,22 @@ static int split_node(Search *search, Node *node, Worker **helper)
         if (atomic_compare_exchange_strong_explicit(&worker->state, &expected, WORKER_RESERVED,
                                                     memory_order_acquire, memory_order_relaxed))
         {
+            TaskCompletion *completion = task_completion_create();
             int assigned = (count * (int)search->options.split_percent + 99) / 100;
             int begin;
+            if (completion == NULL)
+            {
+                atomic_store_explicit(&worker->state, WORKER_IDLE, memory_order_release);
+                return count;
+            }
             if (assigned >= count)
                 assigned = count - 1;
             begin = count - assigned;
             worker->node = node;
             worker->begin = begin;
             worker->end = count;
-            *helper = worker;
+            worker->completion = completion;
+            *pending = completion;
             atomic_store_explicit(&worker->state, WORKER_READY, memory_order_release);
             search_semaphore_post(&worker->task_available);
             /* The worker may already have cleared its task fields; return the local copy. */
@@ -588,9 +669,9 @@ static int split_node(Search *search, Node *node, Worker **helper)
  * For a continuing internal node, initializes all child intervals as unknown and calls
  * `split_node()` once to assign a tail batch if a helper is available. Searches the retained front
  * batch using `search_range()`, which submits child results and checks updated bounds. After its
- * own batch ends, consumes any helper's completion notification and acquires DONE, then releases
- * that worker back to IDLE and checks the node again. Even a finished or cancelled node must wait
- * for this handshake, because the helper borrows this stack-allocated node and may still access it.
+ * own batch ends, consumes the task's completion notification and acquires its finished flag,
+ * releases its reference, and checks the node again. The helper may already have another task. Even
+ * a finished or cancelled node must wait for this handshake to protect its stack lifetime.
  *
  * A valid cutoff result retains the node's proven interval rather than substituting an ancestor
  * threshold. If ancestor completion causes cancellation before a normal completion is published,
@@ -616,7 +697,7 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
                             unsigned depth, XqMove *best_move)
 {
     Node node = {0};
-    Worker *helper;
+    TaskCompletion *pending;
     int score = 0, end, i;
     bool leaf = false;
     node.parent = parent;
@@ -702,22 +783,22 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
     }
     for (i = 0; i < node.moves.count; ++i)
         node.children[i] = (Interval){-WIN, WIN, false};
-    end = split_node(search, &node, &helper);
+    end = split_node(search, &node, &pending);
 
     search_range(search, &node, 0, end);
 
     /* Node completion does not release the borrowed node: always consume the helper's notification.
      * Helpers observe cancellation themselves. A notification posted early remains available. */
-    if (helper != NULL)
+    if (pending != NULL)
     {
-        search_semaphore_wait(&helper->task_done);
-        if (atomic_load_explicit(&helper->state, memory_order_acquire) != WORKER_DONE)
+        search_semaphore_wait(&pending->notification);
+        if (!atomic_load_explicit(&pending->finished, memory_order_acquire))
             abort();
-        /* Only this owner can recycle the worker, after consuming this task's completion token. */
-        atomic_store_explicit(&helper->state, WORKER_IDLE, memory_order_release);
+        task_completion_release(pending);
     }
 
-    /* This node is now quiescent; acquiring DONE makes all helper result submissions visible. */
+    /* This node is now quiescent; acquiring finished makes all helper result submissions visible.
+     */
     (void)check_node(&node);
     assert(atomic_load_explicit(&node.state, memory_order_relaxed) != NODE_RUNNING);
     if (best_move != NULL)
@@ -738,9 +819,9 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
  * @brief Shuts down the helper pool, joins created threads, and releases search resources.
  *
  * Release-publishes shutdown and posts one retained task notification per created thread. Joins all
- * created threads before destroying any semaphores. initialized_worker_count separately tracks
- * complete semaphore pairs, including a worker whose pthread_create failed. A partially initialized
- * pair is cleaned up by its initializer before this function is called.
+ * created threads before destroying their task semaphores. initialized_worker_count separately
+ * tracks initialized task semaphores, including a worker whose pthread_create failed. Task-local
+ * completions are released independently; joining also waits for workers' final reference releases.
  *
  * Call from outside the pool only after every task completion has been consumed, or before any
  * tasks were dispatched. This is not asynchronous search cancellation. shutdown must be
@@ -760,10 +841,7 @@ static void stop_pool(Search *search)
         if (pthread_join(search->workers[i].thread, NULL) != 0)
             abort();
     for (i = 0; i < search->initialized_worker_count; ++i)
-    {
-        search_semaphore_destroy(&search->workers[i].task_done);
         search_semaphore_destroy(&search->workers[i].task_available);
-    }
     free(search->workers);
 }
 #endif
@@ -788,6 +866,9 @@ static void stop_pool(Search *search)
  *
  * Evaluators may be called concurrently; the callback and its user data must support this and must
  * not modify positions. Scheduling uses atomic states and semaphores, without explicit mutexes.
+ * Each split owns a separate completion notification, allowing its worker to become available
+ * before the owner collects the result. Failure to create a completion falls back to serial work
+ * for that node; failure to create the initial worker pool returns a resource error.
  *
  * Zeroes a non-null `result` before validating arguments, leaving it zeroed on failure. On success,
  * fills the move and score. No trace, timing or search counters are collected. Joins all created
@@ -809,7 +890,7 @@ static void stop_pool(Search *search)
  * @retval XQ_PARALLEL_OK               Search completed, including terminal root positions.
  * @retval XQ_PARALLEL_INVALID_ARGUMENT A required pointer is null, an option is out of range, or
  *                                      the root side to move is invalid.
- * @retval XQ_PARALLEL_RESOURCE_ERROR   Semaphore initialization, worker allocation, or thread
+ * @retval XQ_PARALLEL_RESOURCE_ERROR   Pool semaphore initialization, worker allocation, or thread
  *                                      creation failed on a supported platform.
  * @retval XQ_PARALLEL_UNSUPPORTED      Arguments are valid, but the build targets Windows.
  */
@@ -856,12 +937,6 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
             atomic_init(&worker->state, WORKER_IDLE);
             if (!search_semaphore_init(&worker->task_available))
             {
-                stop_pool(&search);
-                return XQ_PARALLEL_RESOURCE_ERROR;
-            }
-            if (!search_semaphore_init(&worker->task_done))
-            {
-                search_semaphore_destroy(&worker->task_available);
                 stop_pool(&search);
                 return XQ_PARALLEL_RESOURCE_ERROR;
             }
