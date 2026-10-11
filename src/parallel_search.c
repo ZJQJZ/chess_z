@@ -5,6 +5,7 @@
 #include "xiangqi/movegen.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,13 +14,13 @@
  *
  * The default configuration searches to a fixed depth of 3 plies, uses 2 threads including the
  * calling thread, and assigns 50 percent of a node's children to an available helper thread when
- * splitting is possible. The search has no time limit.
+ * splitting is possible. The search has no time limit and no transposition table by default.
  *
  * @return The default parallel-search configuration.
  */
 XqParallelOptions xq_parallel_options_default(void)
 {
-    XqParallelOptions options = {3, 2, 50};
+    XqParallelOptions options = {3, 2, 50, NULL};
     return options;
 }
 
@@ -235,8 +236,477 @@ enum
 {
     WIN = 30000,
     STATIC_LIMIT = 28999,
-    INFINITY_SCORE = 30001
+    INFINITY_SCORE = 30001,
+    PARALLEL_TT_BUCKET_SIZE = 4,
+    PARALLEL_TT_BUCKET_COUNT = 1 << 18
 };
+
+typedef struct ParallelTtEntry
+{
+    uint64_t key;
+    int score; /* Side-to-move perspective, as in engine.c. */
+    XqMove best_move;
+    uint16_t depth; /* Zero marks an empty slot. */
+    uint8_t generation;
+    uint8_t score_kind;
+} ParallelTtEntry;
+
+typedef struct ParallelTtBucket
+{
+    atomic_int occupied;
+    ParallelTtEntry entries[PARALLEL_TT_BUCKET_SIZE];
+} ParallelTtBucket;
+
+struct XqParallelTranspositionTable
+{
+    ParallelTtBucket *buckets;
+    uint8_t generation;
+    XqTranspositionStats stats; /* Aggregated only after all search threads finish. */
+    bool has_context;
+    XqEvaluateFn evaluate;
+    void *evaluate_user;
+    XqColor root_color;
+};
+
+/**
+ * @brief Creates an independent, fixed-capacity transposition table for parallel search.
+ *
+ * Allocates the management structure and PARALLEL_TT_BUCKET_COUNT four-way buckets separately. Zero
+ * initialization resets the generation and statistics, leaves the evaluator context unbound
+ * (has_context == false), and marks every entry empty through depth == 0. Each bucket's atomic
+ * occupied flag is explicitly initialized to zero before the table can be shared with workers;
+ * later cache accesses use this flag to attempt exclusive access to the bucket.
+ *
+ * If bucket allocation fails, releases the already allocated management structure. On success, the
+ * caller owns the table and may lend it to successive searches through XqParallelOptions. Only one
+ * top-level search may use it at a time. After all users have finished, release it with
+ * xq_parallel_transposition_table_destroy(). No search threads are created by this function.
+ *
+ * @return A newly initialized table, or NULL if either allocation fails.
+ */
+XqParallelTranspositionTable *xq_parallel_transposition_table_create(void)
+{
+    XqParallelTranspositionTable *table = calloc(1, sizeof(*table));
+    unsigned i;
+    if (table == NULL)
+        return NULL;
+    table->buckets = calloc(PARALLEL_TT_BUCKET_COUNT, sizeof(*table->buckets));
+    if (table->buckets == NULL)
+    {
+        free(table);
+        return NULL;
+    }
+    for (i = 0; i < PARALLEL_TT_BUCKET_COUNT; ++i)
+        atomic_init(&table->buckets[i].occupied, 0);
+    return table;
+}
+
+/**
+ * @brief Clears cached entries, evaluator binding, generation and cumulative statistics.
+ *
+ * Zeroes only each bucket's entry array, making every slot empty through depth == 0. Retains the
+ * allocated table and buckets for reuse, and leaves their initialized atomic occupied flags
+ * untouched. Clearing has_context invalidates the previous evaluator binding; the retained
+ * root_color is ignored until the next search establishes a new context.
+ *
+ * Requires exclusive access to a quiescent table: no worker may be accessing a bucket and no other
+ * caller may be using the table. This function does not acquire the bucket guards or wait for an
+ * active search to finish. External callers must wait until the borrowing search returns; search
+ * setup may also clear the table before publishing any tasks when its evaluator context changes.
+ * Use reset_stats instead when cached entries and their context should be retained.
+ *
+ * @param table Table to reset without freeing its storage; NULL is accepted and does nothing.
+ */
+void xq_parallel_transposition_table_clear(XqParallelTranspositionTable *table)
+{
+    unsigned i;
+    if (table == NULL)
+        return;
+    for (i = 0; i < PARALLEL_TT_BUCKET_COUNT; ++i)
+        memset(table->buckets[i].entries, 0, sizeof(table->buckets[i].entries));
+    table->generation = 0;
+    table->has_context = false;
+    table->evaluate = NULL;
+    table->evaluate_user = NULL;
+    memset(&table->stats, 0, sizeof(table->stats));
+}
+
+/**
+ * @brief Releases the bucket array and management structure of a parallel transposition table.
+ *
+ * Requires exclusive access after all searches borrowing the table have returned and all other
+ * users, including statistics readers, have finished. This function does not signal workers, join
+ * threads, or acquire bucket guards. Clearing entries before destruction is unnecessary; the
+ * evaluator's user data is borrowed and is not freed here.
+ *
+ * Invalidates the table and every alias to it, including pointers stored in XqParallelOptions. The
+ * caller must clear or replace those pointers before using the options again; passing the same
+ * non-null pointer to this function twice is invalid.
+ *
+ * @param table Table created by xq_parallel_transposition_table_create(); NULL does nothing.
+ */
+void xq_parallel_transposition_table_destroy(XqParallelTranspositionTable *table)
+{
+    if (table != NULL)
+    {
+        free(table->buckets);
+        free(table);
+    }
+}
+
+/**
+ * @brief Resets cumulative cache statistics without discarding cached search results.
+ *
+ * Zeroes probes, hits, cutoffs, stores and replacements. Preserves all entries, their generation
+ * metadata, the table's current generation and its evaluator binding. This allows subsequent
+ * searches to measure cache activity while continuing to reuse previously stored results.
+ *
+ * Call only between searches with exclusive access to the table, including exclusion of statistics
+ * readers. Counters are ordinary fields: this function provides no synchronization with readers or
+ * with the statistics merged at search completion. Use the table's clear function instead when
+ * cached entries and their evaluator binding must also be invalidated.
+ *
+ * @param table Table whose statistics are reset; NULL is accepted and does nothing.
+ */
+void xq_parallel_transposition_table_reset_stats(XqParallelTranspositionTable *table)
+{
+    if (table != NULL)
+        memset(&table->stats, 0, sizeof(table->stats));
+}
+
+/**
+ * @brief Copies cumulative cache statistics into caller-owned storage without resetting them.
+ *
+ * Returns probes, hits, cutoffs, stores and replacements accumulated since table creation or the
+ * latest clear/reset. Search threads keep private counters that are merged after worker joins, so
+ * these totals describe completed searches, not live progress. Copying them leaves cached entries,
+ * generation metadata and the evaluator binding unchanged.
+ *
+ * Call only after the borrowing search has returned. The copy uses ordinary field accesses and
+ * provides no synchronization; the caller must prevent concurrent searches, clear/reset calls and
+ * destruction of the table. The output must also be safe for this caller to write.
+ *
+ * @param table Table to inspect; NULL produces zero counters in a non-null output.
+ * @param stats Destination for the copied counters; NULL makes this function do nothing.
+ */
+void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTable *table,
+                                               XqTranspositionStats *stats)
+{
+    if (stats == NULL)
+        return;
+    if (table == NULL)
+        memset(stats, 0, sizeof(*stats));
+    else
+        *stats = table->stats;
+}
+
+/**
+ * @brief Prepares the table's evaluator binding and generation for a new top-level search.
+ *
+ * has_context indicates whether the stored evaluator configuration is valid, not whether the table
+ * contains entries or a search is running. If a previous binding exists, changing the evaluator or
+ * its user pointer clears the entries and statistics. A root-color change also clears the table for
+ * custom evaluators: they need not return opposite scores for opposite perspectives, so converting
+ * cached scores to side-to-move perspective alone is insufficient. The built-in evaluator is
+ * antisymmetric and allows reuse across root-color changes.
+ *
+ * Records the new binding, marks it valid and advances the uint8_t generation once per search,
+ * wrapping modulo 256. Compatible bindings retain their entries and cumulative statistics; after a
+ * clear, the generation advances from zero to one. Mutations behind an unchanged user pointer
+ * cannot be detected, so callers must explicitly clear the table when those mutations change
+ * evaluation semantics.
+ *
+ * Call with exclusive access before publishing any search tasks. The context and generation remain
+ * unchanged while workers access the table; this function provides no synchronization with active
+ * searches or external table users.
+ *
+ * @param table         Borrowed table to prepare; NULL disables caching and does nothing here.
+ * @param evaluate      Effective non-null evaluator, with the default already resolved.
+ * @param evaluate_user Borrowed user-data pointer passed to the evaluator; may be NULL.
+ * @param root_color    Root side whose perspective is used for this search's evaluations.
+ */
+static void parallel_tt_new_search(XqParallelTranspositionTable *table, XqEvaluateFn evaluate,
+                                   void *evaluate_user, XqColor root_color)
+{
+    if (table == NULL)
+        return;
+    if (table->has_context &&
+        (table->evaluate != evaluate || table->evaluate_user != evaluate_user ||
+         (evaluate != xq_engine_default_static_evaluate && table->root_color != root_color)))
+        xq_parallel_transposition_table_clear(table);
+    table->evaluate = evaluate;
+    table->evaluate_user = evaluate_user;
+    table->root_color = root_color;
+    table->has_context = true;
+    ++table->generation;
+}
+
+/**
+ * @brief Attempts once to acquire exclusive access to a transposition-table bucket.
+ *
+ * A strong CAS changes occupied from 0 (available) to 1 (owned). Strong CAS avoids spurious failure
+ * in this single-attempt path. If another caller owns the bucket, returns immediately; cache
+ * callers skip that probe or store rather than retrying, spinning or blocking.
+ *
+ * Successful acquire ordering pairs with the previous owner's release store of zero, making its
+ * entry writes visible to the new owner. Failure uses relaxed ordering because it grants no access
+ * to the entries. During parallel search, both reads and writes of the ordinary entry fields
+ * require this guard; it is a bucket-level try lock, not a lock-free snapshot.
+ *
+ * After success, the caller must release occupied with memory_order_release on every exit path.
+ * Copy any needed entry data before releasing; do not access an entry through a retained pointer
+ * afterward without acquiring the bucket again. Quiescent table management is handled separately.
+ *
+ * @param bucket Initialized, live bucket to acquire; must not be NULL.
+ * @return       True if ownership was acquired; false if the bucket was occupied at the CAS
+ *               attempt.
+ */
+static bool parallel_tt_try_acquire(ParallelTtBucket *bucket)
+{
+    int expected = 0;
+    return atomic_compare_exchange_strong_explicit(&bucket->occupied, &expected, 1,
+                                                   memory_order_acquire, memory_order_relaxed);
+}
+
+/**
+ * @brief Looks up a cached position and reports whether its score can resolve this search node.
+ *
+ * Selects a bucket using the low key bits and attempts to acquire it once. A busy bucket skips the
+ * lookup without waiting. While holding the guard, matches a non-empty entry by its full key,
+ * refreshes its generation and copies it into caller-owned storage. Releases the bucket before
+ * interpreting the copy; no pointer into shared entry storage escapes the guard.
+ *
+ * A matching key sets *hit even when its depth or bound cannot resolve the node, allowing the
+ * caller to use the cached move for ordering. Score reuse requires cached depth >= requested depth
+ * and either an exact value, a lower bound >= beta, or an upper bound <= alpha. Scores and the
+ * supplied window must use the side-to-move perspective. The caller must preserve the cached bound
+ * kind when converting the result into an interval; a cutoff is not always exact. ordering_only
+ * disables all score reuse and is used at the root to retain move selection.
+ *
+ * For a non-null table, increments probes even if bucket contention prevents inspection. Increments
+ * hits on a key match and cutoffs only when returning true. Counters belong to the executing thread
+ * and require no shared counter updates. A null table changes only *hit.
+ *
+ * @param table         Table borrowed by the current search; NULL disables the lookup.
+ * @param key           Full position hash, including the side to move.
+ * @param depth         Requested remaining search depth.
+ * @param alpha         Lower window threshold in side-to-move perspective.
+ * @param beta          Upper window threshold in side-to-move perspective.
+ * @param ordering_only If true, return matching data for ordering but never reuse its score.
+ * @param snapshot      Non-null output; written only on a key match, otherwise left unchanged.
+ * @param hit           Non-null output; true on a key match, independently of the return value.
+ * @param stats         Executing thread's private counters; required when table is non-null.
+ * @return              True if the copied score can resolve the node; false for ordering-only hits,
+ *                      unusable scores, misses, contention or a disabled table. Inspect *hit before
+ *                      using snapshot.
+ */
+static bool parallel_tt_probe(XqParallelTranspositionTable *table, uint64_t key, unsigned depth,
+                              int alpha, int beta, bool ordering_only, ParallelTtEntry *snapshot,
+                              bool *hit, XqTranspositionStats *stats)
+{
+    ParallelTtBucket *bucket;
+    int i;
+    *hit = false;
+    if (table == NULL)
+        return false;
+    ++stats->probes;
+    bucket = &table->buckets[key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
+    if (!parallel_tt_try_acquire(bucket))
+        return false;
+    for (i = 0; i < PARALLEL_TT_BUCKET_SIZE; ++i)
+    {
+        ParallelTtEntry *entry = &bucket->entries[i];
+        if (entry->depth != 0 && entry->key == key)
+        {
+            entry->generation = table->generation;
+            *snapshot = *entry;
+            *hit = true;
+            break;
+        }
+    }
+    atomic_store_explicit(&bucket->occupied, 0, memory_order_release);
+    if (!*hit)
+        return false;
+    ++stats->hits;
+    if (!ordering_only && snapshot->depth >= depth &&
+        (snapshot->score_kind == XQ_SEARCH_SCORE_EXACT ||
+         (snapshot->score_kind == XQ_SEARCH_SCORE_LOWER_BOUND && snapshot->score >= beta) ||
+         (snapshot->score_kind == XQ_SEARCH_SCORE_UPPER_BOUND && snapshot->score <= alpha)))
+    {
+        ++stats->cutoffs;
+        return true;
+    }
+    return false;
+}
+
+/**
+ * @brief Computes an entry's retention priority for the cache replacement policy.
+ *
+ * Uses the same formula as engine.c: 8 * depth - 4 * age + exact-value bonus. Deeper entries
+ * receive higher priority, older entries receive lower priority, and exact values receive a bonus
+ * of 3 over bounds. This is a replacement priority, not a chess position evaluation; a higher
+ * result favors keeping the entry, and negative results are valid.
+ *
+ * Age is the generation difference converted to uint8_t, so it wraps modulo 256 along with the
+ * table's generation. For example, generation 1 and entry generation 255 give age 2. Ages spanning
+ * a full 256-generation cycle cannot be distinguished from newer ones. This function neither
+ * refreshes generation nor modifies the entry.
+ *
+ * @param entry      Non-null entry to score, either a local candidate/copy or a shared entry
+ *                   protected by its bucket guard while concurrent access is possible.
+ * @param generation Current table generation used to calculate the entry's age.
+ * @return           Retention priority used to compare incoming entries with existing entries.
+ */
+static int parallel_tt_retention_score(const ParallelTtEntry *entry, uint8_t generation)
+{
+    unsigned age = (uint8_t)(generation - entry->generation);
+    int bonus = entry->score_kind == XQ_SEARCH_SCORE_EXACT ? 3 : 0;
+    return (int)entry->depth * 8 - (int)age * 4 + bonus;
+}
+
+/**
+ * @brief Attempts to cache a search result using engine.c's slot selection and replacement rules.
+ *
+ * Ignores a disabled table or depth zero, which is reserved for empty entries. Builds a local
+ * candidate with the current generation and depth clamped to UINT16_MAX, then attempts to acquire
+ * the key's bucket once. Contention skips this optional store without waiting.
+ *
+ * Scans slots in order, stopping at the first empty slot or matching key. A matching entry's
+ * generation is refreshed even if the incoming retention priority is too low to overwrite it; that
+ * comparison uses the existing entry's priority calculated before the refresh. If all slots are
+ * occupied by different keys, selects the first entry with the lowest retention priority and
+ * replaces it only when the incoming priority is at least as high.
+ *
+ * Counts stores only when the candidate is written, and replacements only when that write evicts a
+ * non-empty entry with a different key. Rejected writes and generation-only refreshes do not
+ * increment either counter. Every path after acquisition releases the bucket with release ordering,
+ * publishing entry changes to a subsequent acquiring reader or writer.
+ *
+ * The caller must supply a valid, non-cancelled result with its bound kind already classified and
+ * its score converted to side-to-move perspective. This function does not inspect node completion,
+ * validate the move, or convert score bounds.
+ *
+ * @param table     Table borrowed by the current search; NULL disables the store.
+ * @param key       Full position hash, including the side to move.
+ * @param depth     Searched remaining depth; zero is ignored, larger values are clamped for
+ *                  storage.
+ * @param score     Proven score or bound in side-to-move perspective.
+ * @param kind      Whether score is exact, a lower bound, or an upper bound.
+ * @param best_move Selected move to retain as a future move-ordering hint.
+ * @param stats     Executing thread's private counters; required for a non-null table and depth >
+ *                  0.
+ */
+static void parallel_tt_store(XqParallelTranspositionTable *table, uint64_t key, unsigned depth,
+                              int score, XqSearchScoreKind kind, XqMove best_move,
+                              XqTranspositionStats *stats)
+{
+    ParallelTtBucket *bucket;
+    ParallelTtEntry incoming;
+    ParallelTtEntry *target = NULL;
+    int weakest_score = INT_MAX, incoming_score, i;
+    if (table == NULL || depth == 0)
+        return;
+    incoming.key = key;
+    incoming.score = score;
+    incoming.best_move = best_move;
+    incoming.depth = depth > UINT16_MAX ? UINT16_MAX : (uint16_t)depth;
+    incoming.generation = table->generation;
+    incoming.score_kind = (uint8_t)kind;
+    incoming_score = parallel_tt_retention_score(&incoming, table->generation);
+    bucket = &table->buckets[key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
+    if (!parallel_tt_try_acquire(bucket))
+        return;
+    for (i = 0; i < PARALLEL_TT_BUCKET_SIZE; ++i)
+    {
+        ParallelTtEntry *entry = &bucket->entries[i];
+        int retention;
+        if (entry->depth == 0)
+        {
+            target = entry;
+            break;
+        }
+        retention = parallel_tt_retention_score(entry, table->generation);
+        if (entry->key == key)
+        {
+            entry->generation = table->generation;
+            if (incoming_score < retention)
+                goto release;
+            target = entry;
+            break;
+        }
+        if (retention < weakest_score)
+        {
+            weakest_score = retention;
+            target = entry;
+        }
+    }
+    if (target == NULL)
+        goto release;
+    if (target->depth != 0 && target->key != key)
+    {
+        if (incoming_score < weakest_score)
+            goto release;
+        ++stats->replacements;
+    }
+    *target = incoming;
+    ++stats->stores;
+release:
+    atomic_store_explicit(&bucket->occupied, 0, memory_order_release);
+}
+
+/**
+ * @brief Moves a matching cached move to the front of the generated move list.
+ *
+ * Follows engine.c's prioritize_move behavior: matches only the from/to squares and promotes the
+ * first match, shifting preceding moves one position to the right. Retains the complete move from
+ * the current list rather than copying cached move metadata. All other moves keep their relative
+ * order, and the move count is unchanged. An absent hint, an empty list, or a match already at the
+ * front leaves the list unchanged.
+ *
+ * The cached move is only an ordering hint; this function does not add moves or validate their
+ * legality. The caller supplies the generated candidate list and must have exclusive access while
+ * it is reordered, before sharing the list or assigning child ranges to workers.
+ *
+ * @param list Non-null generated move list to reorder in place.
+ * @param move Cached move whose from/to squares identify the candidate to prioritize.
+ */
+static void parallel_tt_prioritize_move(XqMoveList *list, XqMove move)
+{
+    int i;
+    for (i = 0; i < list->count; ++i)
+        if (list->moves[i].from == move.from && list->moves[i].to == move.to)
+        {
+            XqMove prioritized = list->moves[i];
+            for (; i > 0; --i)
+                list->moves[i] = list->moves[i - 1];
+            list->moves[0] = prioritized;
+            return;
+        }
+}
+
+/**
+ * @brief Adds one set of cache counters to an existing aggregate without resetting the source.
+ *
+ * Accumulates probes, hits, cutoffs, stores and replacements field by field. Used after worker
+ * joins to merge each worker's private counters into the caller's search totals, then to add the
+ * completed search totals to the table's cumulative statistics. Each contribution must be merged
+ * only once to avoid counting the same activity again.
+ *
+ * These are ordinary, non-atomic additions. The caller must have exclusive access to the
+ * destination and ensure that the source is no longer being modified; thread joins provide that
+ * synchronization for worker counters. This function performs no synchronization itself.
+ *
+ * @param total Non-null destination aggregate to update.
+ * @param part  Non-null, distinct source counters to add; left unchanged.
+ */
+static void parallel_tt_add_stats(XqTranspositionStats *total, const XqTranspositionStats *part)
+{
+    total->probes += part->probes;
+    total->hits += part->hits;
+    total->cutoffs += part->cutoffs;
+    total->stores += part->stores;
+    total->replacements += part->replacements;
+}
 
 typedef struct Interval
 {
@@ -303,6 +773,7 @@ typedef struct Worker
     TaskCompletion *completion;
     Node *node;
     int begin, end;
+    XqTranspositionStats cache_stats; /* Written only by this physical worker thread. */
 } Worker;
 
 typedef struct Search
@@ -315,6 +786,7 @@ typedef struct Search
     XqColor root_color;
     XqEvaluateFn evaluate;
     void *evaluate_user;
+    XqTranspositionStats cache_stats; /* Caller-local during search; merged after worker joins. */
 } Search;
 
 /**
@@ -336,6 +808,108 @@ static Interval node_value(const Node *node)
                       state == NODE_CANCELLED};
     assert(state != NODE_RUNNING);
     return value;
+}
+
+/**
+ * @brief Converts a cached score and bound kind into a root-perspective search interval.
+ *
+ * First reconstructs the interval in the cached side-to-move perspective: an exact score s becomes
+ * [s, s], a lower bound becomes [s, WIN], and an upper bound becomes [-WIN, s]. WIN and -WIN
+ * delimit the search's score range. A cached cutoff therefore retains its proven bound rather than
+ * being incorrectly treated as an exact evaluation.
+ *
+ * At a MAX node the side to move is the root side, so the interval needs no conversion. At a MIN
+ * node it is the opponent: negation reverses the endpoints, mapping [L, U] to [-U, -L]. For
+ * example, an opponent-side lower bound of 100 becomes a root-side upper bound of -100, represented
+ * by [-WIN, -100].
+ *
+ * This function only converts the supplied data; it does not check the key, depth, cutoff
+ * eligibility or ancestor cancellation. The caller checks reuse eligibility before calling and
+ * checks node cancellation separately afterward. No shared state is modified.
+ *
+ * @param entry      Non-null, stable entry snapshot with a valid bound kind and score in [-WIN,
+ *                   WIN], normally copied by parallel_tt_probe().
+ * @param maximizing True if the current side to move is the root side; false for its opponent.
+ * @return           Root-perspective interval with cancelled set to false.
+ */
+static Interval parallel_tt_interval(const ParallelTtEntry *entry, bool maximizing)
+{
+    Interval value = {-WIN, WIN, false};
+    if (entry->score_kind != XQ_SEARCH_SCORE_UPPER_BOUND)
+        value.lower = entry->score;
+    if (entry->score_kind != XQ_SEARCH_SCORE_LOWER_BOUND)
+        value.upper = entry->score;
+    if (!maximizing)
+    {
+        int lower = value.lower;
+        value.lower = -value.upper;
+        value.upper = -lower;
+    }
+    return value;
+}
+
+/**
+ * @brief Classifies a completed node's proven interval and attempts to cache its result.
+ *
+ * Skips cancelled results and disabled caching. In root perspective, equal endpoints produce an
+ * exact score; otherwise upper <= alpha produces an upper-bound entry using value.upper, and lower
+ * >= beta produces a lower-bound entry using value.lower. An interval satisfying neither cutoff
+ * condition is not stored. Exact classification takes precedence over cutoffs.
+ *
+ * Parallel search inherits a window that can tighten during execution, so classification uses the
+ * proven interval rather than a scalar score compared with an original window. The stored score is
+ * always an interval endpoint, never an ancestor's alpha or beta threshold.
+ *
+ * Converts root-perspective scores to the table's side-to-move perspective before writing. MAX
+ * nodes need no conversion; MIN nodes negate the score and exchange upper/lower bound kinds,
+ * leaving exact values exact. Delegates depth handling, bucket acquisition, replacement and
+ * statistics updates to parallel_tt_store(), which may decline the optional write.
+ *
+ * The caller must finish its own work and wait for all helpers accessing this node before supplying
+ * the final interval and selected move. This function does not wait for completion; its relaxed
+ * window loads rely on that existing synchronization and the node being quiescent.
+ *
+ * @param search    Non-null search state containing the optional borrowed table.
+ * @param node      Non-null, completed node whose helper tasks have finished accessing it.
+ * @param key       Hash of the node's position, including the side to move.
+ * @param value     Final root-perspective interval; cancelled results are ignored.
+ * @param best_move Move selected from a valid child result, retained as an ordering hint.
+ * @param stats     Executing thread's private cache counters, forwarded to the store operation.
+ */
+static void parallel_tt_store_node(Search *search, const Node *node, uint64_t key, Interval value,
+                                   XqMove best_move, XqTranspositionStats *stats)
+{
+    XqSearchScoreKind kind;
+    int score;
+    if (value.cancelled || search->options.transposition_table == NULL)
+        return;
+    if (value.lower == value.upper)
+    {
+        kind = XQ_SEARCH_SCORE_EXACT;
+        score = value.lower;
+    }
+    else if (value.upper <= atomic_load_explicit(&node->alpha, memory_order_relaxed))
+    {
+        kind = XQ_SEARCH_SCORE_UPPER_BOUND;
+        score = value.upper;
+    }
+    else if (value.lower >= atomic_load_explicit(&node->beta, memory_order_relaxed))
+    {
+        kind = XQ_SEARCH_SCORE_LOWER_BOUND;
+        score = value.lower;
+    }
+    else
+        return;
+    if (!node->maximizing)
+    {
+        score = -score;
+        if (kind == XQ_SEARCH_SCORE_UPPER_BOUND)
+            kind = XQ_SEARCH_SCORE_LOWER_BOUND;
+        else if (kind == XQ_SEARCH_SCORE_LOWER_BOUND)
+            kind = XQ_SEARCH_SCORE_UPPER_BOUND;
+    }
+    parallel_tt_store(search->options.transposition_table, key, node->depth, score, kind, best_move,
+                      stats);
 }
 
 /**
@@ -490,7 +1064,8 @@ static void aggregate(Node *node, int index, Interval child)
     }
 }
 
-static Interval search_node(Search *, const XqPosition *, Node *, unsigned, XqMove *);
+static Interval search_node(Search *, const XqPosition *, Node *, unsigned, XqMove *,
+                            XqTranspositionStats *);
 
 /**
  * @brief Searches a disjoint batch of child moves without an explicit scheduling mutex.
@@ -504,8 +1079,10 @@ static Interval search_node(Search *, const XqPosition *, Node *, unsigned, XqMo
  * @param node   Parent with generated moves and positive depth; keep it and its parent chain alive.
  * @param begin  Inclusive start index of this thread's batch.
  * @param end    Exclusive end index, with 0 <= begin <= end <= node->moves.count.
+ * @param stats  Cache counters owned by the executing thread, not by the node's owner.
  */
-static void search_range(Search *search, Node *node, int begin, int end)
+static void search_range(Search *search, Node *node, int begin, int end,
+                         XqTranspositionStats *stats)
 {
     int i;
     for (i = begin; i < end; ++i)
@@ -517,7 +1094,7 @@ static void search_range(Search *search, Node *node, int begin, int end)
 
         child_position = node->position;
         xq_position_make_move(&child_position, node->moves.moves[i]);
-        child = search_node(search, &child_position, node, node->depth - 1, NULL);
+        child = search_node(search, &child_position, node, node->depth - 1, NULL, stats);
 
         if (!child.cancelled)
             aggregate(node, i, child);
@@ -556,7 +1133,7 @@ static void *worker_main(void *argument)
         if (atomic_load_explicit(&worker->state, memory_order_acquire) != WORKER_READY)
             abort();
         completion = worker->completion;
-        search_range(search, worker->node, worker->begin, worker->end);
+        search_range(search, worker->node, worker->begin, worker->end, &worker->cache_stats);
         worker->node = NULL;
         worker->begin = worker->end = 0;
         worker->completion = NULL;
@@ -666,6 +1243,10 @@ static int split_node(Search *search, Node *node, TaskCompletion **pending)
  * empty). Terminal scores are `-WIN` or `WIN` from the root perspective; accepted terminal and leaf
  * scores produce exact intervals `[score, score]`.
  *
+ * After terminal and depth-zero checks, an optional table supplies a hash move and may resolve a
+ * non-root node with a sufficiently deep exact value or cutoff bound. Bounds remain intervals; the
+ * root uses only the move hint. Cached deeper results may change fixed-depth scores.
+ *
  * For a continuing internal node, initializes all child intervals as unknown and calls
  * `split_node()` once to assign a tail batch if a helper is available. Searches the retained front
  * batch using `search_range()`, which submits child results and checks updated bounds. After its
@@ -676,9 +1257,9 @@ static int split_node(Search *search, Node *node, TaskCompletion **pending)
  * A valid cutoff result retains the node's proven interval rather than substituting an ancestor
  * threshold. If ancestor completion causes cancellation before a normal completion is published,
  * returns an interval marked `cancelled`, which callers must exclude from score aggregation. The
- * root has no ancestor thresholds and returns an exact score. For a searched root with a selected
- * child, writes `best_move` if requested; the child's proven lower bound witnesses the root score.
- * Early returns leave that output unchanged.
+ * root has no ancestor thresholds and returns a collapsed interval. For a searched root with a
+ * selected child, writes `best_move` if requested; the child's proven lower bound witnesses the
+ * root score. Early returns leave that output unchanged.
  *
  * No explicit scheduling mutex is used. Running operations are not interrupted asynchronously, so
  * ancestor changes are observed at later checkpoints. The input position is read-only, and its
@@ -690,14 +1271,17 @@ static int split_node(Search *search, Node *node, TaskCompletion **pending)
  * @param parent    Parent node, or `NULL` for the root.
  * @param depth     Remaining search depth; `0` evaluates a non-terminal leaf.
  * @param best_move Optional root move output; pass `NULL` for recursive child searches.
+ * @param stats     Cache counters owned by the executing thread throughout this recursion.
  * @return          Proven interval, exact or bounded, if `cancelled` is `false`; otherwise a
  *                  cancellation marker whose score bounds must not be used.
  */
 static Interval search_node(Search *search, const XqPosition *position, Node *parent,
-                            unsigned depth, XqMove *best_move)
+                            unsigned depth, XqMove *best_move, XqTranspositionStats *stats)
 {
     Node node = {0};
     TaskCompletion *pending;
+    Interval value;
+    uint64_t key = 0;
     int score = 0, end, i;
     bool leaf = false;
     node.parent = parent;
@@ -781,11 +1365,33 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
         (void)check_node(&node);
         return node_value(&node);
     }
+    if (search->options.transposition_table != NULL)
+    {
+        ParallelTtEntry cached;
+        bool hit;
+        int alpha = atomic_load_explicit(&node.alpha, memory_order_relaxed);
+        int beta = atomic_load_explicit(&node.beta, memory_order_relaxed);
+        key = xq_position_hash(position);
+        if (parallel_tt_probe(search->options.transposition_table, key, depth,
+                              node.maximizing ? alpha : -beta, node.maximizing ? beta : -alpha,
+                              parent == NULL, &cached, &hit, stats))
+        {
+            value = parallel_tt_interval(&cached, node.maximizing);
+            /* This node has not been shared. check_node still gives ancestor cancellation priority.
+             */
+            atomic_store_explicit(&node.value.lower, value.lower, memory_order_relaxed);
+            atomic_store_explicit(&node.value.upper, value.upper, memory_order_relaxed);
+            (void)check_node(&node);
+            return node_value(&node);
+        }
+        if (hit)
+            parallel_tt_prioritize_move(&node.moves, cached.best_move);
+    }
     for (i = 0; i < node.moves.count; ++i)
         node.children[i] = (Interval){-WIN, WIN, false};
     end = split_node(search, &node, &pending);
 
-    search_range(search, &node, 0, end);
+    search_range(search, &node, 0, end, stats);
 
     /* Node completion does not release the borrowed node: always consume the helper's notification.
      * Helpers observe cancellation themselves. A notification posted early remains available. */
@@ -801,18 +1407,22 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
      */
     (void)check_node(&node);
     assert(atomic_load_explicit(&node.state, memory_order_relaxed) != NODE_RUNNING);
-    if (best_move != NULL)
+    value = node_value(&node);
+    if (!value.cancelled)
     {
         /* Helper-completion synchronization already makes the selected child slot visible. */
         int best = atomic_load_explicit(&node.best_index, memory_order_relaxed);
         if (best >= 0)
         {
-            assert(node.children[best].lower ==
-                   atomic_load_explicit(&node.value.lower, memory_order_relaxed));
-            *best_move = node.moves.moves[best];
+            if (best_move != NULL)
+            {
+                assert(node.children[best].lower == value.lower);
+                *best_move = node.moves.moves[best];
+            }
+            parallel_tt_store_node(search, &node, key, value, node.moves.moves[best], stats);
         }
     }
-    return node_value(&node);
+    return value;
 }
 
 /**
@@ -840,9 +1450,40 @@ static void stop_pool(Search *search)
     for (i = 0; i < search->worker_count; ++i)
         if (pthread_join(search->workers[i].thread, NULL) != 0)
             abort();
+    for (i = 0; i < search->worker_count; ++i)
+        parallel_tt_add_stats(&search->cache_stats, &search->workers[i].cache_stats);
     for (i = 0; i < search->initialized_worker_count; ++i)
         search_semaphore_destroy(&search->workers[i].task_available);
     free(search->workers);
+}
+#else
+/* Keep the public cache API linkable where parallel search itself is unsupported. */
+XqParallelTranspositionTable *xq_parallel_transposition_table_create(void)
+{
+    return NULL;
+}
+
+void xq_parallel_transposition_table_clear(XqParallelTranspositionTable *table)
+{
+    (void)table;
+}
+
+void xq_parallel_transposition_table_destroy(XqParallelTranspositionTable *table)
+{
+    (void)table;
+}
+
+void xq_parallel_transposition_table_reset_stats(XqParallelTranspositionTable *table)
+{
+    (void)table;
+}
+
+void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTable *table,
+                                               XqTranspositionStats *stats)
+{
+    (void)table;
+    if (stats != NULL)
+        memset(stats, 0, sizeof(*stats));
 }
 #endif
 
@@ -860,9 +1501,10 @@ static void stop_pool(Search *search)
  * `xq_engine_default_static_evaluate`; ordinary leaf scores are clamped to [-STATIC_LIMIT,
  * STATIC_LIMIT], while terminal wins and losses receive WIN and -WIN. Terminal positions are
  * checked before the depth limit, and having no legal moves is a loss even without check. On
- * success, returns the exact root value for the requested depth and a best move when available.
- * Terminal roots also succeed but have `move_available == false`; callers must check that flag
- * before using `best_move`. Equal-score move selection may depend on thread scheduling.
+ * success, returns a root value and a best move when available. Without caching, the value is exact
+ * for the requested depth; an enabled table may reuse results from greater depths. Terminal roots
+ * also succeed but have `move_available == false`; callers must check that flag before using
+ * `best_move`. Equal-score move selection may depend on thread scheduling.
  *
  * Evaluators may be called concurrently; the callback and its user data must support this and must
  * not modify positions. Scheduling uses atomic states and semaphores, without explicit mutexes.
@@ -871,10 +1513,10 @@ static void stop_pool(Search *search)
  * for that node; failure to create the initial worker pool returns a resource error.
  *
  * Zeroes a non-null `result` before validating arguments, leaving it zeroed on failure. On success,
- * fills the move and score. No trace, timing or search counters are collected. Joins all created
- * helpers and releases initialized resources before returning, including after partial
- * thread-creation failure. The input position is never modified, and no helper remains running
- * after the call.
+ * fills the move and score. Cache counters accumulate on the optional borrowed table; no trace,
+ * timing or other search counters are collected. Joins all created helpers and releases initialized
+ * resources before returning, including after partial thread-creation failure. The input position
+ * is never modified, and no helper remains running after the call.
  *
  * @param pos                           Root position; must not be null and must remain valid and
  *                                      unchanged during the call. Its side to move must be XQ_RED
@@ -949,12 +1591,16 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
             }
             ++search.worker_count;
         }
-        value = search_node(&search, pos, NULL, effective.depth, &best);
+        parallel_tt_new_search(effective.transposition_table, search.evaluate, search.evaluate_user,
+                               search.root_color);
+        value = search_node(&search, pos, NULL, effective.depth, &best, &search.cache_stats);
         assert(!value.cancelled && value.lower == value.upper);
         result->score = value.lower;
         result->best_move = best;
         result->move_available = best.from != best.to;
         stop_pool(&search);
+        if (effective.transposition_table != NULL)
+            parallel_tt_add_stats(&effective.transposition_table->stats, &search.cache_stats);
         return XQ_PARALLEL_OK;
     }
 #endif

@@ -45,7 +45,7 @@ static void print_usage(const char *program)
     printf("  --search builtin|parallel  search implementation (default builtin)\n");
     printf("  --threads N                parallel threads including caller (default 2)\n");
     printf("  --split-percent P          parallel batch percentage, 0..100 (default 50)\n");
-    printf("  parallel: fixed depth (default 3), no time limit or transposition table\n");
+    printf("  parallel: fixed depth (default 3), in-memory cache, no time limit or TT files\n");
     printf("  %-21s  %s\n", "-f, --fen FEN", "initialize the position from FEN");
     printf("  %-21s  %s\n", "-e, --engine COLOR", "choose the engine side: red or black");
     printf("  %-21s  %s\n", "    --depth N", "search depth in plies (builtin default 10; parallel fixed default 3)");
@@ -603,7 +603,7 @@ int main(int argc, char **argv)
 
     if ((!parallel && parallel_options_set) || (parallel && (explicit_time || tt_file != NULL)))
     {
-        fprintf(stderr, "error: parallel options require --search parallel; parallel search has no time limit or TT\n");
+        fprintf(stderr, "error: parallel options require --search parallel; parallel search accepts neither time limits nor TT files\n");
         return EXIT_FAILURE;
     }
 #ifdef _WIN32
@@ -647,6 +647,12 @@ int main(int argc, char **argv)
         }
         printf("Loaded transposition table from: %s\n", tt_file);
     }
+    if (parallel)
+    {
+        parallel_options.transposition_table = xq_parallel_transposition_table_create();
+        if (parallel_options.transposition_table == NULL)
+            fprintf(stderr, "warning: parallel transposition table allocation failed; continuing without cache\n");
+    }
     engine.static_evaluate = NULL;
     engine.search = NULL;
     engine.user = NULL;
@@ -660,8 +666,9 @@ int main(int argc, char **argv)
     if (search_detail)
         search_log = open_search_detail(&pos, engine_color);
     if (parallel)
-        printf("Search mode: parallel, fixed depth %u, threads %u, split %u%%; no time limit or cache.\n",
-               parallel_options.depth, parallel_options.thread_count, parallel_options.split_percent);
+        printf("Search mode: parallel, fixed depth %u, threads %u, split %u%%; no time limit; in-memory cache %s.\n",
+               parallel_options.depth, parallel_options.thread_count, parallel_options.split_percent,
+               parallel_options.transposition_table != NULL ? "enabled" : "disabled");
 
     printf("Xiangqi demo: human %s vs %s %s engine\n",
            color_name(xq_color_opponent(engine_color)), parallel ? "parallel" : "builtin",
@@ -761,7 +768,7 @@ int main(int argc, char **argv)
             XqTranspositionIoStatus status;
             if (parallel)
             {
-                printf("Parallel search has no transposition table to save.\n");
+                printf("Parallel search has no transposition table file support.\n");
                 continue;
             }
             path = parse_save_path(input + 7);
@@ -880,6 +887,7 @@ int main(int argc, char **argv)
     }
 
     xq_transposition_table_destroy(table);
+    xq_parallel_transposition_table_destroy(parallel_options.transposition_table);
     xq_history_destroy(&history);
     if (search_log != NULL && fclose(search_log) == EOF)
         fprintf(stderr, "warning: cannot close %s\n", search_detail_path);
