@@ -21,17 +21,26 @@
 #include <unistd.h>
 #endif
 
+/**
+ * @brief Base material values indexed by `XqPieceType`, in the engine's score units.
+ *
+ * Both colors share these values. Static evaluation adds the corresponding bonus from
+ * `piece_square_values` to each piece's base value. These values also guide capture ordering,
+ * favoring more valuable captured pieces and less valuable attacking pieces.
+ *
+ * These values depend only on piece type; they do not account for position or game phase.
+ * Unspecified entries are zero.
+ */
 static const int piece_values[XQ_PIECE_TYPE_NB] = {
     [XQ_KING] = 10000, [XQ_ADVISOR] = 120, [XQ_BISHOP] = 120, [XQ_KNIGHT] = 270,
     [XQ_ROOK] = 600,   [XQ_CANNON] = 285,  [XQ_PAWN] = 70,
 };
 
-/*
- * Positional bonuses added to `piece_values`, in the same score units. These are conservative
- * hand-selected starting values, not parameters tuned through self-play.
+/**
+ * @brief Positional bonuses added to `piece_values`, in the same score units.
  *
- * Rows run from the piece owner's home rank (0) to the opponent's home rank (9), unlike FEN's
- * display order. Red uses the board rank directly; Black uses 9 - rank. Every row is symmetric
+ * Rows run from the piece owner's home rank (`0`) to the opponent's home rank (`9`), unlike FEN's
+ * display order. Red uses the board rank directly; Black uses `9 - rank`. Every row is symmetric
  * across files, so both colors share the tables without a file reversal.
  *
  * These tables describe location only; they do not account for attacks, blocked horse legs, cannon
@@ -113,82 +122,76 @@ static const int piece_square_values[XQ_PIECE_TYPE_NB][XQ_RANKS][XQ_FILES] =
             },
 };
 
-static const int legal_move_values[XQ_PIECE_TYPE_NB] = {
-    [XQ_KING] = 10, [XQ_ADVISOR] = 10, [XQ_BISHOP] = 10, [XQ_KNIGHT] = 20,
-    [XQ_ROOK] = 20, [XQ_CANNON] = 15,  [XQ_PAWN] = 10,
-};
-
 enum
 {
-    CAPTURE_ORDER_BASE = 100000,
-    /* Strictly exceed this completed-root percentage to finish the iteration after timeout. */
+    CAPTURE_ORDER_BASE                    = 100000,
     XQ_FINISH_ITERATION_THRESHOLD_PERCENT = 50,
-    XQ_MAX_QUIESCENCE_DEPTH = 500,
-    XQ_MAX_PV_MOVES = 64,
-    XQ_MATE_SCORE = 30000,
-    XQ_MAX_STATIC_SCORE = 28999,
-    XQ_TT_BUCKET_SIZE = 4,
-    XQ_TT_BUCKET_COUNT = 1 << 18
+    XQ_MAX_QUIESCENCE_DEPTH               = 500,
+    XQ_MAX_PV_MOVES                       = 64,
+    XQ_MATE_SCORE                         = 30000,
+    XQ_MAX_STATIC_SCORE                   = 28999,
+    XQ_TT_BUCKET_SIZE                     = 4,
+    XQ_TT_BUCKET_COUNT                    = 1 << 18
 };
 
 typedef struct ScoredMove
 {
-    XqMove move;
-    int score;
+    XqMove   move;
+    int      score;
     unsigned completed_depth;
 } ScoredMove;
 
 typedef struct SearchContext
 {
-    uint64_t deadline_ms;
-    uint64_t nodes;
-    unsigned iteration_completed_moves;
-    unsigned iteration_total_moves;
-    bool time_limited;
-    bool deadline_reached;
-    bool finish_iteration;
-    bool stopped;
+    uint64_t         deadline_ms;
+    uint64_t         nodes;
+    unsigned         iteration_completed_moves;
+    unsigned         iteration_total_moves;
+    bool             time_limited;
+    bool             deadline_reached;
+    bool             finish_iteration;
+    bool             stopped;
     XqSearchTimeMode time_mode;
 } SearchContext;
 
 /* Only one exact path can match at a time, so no full search tree is retained. */
 typedef struct PathTrace
 {
-    const XqMove *path;
-    size_t count;
-    bool matching;
-    unsigned root_depth;
-    XqPathExplainResult current;
+    const XqMove        *path;
+    size_t               count;
+    bool                 matching;
+    unsigned             root_depth;
+    XqPathExplainResult  current;
     XqPathExplainResult *saved;
-    XqMoveList ordered;
-    int order_scores[XQ_MAX_MOVES];
-    XqExplainTtBlock blocked_tt;
+    XqMoveList           ordered;
+    int                  order_scores[XQ_MAX_MOVES];
+    XqExplainTtBlock     blocked_tt;
 } PathTrace;
 
 /* Explanation state borrows its own root driver's ordinary timing/counter context.
  * Ordinary negamax and quiescence remain independent of path records. */
 typedef struct ExplainContext
 {
-    SearchContext *search; /* Valid only while builtin_search_for_explain is running. */
-    PathTrace *trace;
+    SearchContext        *search; /* Valid only while builtin_search_for_explain is running. */
+    PathTrace            *trace;
     XqTranspositionTable *table; /* Borrowed for this search, shared by all branches. */
-    XqRootSearchExplain root;
+    XqRootSearchExplain   root;
 } ExplainContext;
 
 typedef struct PrincipalVariation
 {
     XqMove moves[XQ_MAX_PV_MOVES];
-    int count;
+    int    count;
 } PrincipalVariation;
 
 typedef struct XqTranspositionEntry
 {
     uint64_t key;
-    int score;
-    XqMove best_move;
+    int      score;
+    XqMove   best_move;
     uint16_t depth;
-    uint8_t generation;
-    uint8_t score_kind;
+    uint8_t  generation;
+    uint8_t  score_kind;
 } XqTranspositionEntry;
 
 typedef struct XqTranspositionBucket
@@ -199,8 +202,8 @@ typedef struct XqTranspositionBucket
 struct XqTranspositionTable
 {
     XqTranspositionBucket *buckets; // size: 1 << 18
-    uint8_t generation;
-    XqTranspositionStats stats;
+    uint8_t                generation;
+    XqTranspositionStats   stats;
 };
 
 /* Bump FORMAT_VERSION when the wire layout changes. Bump ENGINE_VERSION whenever evaluation,
@@ -208,8 +211,8 @@ struct XqTranspositionTable
  * maintained, not inferred from source edits. Only the built-in engine's cache is supported. */
 enum
 {
-    XQ_TT_FORMAT_VERSION = 1,
-    XQ_TT_ENGINE_VERSION = 2,
+    XQ_TT_FORMAT_VERSION   = 1,
+    XQ_TT_ENGINE_VERSION   = 2,
     XQ_TT_FILE_HEADER_SIZE = 32,
     XQ_TT_FILE_RECORD_SIZE = 24
 };
@@ -319,7 +322,7 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
     if (limits->time_limit_ms == 0)
         return;
 
-    now = search_time_ms(context->time_mode);
+    now                   = search_time_ms(context->time_mode);
     context->time_limited = true;
     if (now < 0)
     {
@@ -476,7 +479,7 @@ void xq_transposition_table_reset_stats(XqTranspositionTable *table)
  * @param stats The output parameter used for receiving statistics from `table`.
  */
 void xq_transposition_table_get_stats(const XqTranspositionTable *table,
-                                      XqTranspositionStats *stats)
+                                      XqTranspositionStats       *stats)
 {
     if (stats == NULL)
         return;
@@ -616,7 +619,7 @@ static bool tt_read_bytes(FILE *file, unsigned char *data, size_t size, uint32_t
  */
 static FILE *tt_open_temporary(char *path, size_t capacity)
 {
-    int fd;
+    int   fd;
     FILE *file;
 #ifdef _WIN32
     if (_mktemp_s(path, capacity) != 0)
@@ -665,18 +668,18 @@ static FILE *tt_open_temporary(char *path, size_t capacity)
  *              XQ_TT_IO_FILE_ERROR for temporary-file, write, close, or replacement failures.
  */
 XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *table,
-                                                    const char *path)
+                                                    const char                 *path)
 {
-    unsigned char header[XQ_TT_FILE_HEADER_SIZE] = {0};
-    unsigned char record[XQ_TT_FILE_RECORD_SIZE];
-    unsigned char trailer[4];
-    uint32_t count = 0;
-    uint32_t crc = UINT32_MAX;
-    uint32_t slot;
-    size_t path_size;
-    char *temporary;
-    FILE *file;
-    bool written;
+    unsigned char           header[XQ_TT_FILE_HEADER_SIZE] = {0};
+    unsigned char           record[XQ_TT_FILE_RECORD_SIZE];
+    unsigned char           trailer[4];
+    uint32_t                count = 0;
+    uint32_t                crc   = UINT32_MAX;
+    uint32_t                slot;
+    size_t                  path_size;
+    char                   *temporary;
+    FILE                   *file;
+    bool                    written;
     XqTranspositionIoStatus status = XQ_TT_IO_FILE_ERROR;
 
     if (table == NULL || path == NULL || *path == '\0')
@@ -706,7 +709,7 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
     tt_put_le(header + 20, XQ_TT_BUCKET_SIZE, 4);
     tt_put_le(header + 24, count, 4);
     header[28] = table->generation;
-    written = tt_write_bytes(file, header, sizeof(header), &crc);
+    written    = tt_write_bytes(file, header, sizeof(header), &crc);
     for (slot = 0; written && slot < XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE; ++slot)
     {
         const XqTranspositionEntry *entry =
@@ -725,7 +728,7 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
         record[23] = entry->best_move.captured == XQ_EMPTY_PIECE
                          ? 255
                          : (unsigned char)entry->best_move.captured;
-        written = tt_write_bytes(file, record, sizeof(record), &crc);
+        written    = tt_write_bytes(file, record, sizeof(record), &crc);
     }
     tt_put_le(trailer, crc ^ UINT32_MAX, 4);
     if (written)
@@ -768,15 +771,19 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
  */
 XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table, const char *path)
 {
-    unsigned char header[XQ_TT_FILE_HEADER_SIZE];
-    unsigned char record[XQ_TT_FILE_RECORD_SIZE];
-    unsigned char trailer[4];
-    uint32_t crc = UINT32_MAX;
-    uint32_t count;
-    uint32_t i;
-    XqTranspositionBucket *buckets = NULL;
-    FILE *file;
-    XqTranspositionIoStatus status = XQ_TT_IO_INVALID_FORMAT;
+    unsigned char           header[XQ_TT_FILE_HEADER_SIZE];
+    unsigned char           record[XQ_TT_FILE_RECORD_SIZE];
+    unsigned char           trailer[4];
+    uint32_t                crc;
+    uint32_t                count;
+    uint32_t                i;
+    XqTranspositionBucket  *buckets;
+    FILE                   *file;
+    XqTranspositionIoStatus status;
+
+    crc     = UINT32_MAX;
+    buckets = NULL;
+    status  = XQ_TT_IO_INVALID_FORMAT;
 
     if (table == NULL || path == NULL || *path == '\0')
         return XQ_TT_IO_INVALID_ARGUMENT;
@@ -807,19 +814,19 @@ XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
     }
     for (i = 0; i < count; ++i)
     {
-        uint32_t slot;
-        uint32_t encoded_score;
-        int64_t score;
-        uint64_t key;
+        uint32_t              slot;
+        uint32_t              encoded_score;
+        int64_t               score;
+        uint64_t              key;
         XqTranspositionEntry *entry;
 
         if (!tt_read_bytes(file, record, sizeof(record), &crc))
             goto done;
-        slot = (uint32_t)tt_get_le(record, 4);
-        key = tt_get_le(record + 4, 8);
+        slot          = (uint32_t)tt_get_le(record, 4);
+        key           = tt_get_le(record + 4, 8);
         encoded_score = (uint32_t)tt_get_le(record + 12, 4);
-        score = encoded_score <= INT32_MAX ? (int64_t)encoded_score
-                                           : (int64_t)encoded_score - INT64_C(4294967296);
+        score         = encoded_score <= INT32_MAX ? (int64_t)encoded_score
+                                                   : (int64_t)encoded_score - INT64_C(4294967296);
         /* Version 2 stores ordinary bounded evaluations or fixed win/loss scores. */
         if (slot >= XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE ||
             slot / XQ_TT_BUCKET_SIZE != (key & (XQ_TT_BUCKET_COUNT - 1u)) ||
@@ -837,13 +844,13 @@ XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
         entry = &buckets[slot / XQ_TT_BUCKET_SIZE].entries[slot % XQ_TT_BUCKET_SIZE];
         if (entry->depth != 0)
             goto done;
-        entry->key = key;
-        entry->score = (int)score;
-        entry->depth = (uint16_t)tt_get_le(record + 16, 2);
+        entry->key        = key;
+        entry->score      = (int)score;
+        entry->depth      = (uint16_t)tt_get_le(record + 16, 2);
         entry->generation = record[18];
         entry->score_kind = record[19];
-        entry->best_move = (XqMove){record[20], record[21], (int8_t)record[22],
-                                    record[23] == 255 ? XQ_EMPTY_PIECE : (int8_t)record[23]};
+        entry->best_move  = (XqMove){record[20], record[21], (int8_t)record[22],
+                                     record[23] == 255 ? XQ_EMPTY_PIECE : (int8_t)record[23]};
     }
     if (!tt_read_bytes(file, trailer, sizeof(trailer), NULL) ||
         tt_get_le(trailer, 4) != (crc ^ UINT32_MAX) || fgetc(file) != EOF)
@@ -858,8 +865,8 @@ done:
     if (status == XQ_TT_IO_OK)
     {
         XqTranspositionBucket *old = table->buckets;
-        table->buckets = buckets;
-        table->generation = header[28];
+        table->buckets             = buckets;
+        table->generation          = header[28];
         memset(&table->stats, 0, sizeof(table->stats));
         buckets = old;
     }
@@ -879,9 +886,9 @@ XqSearchLimits xq_search_limits_default(void)
 {
     XqSearchLimits limits;
 
-    limits.max_depth = 10;
+    limits.max_depth     = 10;
     limits.time_limit_ms = 3000;
-    limits.time_mode = XQ_SEARCH_TIME_MONOTONIC;
+    limits.time_mode     = XQ_SEARCH_TIME_MONOTONIC;
     return limits;
 }
 
@@ -921,7 +928,7 @@ static void tt_new_generation(XqTranspositionTable *table)
 static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table, uint64_t key)
 {
     XqTranspositionBucket *bucket;
-    int i;
+    int                    i;
 
     if (table == NULL)
         return NULL;
@@ -991,7 +998,7 @@ static bool tt_probe(XqTranspositionTable *table, uint64_t key, unsigned depth, 
                      XqSearchScoreKind *score_kind)
 {
     XqTranspositionEntry *entry;
-    int cached_score;
+    int                   cached_score;
 
     if (has_hash_move != NULL)
         *has_hash_move = false;
@@ -1060,7 +1067,7 @@ static bool tt_get_hash_move(XqTranspositionTable *table, uint64_t key, XqMove *
 
     ++table->stats.hits;
     entry->generation = table->generation;
-    *hash_move = entry->best_move;
+    *hash_move        = entry->best_move;
     return true;
 }
 
@@ -1079,8 +1086,8 @@ static bool tt_get_hash_move(XqTranspositionTable *table, uint64_t key, XqMove *
  */
 static int tt_retention_score(const XqTranspositionEntry *entry, uint8_t current_generation)
 {
-    unsigned age = (uint8_t)(current_generation - entry->generation);
-    int type_bonus = entry->score_kind == XQ_SEARCH_SCORE_EXACT ? 3 : 0;
+    unsigned age        = (uint8_t)(current_generation - entry->generation);
+    int      type_bonus = entry->score_kind == XQ_SEARCH_SCORE_EXACT ? 3 : 0;
 
     return (int)entry->depth * 8 - (int)age * 4 + type_bonus;
 }
@@ -1106,28 +1113,28 @@ static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, 
                      XqSearchScoreKind score_kind, XqMove best_move)
 {
     XqTranspositionBucket *bucket;
-    XqTranspositionEntry incoming;
-    XqTranspositionEntry *target = NULL;
-    int weakest_score = INT_MAX;
-    int incoming_score;
-    int i;
+    XqTranspositionEntry   incoming;
+    XqTranspositionEntry  *target        = NULL;
+    int                    weakest_score = INT_MAX;
+    int                    incoming_score;
+    int                    i;
 
     if (table == NULL || depth == 0)
         return;
 
-    incoming.key = key;
-    incoming.score = score;
-    incoming.best_move = best_move;
-    incoming.depth = depth > UINT16_MAX ? UINT16_MAX : (uint16_t)depth;
+    incoming.key        = key;
+    incoming.score      = score;
+    incoming.best_move  = best_move;
+    incoming.depth      = depth > UINT16_MAX ? UINT16_MAX : (uint16_t)depth;
     incoming.generation = table->generation;
     incoming.score_kind = (uint8_t)score_kind;
-    incoming_score = tt_retention_score(&incoming, table->generation);
+    incoming_score      = tt_retention_score(&incoming, table->generation);
 
     bucket = &table->buckets[key & (XQ_TT_BUCKET_COUNT - 1u)];
     for (i = 0; i < XQ_TT_BUCKET_SIZE; ++i)
     {
         XqTranspositionEntry *entry = &bucket->entries[i];
-        int retention;
+        int                   retention;
 
         if (entry->depth == 0)
         {
@@ -1148,7 +1155,7 @@ static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, 
         if (retention < weakest_score)
         {
             weakest_score = retention;
-            target = entry;
+            target        = entry;
         }
     }
 
@@ -1163,27 +1170,6 @@ static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, 
 
     *target = incoming;
     ++table->stats.stores;
-}
-
-/**
- * @brief Computes the mobility value of all legal moves available to one side.
- *
- * @param pos   Position whose legal moves are evaluated; must not be null.
- * @param color Side for which to generate and score legal moves.
- * @return      Sum of the piece-specific mobility values for all generated legal moves.
- */
-static int evaluate_legal_moves(const XqPosition *pos, XqColor color)
-{
-    XqPosition evaluation_pos = *pos;
-    XqMoveList legal;
-    int score = 0;
-    int i;
-
-    evaluation_pos.side_to_move = color;
-    xq_generate_legal(&evaluation_pos, &legal);
-    for (i = 0; i < legal.count; ++i)
-        score += legal_move_values[xq_piece_type(legal.moves[i].piece)];
-    return score;
 }
 
 /**
@@ -1207,9 +1193,9 @@ static int evaluate_side(const XqPosition *pos, XqColor color)
 
         while (!xq_bb_is_empty(remaining))
         {
-            XqSquare sq = xq_bb_first_square(remaining);
-            int rank = xq_square_rank(sq);
-            int file = xq_square_file(sq);
+            XqSquare sq   = xq_bb_first_square(remaining);
+            int      rank = xq_square_rank(sq);
+            int      file = xq_square_file(sq);
 
             xq_bb_clear(&remaining, sq);
             if (color == XQ_BLACK)
@@ -1236,7 +1222,7 @@ static int evaluate_side(const XqPosition *pos, XqColor color)
 int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user)
 {
     XqColor opponent = xq_color_opponent(perspective);
-    int score;
+    int     score;
 
     (void)user;
     score = evaluate_side(pos, perspective) - evaluate_side(pos, opponent);
@@ -1339,14 +1325,14 @@ static int move_order_score(const XqEngineAdapter *engine, const XqPosition *pos
 static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list)
 {
     ScoredMove ordered[XQ_MAX_MOVES];
-    int i;
+    int        i;
 
     for (i = 0; i < list->count; ++i)
     {
         ScoredMove current;
-        int j = i;
+        int        j = i;
 
-        current.move = list->moves[i];
+        current.move  = list->moves[i];
         current.score = move_order_score(engine, pos, current.move);
         while (j > 0 && ordered[j - 1].score < current.score)
         {
@@ -1375,7 +1361,7 @@ static void order_root_moves(ScoredMove *moves, int count)
     for (i = 1; i < count; ++i)
     {
         ScoredMove current = moves[i];
-        int j = i;
+        int        j       = i;
 
         while (j > 0 && moves[j - 1].score < current.score)
         {
@@ -1481,15 +1467,15 @@ static void build_principal_variation(PrincipalVariation *pv, XqMove move,
 static void build_pv_from_tt(XqTranspositionTable *table, XqPosition *pos, unsigned depth,
                              PrincipalVariation *pv)
 {
-    unsigned remaining = depth;
-    int made_count = 0;
+    unsigned remaining  = depth;
+    int      made_count = 0;
 
     pv->count = 0;
     while (remaining > 0 && pv->count < XQ_MAX_PV_MOVES)
     {
         XqTranspositionEntry *entry = tt_find_entry(table, xq_position_hash(pos));
-        XqMoveList list;
-        int i;
+        XqMoveList            list;
+        int                   i;
 
         if (entry == NULL || entry->score_kind != XQ_SEARCH_SCORE_EXACT ||
             (unsigned)entry->depth < remaining)
@@ -1502,7 +1488,7 @@ static void build_pv_from_tt(XqTranspositionTable *table, XqPosition *pos, unsig
         if (i == list.count)
             break;
 
-        entry->generation = table->generation;
+        entry->generation      = table->generation;
         pv->moves[pv->count++] = list.moves[i];
         xq_position_make_move(pos, list.moves[i]);
         ++made_count;
@@ -1529,14 +1515,14 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
                                     XqMoveList *list, int *scores)
 {
     ScoredMove ordered[XQ_MAX_MOVES];
-    int i;
+    int        i;
 
     for (i = 0; i < list->count; ++i)
     {
         ScoredMove current;
-        int j = i;
+        int        j = i;
 
-        current.move = list->moves[i];
+        current.move  = list->moves[i];
         current.score = move_order_score(engine, pos, current.move);
         while (j > 0 && ordered[j - 1].score < current.score)
         {
@@ -1549,7 +1535,7 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
     for (i = 0; i < list->count; ++i)
     {
         list->moves[i] = ordered[i].move;
-        scores[i] = ordered[i].score;
+        scores[i]      = ordered[i].score;
     }
 }
 
@@ -1587,10 +1573,10 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
                       int beta, SearchContext *context)
 {
     XqMoveList list;
-    bool in_check;
-    int best = INT_MIN / 2;
-    int stand_pat;
-    int i;
+    bool       in_check;
+    int        best = INT_MIN / 2;
+    int        stand_pat;
+    int        i;
 
     if (search_enter_node(context))
         return 0;
@@ -1612,7 +1598,7 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
     if (!in_check)
     {
         stand_pat = static_evaluate(engine, pos, pos->side_to_move);
-        best = stand_pat;
+        best      = stand_pat;
         if (stand_pat >= beta)
             return stand_pat;
         if (stand_pat > alpha)
@@ -1724,18 +1710,18 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
                    unsigned depth, int alpha, int beta, const XqMove *pv_hint, int pv_hint_count,
                    PrincipalVariation *pv_out, SearchContext *context)
 {
-    XqMoveList list;
-    int best = INT_MIN / 2;
-    int alpha_original = alpha;
-    uint64_t key;
-    XqMove hash_move = {0};
-    XqMove node_best_move = {0};
-    bool has_hash_move = false;
-    bool has_best_move = false;
-    bool pv_move_found = false;
-    XqSearchScoreKind cached_kind = XQ_SEARCH_SCORE_UPPER_BOUND;
-    int cached_score;
-    int i;
+    XqMoveList        list;
+    int               best           = INT_MIN / 2;
+    int               alpha_original = alpha;
+    uint64_t          key;
+    XqMove            hash_move      = {0};
+    XqMove            node_best_move = {0};
+    bool              has_hash_move  = false;
+    bool              has_best_move  = false;
+    bool              pv_move_found  = false;
+    XqSearchScoreKind cached_kind    = XQ_SEARCH_SCORE_UPPER_BOUND;
+    int               cached_score;
+    int               i;
 
     if (pv_out != NULL)
         pv_out->count = 0;
@@ -1776,13 +1762,13 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
     for (i = 0; i < list.count; ++i)
     {
         PrincipalVariation child_pv;
-        const XqMove *child_hint = NULL;
-        int child_hint_count = 0;
-        int score;
+        const XqMove      *child_hint       = NULL;
+        int                child_hint_count = 0;
+        int                score;
 
         if (pv_move_found && moves_equal(list.moves[i], pv_hint[0]))
         {
-            child_hint = pv_hint + 1;
+            child_hint       = pv_hint + 1;
             child_hint_count = pv_hint_count - 1;
         }
 
@@ -1794,9 +1780,9 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
             return 0;
         if (score > best)
         {
-            best = score;
+            best           = score;
             node_best_move = list.moves[i];
-            has_best_move = true;
+            has_best_move  = true;
             if (pv_out != NULL)
                 build_principal_variation(pv_out, list.moves[i], &child_pv);
         }
@@ -1920,11 +1906,11 @@ static bool root_cycle_is_loss(const XqHistory *history, size_t start, size_t le
  */
 static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMoveList *list)
 {
-    bool rejected[XQ_MAX_MOVES] = {false};
+    bool   rejected[XQ_MAX_MOVES] = {false};
     size_t end;
     size_t length;
-    int count = 0;
-    int original_count = list->count;
+    int    count          = 0;
+    int    original_count = list->count;
 
     if (history == NULL || history->count == 0 ||
         history->entries[history->count - 1].key != xq_position_hash(pos))
@@ -1933,13 +1919,13 @@ static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMove
     end = history->count;
     for (length = 2; length <= end / 3; length += 2)
     {
-        size_t start = end - 3 * length;
-        size_t second = start + length;
-        size_t third = second + length;
-        uint64_t key = history->entries[start].key;
-        size_t j;
-        int i;
-        bool closed;
+        size_t   start  = end - 3 * length;
+        size_t   second = start + length;
+        size_t   third  = second + length;
+        uint64_t key    = history->entries[start].key;
+        size_t   j;
+        int      i;
+        bool     closed;
 
         if (history->entries[second].key != key || history->entries[third].key != key ||
             history_path_hash(history, start, second) !=
@@ -2016,19 +2002,19 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
                            const XqSearchLimits *limits, XqMove *best_move, XqSearchStats *stats,
                            XqSearchProgressFn progress, void *progress_user)
 {
-    XqMoveList list;
-    ScoredMove root_moves[XQ_MAX_MOVES];
-    ScoredMove completed_moves[XQ_MAX_MOVES];
-    PrincipalVariation previous_pv = {0};
-    XqTranspositionTable *table = engine != NULL ? engine->transposition_table : NULL;
-    uint64_t root_key;
-    XqMove hash_move;
-    SearchContext context;
-    bool filtered_cycles;
-    bool winning_move_found = false;
-    unsigned depth = limits->max_depth == 0 ? 1 : limits->max_depth;
-    unsigned current_depth;
-    int i;
+    XqMoveList            list;
+    ScoredMove            root_moves[XQ_MAX_MOVES];
+    ScoredMove            completed_moves[XQ_MAX_MOVES];
+    PrincipalVariation    previous_pv = {0};
+    XqTranspositionTable *table       = engine != NULL ? engine->transposition_table : NULL;
+    uint64_t              root_key;
+    XqMove                hash_move;
+    SearchContext         context;
+    bool                  filtered_cycles;
+    bool                  winning_move_found = false;
+    unsigned              depth              = limits->max_depth == 0 ? 1 : limits->max_depth;
+    unsigned              current_depth;
+    int                   i;
 
     if (pos == NULL || xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
         return false;
@@ -2046,7 +2032,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
     if (stats != NULL)
         stats->stopped = context.stopped || context.deadline_reached;
 
-    *best_move = list.moves[0];
+    *best_move      = list.moves[0];
     filtered_cycles = filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
     context.iteration_total_moves = (unsigned)list.count;
     if (stats != NULL)
@@ -2056,19 +2042,19 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
 
     for (i = 0; i < list.count; ++i)
     {
-        root_moves[i].move = list.moves[i];
-        root_moves[i].score = INT_MIN / 2;
+        root_moves[i].move            = list.moves[i];
+        root_moves[i].score           = INT_MIN / 2;
         root_moves[i].completed_depth = 0;
     }
     *best_move = root_moves[0].move;
 
     for (current_depth = 1;; ++current_depth)
     {
-        PrincipalVariation current_pv = {0};
-        int alpha = INT_MIN / 2;
-        int beta = INT_MAX / 2;
-        int completed_roots = 0;
-        int current_best_index = 0;
+        PrincipalVariation current_pv         = {0};
+        int                alpha              = INT_MIN / 2;
+        int                beta               = INT_MAX / 2;
+        int                completed_roots    = 0;
+        int                current_best_index = 0;
 
         /* Reset before checking time so the previous iteration cannot authorize an extension. */
         context.iteration_completed_moves = 0;
@@ -2086,9 +2072,9 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
         for (i = 0; i < list.count; ++i)
         {
             PrincipalVariation child_pv;
-            const XqMove *child_hint = NULL;
-            int child_hint_count = 0;
-            int score;
+            const XqMove      *child_hint       = NULL;
+            int                child_hint_count = 0;
+            int                score;
 
             if (search_check_time(&context, true))
                 break;
@@ -2102,7 +2088,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             }
             if (previous_pv.count > 0 && moves_equal(root_moves[i].move, previous_pv.moves[0]))
             {
-                child_hint = previous_pv.moves + 1;
+                child_hint       = previous_pv.moves + 1;
                 child_hint_count = previous_pv.count - 1;
             }
 
@@ -2114,7 +2100,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             if (context.stopped)
                 break;
 
-            root_moves[i].score = score;
+            root_moves[i].score           = score;
             root_moves[i].completed_depth = current_depth;
             ++completed_roots;
             context.iteration_completed_moves = (unsigned)completed_roots;
@@ -2123,7 +2109,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             if (score > alpha)
             {
                 current_best_index = i;
-                alpha = score;
+                alpha              = score;
                 build_principal_variation(&current_pv, root_moves[i].move, &child_pv);
             }
 
@@ -2157,7 +2143,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             /* This iteration supplies the move; unsearched rows must not retain older scores. */
             for (i = completed_roots; i < list.count; ++i)
             {
-                root_moves[i].score = INT_MIN / 2;
+                root_moves[i].score           = INT_MIN / 2;
                 root_moves[i].completed_depth = 0;
             }
             /* Keep root cache writes restricted to fully searched iterations. */
@@ -2179,7 +2165,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             stats->completed_depth = current_depth;
         order_root_moves(root_moves, list.count);
         memcpy(completed_moves, root_moves, (size_t)list.count * sizeof(*root_moves));
-        *best_move = root_moves[0].move;
+        *best_move  = root_moves[0].move;
         previous_pv = current_pv;
         /* A history-dependent root result must not enter the position-only cache. */
         if (!filtered_cycles)
@@ -2193,8 +2179,8 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
 
     if (stats != NULL)
     {
-        stats->nodes = context.nodes;
-        stats->stopped = context.stopped || context.deadline_reached;
+        stats->nodes              = context.nodes;
+        stats->stopped            = context.stopped || context.deadline_reached;
         stats->winning_move_found = winning_move_found;
         for (i = 0; i < list.count; ++i)
             if (moves_equal(root_moves[i].move, *best_move))
@@ -2304,18 +2290,18 @@ bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine, XqPos
                                             XqSearchStats *stats, XqSearchProgressFn progress,
                                             void *progress_user)
 {
-    XqSearchLimits effective_limits;
-    XqTranspositionStats before;
-    bool custom = engine != NULL && engine->search != NULL;
+    XqSearchLimits        effective_limits;
+    XqTranspositionStats  before;
+    bool                  custom = engine != NULL && engine->search != NULL;
     XqTranspositionTable *table =
         stats != NULL && !custom && engine != NULL ? engine->transposition_table : NULL;
-    bool found;
+    bool    found;
     int64_t start = -1;
 
     if (stats != NULL)
     {
         memset(stats, 0, sizeof(*stats));
-        stats->available = !custom;
+        stats->available       = !custom;
         stats->cache_available = !custom && table != NULL;
     }
 
@@ -2340,16 +2326,16 @@ bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine, XqPos
         if (start >= 0 && end >= start)
         {
             stats->elapsed_available = true;
-            stats->elapsed_ms = (uint64_t)(end - start);
+            stats->elapsed_ms        = (uint64_t)(end - start);
         }
         if (stats->cache_available)
         {
             XqTranspositionStats after;
             xq_transposition_table_get_stats(table, &after);
-            stats->cache.probes = after.probes - before.probes;
-            stats->cache.hits = after.hits - before.hits;
-            stats->cache.cutoffs = after.cutoffs - before.cutoffs;
-            stats->cache.stores = after.stores - before.stores;
+            stats->cache.probes       = after.probes - before.probes;
+            stats->cache.hits         = after.hits - before.hits;
+            stats->cache.cutoffs      = after.cutoffs - before.cutoffs;
+            stats->cache.stores       = after.stores - before.stores;
             stats->cache.replacements = after.replacements - before.replacements;
         }
     }
@@ -2377,16 +2363,16 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
                                       unsigned depth, XqExplainResult *result)
 {
     XqMoveList list;
-    int order_scores[XQ_MAX_MOVES];
-    int alpha = INT_MIN / 2;
-    int beta = INT_MAX / 2;
-    int i;
+    int        order_scores[XQ_MAX_MOVES];
+    int        alpha = INT_MIN / 2;
+    int        beta  = INT_MAX / 2;
+    int        i;
 
     if (result == NULL)
         return false;
 
-    result->count = 0;
-    result->best_index = -1;
+    result->count       = 0;
+    result->best_index  = -1;
     result->final_score = INT_MIN / 2;
 
     if (pos == NULL)
@@ -2403,28 +2389,28 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
 
     for (i = 0; i < list.count; ++i)
     {
-        XqExplainedMove *explained = &result->moves[result->count];
-        int alpha_before = alpha;
-        int score;
+        XqExplainedMove *explained    = &result->moves[result->count];
+        int              alpha_before = alpha;
+        int              score;
 
         xq_position_make_move(pos, list.moves[i]);
         score = -negamax(engine, NULL, pos, depth - 1, -beta, -alpha, NULL, 0, NULL, NULL);
         xq_position_unmake_move(pos, list.moves[i]);
 
-        explained->move = list.moves[i];
-        explained->depth = depth;
-        explained->alpha_before = alpha_before;
-        explained->beta = beta;
-        explained->score = score;
-        explained->order_score = order_scores[i];
-        explained->score_kind = XQ_SEARCH_SCORE_UPPER_BOUND;
-        explained->is_best = false;
+        explained->move          = list.moves[i];
+        explained->depth         = depth;
+        explained->alpha_before  = alpha_before;
+        explained->beta          = beta;
+        explained->score         = score;
+        explained->order_score   = order_scores[i];
+        explained->score_kind    = XQ_SEARCH_SCORE_UPPER_BOUND;
+        explained->is_best       = false;
         explained->caused_cutoff = false;
 
         if (score > alpha)
         {
-            alpha = score;
-            result->best_index = result->count;
+            alpha                 = score;
+            result->best_index    = result->count;
             explained->score_kind = XQ_SEARCH_SCORE_EXACT;
         }
         if (score_proves_win(score, alpha_before))
@@ -2435,7 +2421,7 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
         }
         if (alpha >= beta)
         {
-            explained->score_kind = XQ_SEARCH_SCORE_LOWER_BOUND;
+            explained->score_kind    = XQ_SEARCH_SCORE_LOWER_BOUND;
             explained->caused_cutoff = true;
             ++result->count;
             break;
@@ -2470,25 +2456,25 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
                                           XqQuiescenceExplainResult *result)
 {
     XqMoveList list;
-    int order_scores[XQ_MAX_MOVES];
-    int alpha = INT_MIN / 2;
-    int beta = INT_MAX / 2;
-    int best = INT_MIN / 2;
-    int i;
+    int        order_scores[XQ_MAX_MOVES];
+    int        alpha = INT_MIN / 2;
+    int        beta  = INT_MAX / 2;
+    int        best  = INT_MIN / 2;
+    int        i;
 
     if (result == NULL)
         return false;
 
-    result->count = 0;
-    result->best_index = -1;
-    result->alpha_before = alpha;
+    result->count                 = 0;
+    result->best_index            = -1;
+    result->alpha_before          = alpha;
     result->alpha_after_stand_pat = alpha;
-    result->beta = beta;
-    result->stand_pat = 0;
-    result->final_score = alpha;
-    result->in_check = false;
-    result->stand_pat_used = false;
-    result->stand_pat_cutoff = false;
+    result->beta                  = beta;
+    result->stand_pat             = 0;
+    result->final_score           = alpha;
+    result->in_check              = false;
+    result->stand_pat_used        = false;
+    result->stand_pat_cutoff      = false;
 
     if (pos == NULL)
         return false;
@@ -2514,12 +2500,12 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
     if (!result->in_check)
     {
         result->stand_pat_used = true;
-        result->stand_pat = static_evaluate(engine, pos, pos->side_to_move);
-        best = result->stand_pat;
+        result->stand_pat      = static_evaluate(engine, pos, pos->side_to_move);
+        best                   = result->stand_pat;
         if (result->stand_pat >= beta)
         {
             result->stand_pat_cutoff = true;
-            result->final_score = best;
+            result->final_score      = best;
             return true;
         }
         if (result->stand_pat > alpha)
@@ -2532,13 +2518,13 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
     for (i = 0; i < list.count; ++i)
     {
         XqExplainedMove *explained;
-        int alpha_before;
-        int score;
+        int              alpha_before;
+        int              score;
 
         if (!result->in_check && list.moves[i].captured == XQ_EMPTY_PIECE)
             continue;
 
-        explained = &result->moves[result->count];
+        explained    = &result->moves[result->count];
         alpha_before = alpha;
 
         if (list.moves[i].captured != XQ_EMPTY_PIECE &&
@@ -2551,43 +2537,43 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
             xq_position_unmake_move(pos, list.moves[i]);
         }
 
-        explained->move = list.moves[i];
-        explained->depth = 0;
-        explained->alpha_before = alpha_before;
-        explained->beta = beta;
-        explained->score = score;
-        explained->order_score = order_scores[i];
-        explained->score_kind = XQ_SEARCH_SCORE_UPPER_BOUND;
-        explained->is_best = false;
+        explained->move          = list.moves[i];
+        explained->depth         = 0;
+        explained->alpha_before  = alpha_before;
+        explained->beta          = beta;
+        explained->score         = score;
+        explained->order_score   = order_scores[i];
+        explained->score_kind    = XQ_SEARCH_SCORE_UPPER_BOUND;
+        explained->is_best       = false;
         explained->caused_cutoff = false;
 
         if (score > best)
         {
-            best = score;
+            best               = score;
             result->best_index = result->count;
         }
         if (score_proves_win(score, alpha_before))
         {
-            explained->score_kind = XQ_SEARCH_SCORE_EXACT;
+            explained->score_kind    = XQ_SEARCH_SCORE_EXACT;
             explained->caused_cutoff = score >= beta;
-            explained->is_best = true;
+            explained->is_best       = true;
             ++result->count;
             result->final_score = best;
             return true;
         }
         if (score >= beta)
         {
-            result->best_index = result->count;
-            explained->score_kind = XQ_SEARCH_SCORE_LOWER_BOUND;
+            result->best_index       = result->count;
+            explained->score_kind    = XQ_SEARCH_SCORE_LOWER_BOUND;
             explained->caused_cutoff = true;
             ++result->count;
-            result->final_score = best;
+            result->final_score                       = best;
             result->moves[result->best_index].is_best = true;
             return true;
         }
         if (score > alpha)
         {
-            alpha = score;
+            alpha                 = score;
             explained->score_kind = XQ_SEARCH_SCORE_EXACT;
         }
 
@@ -2620,8 +2606,8 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
  */
 static bool trace_push(ExplainContext *context, int ply, XqMove move)
 {
-    PathTrace *trace = context != NULL ? context->trace : NULL;
-    bool previous = trace != NULL && trace->matching;
+    PathTrace *trace    = context != NULL ? context->trace : NULL;
+    bool       previous = trace != NULL && trace->matching;
     if (trace != NULL)
         trace->matching =
             previous && (size_t)ply < trace->count && moves_equal(move, trace->path[ply]);
@@ -2666,19 +2652,19 @@ static void trace_pop(ExplainContext *context, bool previous)
  */
 static bool trace_begin(ExplainContext *context, int ply, unsigned depth, int alpha, int beta)
 {
-    PathTrace *trace = context != NULL ? context->trace : NULL;
+    PathTrace           *trace = context != NULL ? context->trace : NULL;
     XqPathExplainResult *current;
     if (trace == NULL || depth == 0 || !trace->matching || (size_t)ply != trace->count)
         return false;
     current = &trace->current;
     memset(current, 0, sizeof(*current));
-    current->visited = true;
-    current->root_depth = trace->root_depth;
+    current->visited         = true;
+    current->root_depth      = trace->root_depth;
     current->remaining_depth = depth;
-    current->ply = (size_t)ply;
+    current->ply             = (size_t)ply;
     current->node.best_index = -1;
-    current->alpha_before = alpha;
-    current->beta = beta;
+    current->alpha_before    = alpha;
+    current->beta            = beta;
     current->tt.status = context->table != NULL ? XQ_EXPLAIN_TT_NOT_PROBED : XQ_EXPLAIN_TT_DISABLED;
     return true;
 }
@@ -2771,25 +2757,25 @@ static XqSearchScoreKind trace_score_kind(int score, int alpha, int beta)
 static void trace_move(ExplainContext *context, bool record, XqMove move, int alpha, int beta,
                        int score, const XqExplainTtInfo *child_tt)
 {
-    PathTrace *trace;
+    PathTrace           *trace;
     XqPathExplainResult *current;
-    XqExplainResult *node;
-    XqExplainedMove *row;
-    int i;
+    XqExplainResult     *node;
+    XqExplainedMove     *row;
+    int                  i;
     if (!record)
         return;
-    trace = context->trace;
-    current = &trace->current;
-    node = &current->node;
-    row = &node->moves[node->count];
+    trace                         = context->trace;
+    current                       = &trace->current;
+    node                          = &current->node;
+    row                           = &node->moves[node->count];
     current->move_tt[node->count] = *child_tt;
     memset(row, 0, sizeof(*row));
-    row->move = move;
-    row->depth = current->remaining_depth;
-    row->alpha_before = alpha;
-    row->beta = beta;
-    row->score = score;
-    row->score_kind = trace_score_kind(score, alpha, beta);
+    row->move          = move;
+    row->depth         = current->remaining_depth;
+    row->alpha_before  = alpha;
+    row->beta          = beta;
+    row->score         = score;
+    row->score_kind    = trace_score_kind(score, alpha, beta);
     row->caused_cutoff = score >= beta;
     for (i = 0; i < trace->ordered.count; ++i)
         if (moves_equal(trace->ordered.moves[i], move))
@@ -2801,8 +2787,8 @@ static void trace_move(ExplainContext *context, bool record, XqMove move, int al
     {
         if (node->best_index >= 0)
             node->moves[node->best_index].is_best = false;
-        node->best_index = node->count;
-        row->is_best = true;
+        node->best_index  = node->count;
+        row->is_best      = true;
         node->final_score = score;
     }
     current->score_available = true;
@@ -2836,9 +2822,9 @@ static int trace_finish(ExplainContext *context, bool record, int score)
 {
     if (record && !context->search->stopped)
     {
-        PathTrace *trace = context->trace;
-        trace->current.complete = true;
-        trace->current.score_available = true;
+        PathTrace *trace                = context->trace;
+        trace->current.complete         = true;
+        trace->current.score_available  = true;
         trace->current.node.final_score = score;
         trace->current.score_kind =
             trace->current.tt.status == XQ_EXPLAIN_TT_CUTOFF
@@ -2868,21 +2854,21 @@ static bool tt_probe_for_explain(ExplainContext *context, uint64_t key, unsigned
                                  int beta, XqExplainTtInfo *info)
 {
     XqTranspositionEntry *entry;
-    bool cutoff;
+    bool                  cutoff;
     memset(info, 0, sizeof(*info));
     if (context->table == NULL)
         return false;
     cutoff = tt_probe(context->table, key, depth, alpha, beta, &info->score, &info->best_move, NULL,
                       &info->score_kind);
-    entry = tt_find_entry(context->table, key);
+    entry  = tt_find_entry(context->table, key);
     if (entry == NULL)
     {
         info->status = XQ_EXPLAIN_TT_MISS;
         return false;
     }
     info->status = cutoff ? XQ_EXPLAIN_TT_CUTOFF : XQ_EXPLAIN_TT_HIT;
-    info->depth = entry->depth;
-    info->score = entry->score;
+    info->depth  = entry->depth;
+    info->score  = entry->score;
     return cutoff;
 }
 
@@ -2906,17 +2892,17 @@ static bool tt_probe_for_explain(ExplainContext *context, uint64_t key, unsigned
 static void trace_tt_block(ExplainContext *context, unsigned depth, int ply, int alpha, int beta,
                            const XqExplainTtInfo *info)
 {
-    PathTrace *trace = context->trace;
+    PathTrace        *trace = context->trace;
     XqExplainTtBlock *block = &trace->blocked_tt;
     if (!trace->matching || (size_t)ply >= trace->count)
         return;
-    block->available = true;
-    block->root_depth = trace->root_depth;
-    block->ply = (size_t)ply;
+    block->available       = true;
+    block->root_depth      = trace->root_depth;
+    block->ply             = (size_t)ply;
     block->remaining_depth = depth;
-    block->alpha = alpha;
-    block->beta = beta;
-    block->tt = *info;
+    block->alpha           = alpha;
+    block->beta            = beta;
+    block->tt              = *info;
 }
 
 /**
@@ -2955,17 +2941,17 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
                                int pv_hint_count, PrincipalVariation *pv_out,
                                ExplainContext *context, XqExplainTtInfo *entry_tt)
 {
-    SearchContext *search = context->search;
-    XqMoveList list;
-    XqExplainTtInfo info = {0};
-    XqMove best_move = {0};
-    uint64_t key;
-    bool record;
-    bool pv_move_found = false;
-    bool has_best_move = false;
-    int alpha_original = alpha;
-    int best = INT_MIN / 2;
-    int i;
+    SearchContext  *search = context->search;
+    XqMoveList      list;
+    XqExplainTtInfo info      = {0};
+    XqMove          best_move = {0};
+    uint64_t        key;
+    bool            record;
+    bool            pv_move_found  = false;
+    bool            has_best_move  = false;
+    int             alpha_original = alpha;
+    int             best           = INT_MIN / 2;
+    int             i;
 
     info.status = context->table != NULL ? XQ_EXPLAIN_TT_NOT_PROBED : XQ_EXPLAIN_TT_DISABLED;
     if (entry_tt != NULL)
@@ -3018,15 +3004,15 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
     for (i = 0; i < list.count; ++i)
     {
         PrincipalVariation child_pv;
-        XqExplainTtInfo child_tt;
-        const XqMove *child_hint = NULL;
-        int child_hint_count = 0;
-        bool matching;
-        int score;
+        XqExplainTtInfo    child_tt;
+        const XqMove      *child_hint       = NULL;
+        int                child_hint_count = 0;
+        bool               matching;
+        int                score;
 
         if (pv_move_found && moves_equal(list.moves[i], pv_hint[0]))
         {
-            child_hint = pv_hint + 1;
+            child_hint       = pv_hint + 1;
             child_hint_count = pv_hint_count - 1;
         }
         matching = trace_push(context, ply, list.moves[i]);
@@ -3041,8 +3027,8 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
         trace_move(context, record, list.moves[i], alpha, beta, score, record ? &child_tt : NULL);
         if (score > best)
         {
-            best = score;
-            best_move = list.moves[i];
+            best          = score;
+            best_move     = list.moves[i];
             has_best_move = true;
             if (pv_out != NULL)
                 build_principal_variation(pv_out, list.moves[i], &child_pv);
@@ -3076,7 +3062,7 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
  */
 static void trace_root_cache(ExplainContext *context, uint64_t key, bool hash_move_used)
 {
-    XqExplainTtInfo *info = &context->root.ordering_tt;
+    XqExplainTtInfo      *info = &context->root.ordering_tt;
     XqTranspositionEntry *entry;
     memset(info, 0, sizeof(*info));
     info->ordering_only = true;
@@ -3088,11 +3074,11 @@ static void trace_root_cache(ExplainContext *context, uint64_t key, bool hash_mo
         info->status = XQ_EXPLAIN_TT_MISS;
         return;
     }
-    info->status = XQ_EXPLAIN_TT_HIT;
-    info->depth = entry->depth;
-    info->score = entry->score;
-    info->score_kind = (XqSearchScoreKind)entry->score_kind;
-    info->best_move = entry->best_move;
+    info->status         = XQ_EXPLAIN_TT_HIT;
+    info->depth          = entry->depth;
+    info->score          = entry->score;
+    info->score_kind     = (XqSearchScoreKind)entry->score_kind;
+    info->best_move      = entry->best_move;
     info->hash_move_used = hash_move_used;
 }
 
@@ -3115,7 +3101,7 @@ static void trace_root_terminal(ExplainContext *context)
 {
     bool record;
     context->trace->root_depth = 0;
-    record = trace_begin(context, 0, 1, INT_MIN / 2, INT_MAX / 2);
+    record                     = trace_begin(context, 0, 1, INT_MIN / 2, INT_MAX / 2);
     (void)trace_finish(context, record, -XQ_MATE_SCORE);
 }
 
@@ -3136,17 +3122,17 @@ static void trace_root_selection(ExplainContext *context, const ScoredMove *move
                                  XqMove selected)
 {
     XqRootSearchExplain *root = &context->root;
-    int i;
+    int                  i;
     root->move_available = true;
-    root->selected_move = selected;
+    root->selected_move  = selected;
     root->selected_index = -1;
-    root->count = count;
+    root->count          = count;
     for (i = 0; i < count; ++i)
     {
         XqRootMoveExplain *row = &root->moves[i];
-        row->move = moves[i].move;
-        row->score = moves[i].score;
-        row->completed_depth = moves[i].completed_depth;
+        row->move              = moves[i].move;
+        row->score             = moves[i].score;
+        row->completed_depth   = moves[i].completed_depth;
         if (moves_equal(row->move, selected))
             root->selected_index = i;
     }
@@ -3177,9 +3163,9 @@ static int search_root_move_for_explain(const XqEngineAdapter *engine, XqPositio
                                         ExplainContext *context)
 {
     XqExplainTtInfo child_tt;
-    bool record = context->trace->count == 0;
-    bool matching = trace_push(context, 0, move);
-    int score;
+    bool            record   = context->trace->count == 0;
+    bool            matching = trace_push(context, 0, move);
+    int             score;
     xq_position_make_move(pos, move);
     score = -negamax_for_explain(engine, pos, depth - 1, 1, -beta, -alpha, hint, hint_count, pv,
                                  context, record ? &child_tt : NULL);
@@ -3217,20 +3203,20 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
                                        const XqSearchLimits *limits, XqMove *best_move,
                                        XqSearchStats *stats, ExplainContext *explain)
 {
-    XqMoveList list;
-    ScoredMove root_moves[XQ_MAX_MOVES];
-    ScoredMove completed_moves[XQ_MAX_MOVES];
-    PrincipalVariation previous_pv = {0};
-    XqTranspositionTable *table = engine != NULL ? engine->transposition_table : NULL;
-    uint64_t root_key;
-    XqMove hash_move;
-    SearchContext context = {0};
-    bool hash_move_used = false;
-    bool filtered_cycles;
-    bool winning_move_found = false;
-    unsigned depth = limits->max_depth == 0 ? 1 : limits->max_depth;
-    unsigned current_depth;
-    int i;
+    XqMoveList            list;
+    ScoredMove            root_moves[XQ_MAX_MOVES];
+    ScoredMove            completed_moves[XQ_MAX_MOVES];
+    PrincipalVariation    previous_pv = {0};
+    XqTranspositionTable *table       = engine != NULL ? engine->transposition_table : NULL;
+    uint64_t              root_key;
+    XqMove                hash_move;
+    SearchContext         context        = {0};
+    bool                  hash_move_used = false;
+    bool                  filtered_cycles;
+    bool                  winning_move_found = false;
+    unsigned              depth              = limits->max_depth == 0 ? 1 : limits->max_depth;
+    unsigned              current_depth;
+    int                   i;
 
     explain->search = &context;
     if (pos == NULL || xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
@@ -3256,7 +3242,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
     if (stats != NULL)
         stats->stopped = context.stopped || context.deadline_reached;
 
-    *best_move = list.moves[0];
+    *best_move      = list.moves[0];
     filtered_cycles = filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
     context.iteration_total_moves = (unsigned)list.count;
     if (stats != NULL)
@@ -3269,19 +3255,19 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
 
     for (i = 0; i < list.count; ++i)
     {
-        root_moves[i].move = list.moves[i];
-        root_moves[i].score = INT_MIN / 2;
+        root_moves[i].move            = list.moves[i];
+        root_moves[i].score           = INT_MIN / 2;
         root_moves[i].completed_depth = 0;
     }
     *best_move = root_moves[0].move;
 
     for (current_depth = 1;; ++current_depth)
     {
-        PrincipalVariation current_pv = {0};
-        int alpha = INT_MIN / 2;
-        int beta = INT_MAX / 2;
-        int completed_roots = 0;
-        int current_best_index = 0;
+        PrincipalVariation current_pv         = {0};
+        int                alpha              = INT_MIN / 2;
+        int                beta               = INT_MAX / 2;
+        int                completed_roots    = 0;
+        int                current_best_index = 0;
 
         /* Reset before checking time so the previous iteration cannot authorize an extension. */
         context.iteration_completed_moves = 0;
@@ -3293,9 +3279,9 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
         for (i = 0; i < list.count; ++i)
         {
             PrincipalVariation child_pv;
-            const XqMove *child_hint = NULL;
-            int child_hint_count = 0;
-            int score;
+            const XqMove      *child_hint       = NULL;
+            int                child_hint_count = 0;
+            int                score;
 
             if (search_check_time(&context, true))
                 break;
@@ -3309,7 +3295,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             }
             if (previous_pv.count > 0 && moves_equal(root_moves[i].move, previous_pv.moves[0]))
             {
-                child_hint = previous_pv.moves + 1;
+                child_hint       = previous_pv.moves + 1;
                 child_hint_count = previous_pv.count - 1;
             }
 
@@ -3320,7 +3306,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             if (context.stopped)
                 break;
 
-            root_moves[i].score = score;
+            root_moves[i].score           = score;
             root_moves[i].completed_depth = current_depth;
             ++completed_roots;
             context.iteration_completed_moves = (unsigned)completed_roots;
@@ -3329,7 +3315,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             if (score > alpha)
             {
                 current_best_index = i;
-                alpha = score;
+                alpha              = score;
                 build_principal_variation(&current_pv, root_moves[i].move, &child_pv);
             }
 
@@ -3352,7 +3338,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             /* This iteration supplies the move; unsearched rows must not retain older scores. */
             for (i = completed_roots; i < list.count; ++i)
             {
-                root_moves[i].score = INT_MIN / 2;
+                root_moves[i].score           = INT_MIN / 2;
                 root_moves[i].completed_depth = 0;
             }
             /* Keep root cache writes restricted to fully searched iterations. */
@@ -3374,7 +3360,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             stats->completed_depth = current_depth;
         order_root_moves(root_moves, list.count);
         memcpy(completed_moves, root_moves, (size_t)list.count * sizeof(*root_moves));
-        *best_move = root_moves[0].move;
+        *best_move  = root_moves[0].move;
         previous_pv = current_pv;
         /* A history-dependent root result must not enter the position-only cache. */
         if (!filtered_cycles)
@@ -3389,8 +3375,8 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
     trace_root_selection(explain, root_moves, list.count, *best_move);
     if (stats != NULL)
     {
-        stats->nodes = context.nodes;
-        stats->stopped = context.stopped || context.deadline_reached;
+        stats->nodes              = context.nodes;
+        stats->stopped            = context.stopped || context.deadline_reached;
         stats->winning_move_found = winning_move_found;
         for (i = 0; i < list.count; ++i)
             if (moves_equal(root_moves[i].move, *best_move))
@@ -3453,34 +3439,34 @@ bool xq_engine_explain_path(const XqEngineAdapter *engine, XqPosition *pos,
                             const XqSearchLimits *limits, const XqMove *path, size_t path_count,
                             XqPathExplainResult *result)
 {
-    PathTrace trace;
-    ExplainContext context = {0};
-    XqMove selected = {0};
-    XqSearchStats stats = {0};
+    PathTrace            trace;
+    ExplainContext       context  = {0};
+    XqMove               selected = {0};
+    XqSearchStats        stats    = {0};
     XqTranspositionStats before;
-    int64_t start;
-    int64_t end;
+    int64_t              start;
+    int64_t              end;
     if (result == NULL)
         return false;
     memset(result, 0, sizeof(*result));
-    result->node.best_index = -1;
+    result->node.best_index     = -1;
     result->root.selected_index = -1;
     if (pos == NULL || limits == NULL || limits->max_depth == 0 ||
         (path_count != 0 && path == NULL) || path_count > (size_t)INT_MAX)
         return false;
     memset(&trace, 0, sizeof(trace));
-    trace.path = path;
-    trace.count = path_count;
-    trace.matching = true;
-    trace.saved = result;
-    start = monotonic_time_ms();
-    context.trace = &trace;
-    context.table = engine != NULL ? engine->transposition_table : NULL;
+    trace.path                  = path;
+    trace.count                 = path_count;
+    trace.matching              = true;
+    trace.saved                 = result;
+    start                       = monotonic_time_ms();
+    context.trace               = &trace;
+    context.table               = engine != NULL ? engine->transposition_table : NULL;
     context.root.selected_index = -1;
     context.root.ordering_tt.status =
         context.table != NULL ? XQ_EXPLAIN_TT_NOT_PROBED : XQ_EXPLAIN_TT_DISABLED;
     result->tt.status = context.table != NULL ? XQ_EXPLAIN_TT_NOT_PROBED : XQ_EXPLAIN_TT_DISABLED;
-    stats.available = true;
+    stats.available   = true;
     stats.cache_available = context.table != NULL;
     xq_transposition_table_get_stats(context.table, &before);
     (void)builtin_search_for_explain(engine, pos, limits, &selected, &stats, &context);
@@ -3488,9 +3474,9 @@ bool xq_engine_explain_path(const XqEngineAdapter *engine, XqPosition *pos,
     context.search = NULL;
     if (!result->complete && trace.current.visited)
         *result = trace.current;
-    result->blocked_tt = trace.blocked_tt;
-    result->root = context.root;
-    end = monotonic_time_ms();
+    result->blocked_tt      = trace.blocked_tt;
+    result->root            = context.root;
+    end                     = monotonic_time_ms();
     stats.elapsed_available = start >= 0 && end >= start;
     if (stats.elapsed_available)
         stats.elapsed_ms = (uint64_t)(end - start);
@@ -3498,10 +3484,10 @@ bool xq_engine_explain_path(const XqEngineAdapter *engine, XqPosition *pos,
     {
         XqTranspositionStats after;
         xq_transposition_table_get_stats(context.table, &after);
-        stats.cache.probes = after.probes - before.probes;
-        stats.cache.hits = after.hits - before.hits;
-        stats.cache.cutoffs = after.cutoffs - before.cutoffs;
-        stats.cache.stores = after.stores - before.stores;
+        stats.cache.probes       = after.probes - before.probes;
+        stats.cache.hits         = after.hits - before.hits;
+        stats.cache.cutoffs      = after.cutoffs - before.cutoffs;
+        stats.cache.stores       = after.stores - before.stores;
         stats.cache.replacements = after.replacements - before.replacements;
     }
     result->stats = stats;
