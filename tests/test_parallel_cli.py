@@ -58,7 +58,7 @@ class ParallelCliTests(unittest.TestCase):
     def test_default_depth_and_manual_reply_undo(self):
         result = self.run_cli("--search", "parallel", "--threads", "1", "--split-percent", "0",
                               "--fen", FEN, input="e0f0 d9d8\nundo\nflip\nfen\nquit\n")
-        self.assertIn("fixed depth 3", result.stdout)
+        self.assertIn("iterative deepening to max depth 3", result.stdout)
         self.assertIn("specified by player", result.stdout)
         self.assertIn("Undid 2 move(s)", result.stdout)
         self.assertIn(FEN, result.stdout)

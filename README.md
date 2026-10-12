@@ -45,9 +45,39 @@ gcc -std=c11 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c sr
 编译交互式人机示例：
 
 ```sh
-gcc -pthread -std=c11 -O2 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c examples/cli.c -o build/xiangqi_cli
+gcc -pthread -std=c11 -O2 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c examples/cli.c examples/search_progress.c -o build/xiangqi_cli
 ./build/xiangqi_cli
 ```
+
+## 实时搜索进度
+
+两种搜索模式均可加 `--progress`，默认关闭：
+
+```sh
+./build/xiangqi_cli --engine red --depth 10 --time-ms 5000 --progress
+./build/xiangqi_cli --search parallel --engine red --depth 4 --threads 4 --progress
+```
+
+终端中约每 100ms 在 stderr 原地刷新，例如：
+
+```text
+search depth 5/10  [############--------] 60%  roots 24/40  elapsed 2.3s / 5.0s
+```
+
+百分比仅表示当前深度完成的根走法比例，每轮重新开始；每个走法耗时不同，
+不代表整次搜索完成比例，也不估算剩余时间。用时在长分支搜索期间继续刷新。
+并行搜索没有时间预算，故只显示已用时间。提前结束保留实际比例；
+普通引擎结束摘要中的 `selected depth` 表示最终采用的深度（0 表示未搜索的保底走法）。
+时间限制允许完成已超过进度阈值的迭代，因此已用时间可能超过预算。
+重定向 stderr 时只输出每轮结束及最终摘要，不输出终端控制字符。
+
+库使用者可通过 `xq_engine_find_best_move_with_progress()` 或
+`xq_engine_parallel_search_with_progress()` 传入可选 `XqSearchProgressFn`。
+旧入口、配置和结果结构保持不变。事件仅覆盖根迭代开始、有效根走法完成和迭代结束，
+终局根及自定义搜索回调不产生事件；迭代结束不保证完成全部根走法。
+并行根走法回调可能并发、乱序到达，应同步访问并合并同轮的最大完成数。
+回调内不能修改或重入当前搜索；快照只在回调期间有效，全部回调在搜索返回前结束。
+CLI 的显示线程和同步由独立模块负责，不改变递归搜索、缓存和剪枝规则。
 
 ## 固定视角并行搜索（macOS / Linux）
 
@@ -133,7 +163,7 @@ MIN 节点的分数、窗口和上下界会转换视角；缓存边界仍作为�
 
 `--search-detail` 记录并行搜索的局面、状态、最佳走法、根分数、深度、线程数和分配比例。
 并行搜索不再收集节点数、分裂次数、边界更新次数、取消次数和耗时；已移除
-`--parallel-trace`、事件回调及其公开类型。普通引擎的统计和详细日志保持原有行为。
+`--parallel-trace`、旧的逐节点跟踪回调及其公开类型。新的 `--progress` 只观测根迭代进度。普通引擎的统计和详细日志保持原有行为。
 
 节点的 `value.lower/upper`、`alpha/beta` 和 `state` 使用 C11 原子读写。
 `state` 将原来的 finished/cancelled 合并为运行中、正常结束、取消三个状态，通过一次 CAS

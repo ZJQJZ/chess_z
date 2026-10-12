@@ -70,4 +70,10 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos,
     const XqParallelOptions *options, XqEvaluateFn evaluate, void *evaluate_user,
     XqParallelResult *result);
 
+/* Same search with optional root progress (see XqSearchProgressFn concurrency contract).
+ * Terminal roots and argument/resource failures emit no iteration events. */
+XqParallelStatus xq_engine_parallel_search_with_progress(const XqPosition *pos,
+    const XqParallelOptions *options, XqEvaluateFn evaluate, void *evaluate_user,
+    XqParallelResult *result, XqSearchProgressFn progress, void *progress_user);
+
 #endif

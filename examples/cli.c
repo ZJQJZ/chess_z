@@ -1,4 +1,5 @@
 #include "xiangqi/engine.h"
+#include "search_progress.h"
 #include "xiangqi/parallel_search.h"
 #include "xiangqi/movegen.h"
 #include "xiangqi/position.h"
@@ -39,7 +40,7 @@ static const char *color_name(XqColor color)
  */
 static void print_usage(const char *program)
 {
-    printf("usage: %s [--fen FEN] [--engine red|black] [--depth N] [--time-ms MS] [--tt-file PATH] [--search-detail]\n", program);
+    printf("usage: %s [--fen FEN] [--engine red|black] [--depth N] [--time-ms MS] [--tt-file PATH] [--search-detail] [--progress]\n", program);
     printf("\n");
     printf("options:\n");
     printf("  --search builtin|parallel  search implementation (default builtin)\n");
@@ -52,6 +53,7 @@ static void print_usage(const char *program)
     printf("  %-21s  %s\n", "    --time-ms MS", "default thinking time per engine move (positive integer milliseconds)");
     printf("  %-21s  %s\n", "", "a nearly complete iteration may finish after this budget");
     printf("  %-21s  %s\n", "    --tt-file PATH", "load a saved transposition table before the first search");
+    printf("  %-21s  %s\n", "    --progress", "show live per-depth root-move progress on stderr");
     printf("  %-21s  %s\n", "    --search-detail", "append each engine search to build/search_detail.txt");
     printf("  %-21s  %s\n", "-h, --help", "show this help");
     printf("\n");
@@ -473,6 +475,7 @@ int main(int argc, char **argv)
     bool parallel_options_set = false;
     XqParallelOptions parallel_options = xq_parallel_options_default();
     bool search_detail = false;
+    bool show_progress = false;
     bool board_flipped = false;
     FILE *search_log = NULL;
     int exit_status = EXIT_SUCCESS;
@@ -518,6 +521,11 @@ int main(int argc, char **argv)
             if (percentage) parallel_options.split_percent = value;
             else parallel_options.thread_count = value;
             parallel_options_set = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--progress") == 0)
+        {
+            show_progress = true;
             continue;
         }
         if (strcmp(argv[i], "--search-detail") == 0)
@@ -695,13 +703,22 @@ int main(int argc, char **argv)
             XqSearchStats stats;
             bool found;
             char text[8];
+            CliSearchProgress *progress = show_progress ?
+                cli_search_progress_start(parallel ? parallel_options.depth : limits.max_depth,
+                                           parallel ? 0 : limits.time_limit_ms) : NULL;
+            XqSearchProgressFn on_progress = progress != NULL ? cli_search_progress_update : NULL;
             if (parallel)
             {
                 XqParallelResult result;
                 XqParallelStatus status;
-                status = xq_engine_parallel_search(&pos, &parallel_options, NULL, NULL, &result);
+                status = xq_engine_parallel_search_with_progress(
+                    &pos, &parallel_options, NULL, NULL, &result, on_progress, progress);
                 found = status == XQ_PARALLEL_OK && result.move_available;
                 best = result.best_move;
+                cli_search_progress_finish(progress,
+                    status != XQ_PARALLEL_OK ? "search failed" :
+                    !found ? "no move" : result.score == 30000 ? "winning move found" : "finished",
+                    NULL);
                 if (status != XQ_PARALLEL_OK)
                 {
                     fprintf(stderr, "error: %s\n", xq_parallel_status_text(status));
@@ -712,8 +729,13 @@ int main(int argc, char **argv)
             }
             else
             {
-                found = xq_engine_find_best_move_with_stats(&engine, &pos, &limits, &best,
-                                                           search_log != NULL ? &stats : NULL);
+                found = xq_engine_find_best_move_with_progress(
+                    &engine, &pos, &limits, &best,
+                    search_log != NULL || progress != NULL ? &stats : NULL, on_progress, progress);
+                if (progress != NULL)
+                    cli_search_progress_finish(progress,
+                        !found ? "no move" : stats.winning_move_found ? "winning move found" :
+                        stats.stopped ? "time limit / clock stop" : "finished", &stats);
                 if (search_log != NULL)
                     write_search_detail(&search_log, &pos, &limits, found, best, &stats);
             }

@@ -1020,6 +1020,8 @@ typedef struct Search
     atomic_int shutdown;
     XqParallelOptions options;
     XqColor root_color;
+    XqSearchProgressFn progress;
+    void *progress_user;
     XqEvaluateFn evaluate;
     void *evaluate_user;
     XqMoveList root_moves; /* Caller-only ordering retained between completed iterations. */
@@ -1410,6 +1412,14 @@ static void search_range(Search *search, Node *node, int begin, int end, BatchPv
                 batch->child_pv = child_pv;
             }
             aggregate(node, i, child);
+            if (search->progress != NULL && node->parent == NULL)
+            {
+                XqSearchProgress update = {
+                    XQ_SEARCH_ROOT_MOVE_COMPLETED, node->depth,
+                    (unsigned)atomic_load_explicit(&node->submitted_count, memory_order_relaxed),
+                    (unsigned)node->moves.count};
+                search->progress(&update, search->progress_user);
+            }
         }
         (void)check_node(node);
     }
@@ -1746,6 +1756,12 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
     }
     for (i = 0; i < node.moves.count; ++i)
         node.children[i] = (Interval){-WIN, WIN, false};
+    if (search->progress != NULL && parent == NULL)
+    {
+        XqSearchProgress update = {XQ_SEARCH_ITERATION_STARTED, depth, 0,
+                                   (unsigned)node.moves.count};
+        search->progress(&update, search->progress_user);
+    }
     end = split_node(search, &node, &pending);
 
     search_range(search, &node, 0, end, &node.owner_pv, stats);
@@ -1765,6 +1781,14 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
     (void)check_node(&node);
     assert(atomic_load_explicit(&node.state, memory_order_relaxed) != NODE_RUNNING);
     value = node_value(&node);
+    if (search->progress != NULL && parent == NULL)
+    {
+        XqSearchProgress update = {
+            XQ_SEARCH_ITERATION_FINISHED, depth,
+            (unsigned)atomic_load_explicit(&node.submitted_count, memory_order_relaxed),
+            (unsigned)node.moves.count};
+        search->progress(&update, search->progress_user);
+    }
     if (!value.cancelled)
     {
         /* Helper-completion synchronization already makes the selected child slot visible. */
@@ -1912,6 +1936,71 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
                                            XqEvaluateFn evaluate, void *evaluate_user,
                                            XqParallelResult *result)
 {
+    return xq_engine_parallel_search_with_progress(pos, options, evaluate, evaluate_user, result,
+                                                   NULL, NULL);
+}
+
+/**
+ * @brief Runs parallel iterative deepening with optional root progress notifications.
+ *
+ * Uses the same search semantics as xq_engine_parallel_search(): copies options or selects the
+ * defaults, creates a helper pool once, and searches depths 1 through the configured maximum. Stops
+ * early for a terminal root or a proven winning move. The search has no deadline or quiescence
+ * extension. Root ordering, PV hints and an optional borrowed transposition table are retained
+ * across iterations; cached results may come from greater search depths.
+ *
+ * For each searched root iteration, the calling thread emits STARTED before dispatching work and
+ * FINISHED after all root callbacks and helper work have completed. FINISHED may describe a partial
+ * iteration when a winning move permits an early exit. ROOT_MOVE_COMPLETED events report valid
+ * submitted child results; cancelled children are excluded. Terminal roots and argument, platform
+ * or initial resource failures emit no iteration events.
+ *
+ * Root-move callbacks execute synchronously on the thread submitting the result, which may be a
+ * helper. They can overlap and arrive out of count order; observers must synchronize shared state
+ * and retain the maximum completed count within each iteration. Counts reset at STARTED and measure
+ * root moves, not total work or remaining time. All callbacks finish before return. A null progress
+ * callback disables notifications without changing the search algorithm.
+ *
+ * Zeroes a non-null result before argument validation. On success, score is the last iteration's
+ * value from the root side's perspective; inspect move_available before using best_move.
+ * Equal-score choices may depend on scheduling. The input position is never modified. All created
+ * helpers are joined and initialized pool resources released, including on failure. The caller
+ * retains ownership of evaluator data, observer data and the optional table; the table must not be
+ * accessed externally until this call returns.
+ *
+ * @param pos                           Required root position, valid and unchanged throughout the
+ *                                      call; its side to move must be XQ_RED or XQ_BLACK.
+ * @param options                       Optional configuration copied on entry; null selects
+ *                                      defaults. Depth and thread count must be positive, and
+ *                                      split_percent must be in 0..100.
+ * @param evaluate                      Optional static evaluator; null selects the built-in
+ *                                      evaluator. Must support concurrent calls and must not modify
+ *                                      positions. Cached evaluations must be deterministic for a
+ *                                      given position and perspective.
+ * @param evaluate_user                 Borrowed data passed unchanged to evaluate; may be null.
+ *                                      Referenced data must remain valid and support concurrent
+ *                                      evaluator access until return.
+ * @param result                        Required output record; initialized even when the search
+ *                                      fails. Terminal roots return success with move_available set
+ *                                      to false.
+ * @param progress                      Optional root observer; must support concurrent root-move
+ *                                      callbacks. Snapshots are borrowed only for the duration of
+ *                                      each callback. Keep callbacks short and do not mutate or
+ *                                      reenter the search or its state.
+ * @param progress_user                 Borrowed pointer passed unchanged to progress; may be null
+ *                                      and is ignored when progress is null. Keep referenced data
+ *                                      valid until return.
+ * @retval XQ_PARALLEL_OK               Search completed, including terminal root positions.
+ * @retval XQ_PARALLEL_INVALID_ARGUMENT A required pointer is null, an option is out of range, or
+ *                                      the root side to move is invalid.
+ * @retval XQ_PARALLEL_RESOURCE_ERROR   Initial worker allocation, semaphore initialization or
+ *                                      thread creation failed on a supported platform.
+ * @retval XQ_PARALLEL_UNSUPPORTED      Arguments are valid, but the build targets Windows.
+ */
+XqParallelStatus xq_engine_parallel_search_with_progress(
+    const XqPosition *pos, const XqParallelOptions *options, XqEvaluateFn evaluate,
+    void *evaluate_user, XqParallelResult *result, XqSearchProgressFn progress, void *progress_user)
+{
     XqParallelOptions effective = options != NULL ? *options : xq_parallel_options_default();
     if (result != NULL)
         memset(result, 0, sizeof(*result));
@@ -1922,6 +2011,8 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
 #ifdef _WIN32
     (void)evaluate;
     (void)evaluate_user;
+    (void)progress;
+    (void)progress_user;
     return XQ_PARALLEL_UNSUPPORTED;
 #else
     {
@@ -1932,6 +2023,8 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
         unsigned i, current_depth;
         atomic_init(&search.shutdown, 0);
         search.options = effective;
+        search.progress = progress;
+        search.progress_user = progress_user;
         search.root_color = pos->side_to_move;
         search.evaluate = evaluate != NULL ? evaluate : xq_engine_default_static_evaluate;
         search.evaluate_user = evaluate_user;

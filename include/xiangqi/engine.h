@@ -15,6 +15,28 @@ typedef int (*XqMoveScoreFn)(const XqPosition *pos, XqMove move, void *user);
 
 typedef struct XqTranspositionTable XqTranspositionTable;
 
+typedef enum XqSearchProgressEvent
+{
+    XQ_SEARCH_ITERATION_STARTED,
+    XQ_SEARCH_ROOT_MOVE_COMPLETED,
+    XQ_SEARCH_ITERATION_FINISHED
+} XqSearchProgressEvent;
+
+typedef struct XqSearchProgress
+{
+    XqSearchProgressEvent event;
+    unsigned depth;
+    unsigned completed_moves;
+    unsigned total_moves;
+} XqSearchProgress;
+
+/* Snapshots are borrowed for the duration of the callback. Parallel root-move callbacks
+ * may overlap and arrive out of count order; consumers must synchronize and merge counts
+ * monotonically within each iteration. STARTED precedes all root callbacks; FINISHED follows
+ * them, including for partial iterations. No callbacks outlive the search. Keep callbacks
+ * short and do not mutate/reenter the search, its position, table or evaluator state. */
+typedef void (*XqSearchProgressFn)(const XqSearchProgress *progress, void *user);
+
 typedef struct XqTranspositionStats
 {
     uint64_t probes;
@@ -236,6 +258,12 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
 bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine, XqPosition *pos,
                                          const XqSearchLimits *limits, XqMove *best_move,
                                          XqSearchStats *stats);
+/* Same behavior as with_stats, with optional root progress. Custom search callbacks and
+ * roots requiring no search emit no events. NULL progress is equivalent to with_stats. */
+bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine, XqPosition *pos,
+                                            const XqSearchLimits *limits, XqMove *best_move,
+                                            XqSearchStats *stats, XqSearchProgressFn progress,
+                                            void *progress_user);
 bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos,
                                       unsigned depth, XqExplainResult *result);
 bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos,

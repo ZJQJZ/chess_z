@@ -33,7 +33,7 @@ if(NOT WIN32)
     target_link_libraries(xiangqi PUBLIC Threads::Threads)
 endif()
 
-add_executable(xiangqi_cli examples/cli.c)
+add_executable(xiangqi_cli examples/cli.c examples/search_progress.c)
 target_link_libraries(xiangqi_cli PRIVATE xiangqi)
 xq_enable_warnings(xiangqi_cli)
 

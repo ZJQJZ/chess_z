@@ -1995,18 +1995,26 @@ static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMove
  * Before iterative deepening, real-game history excludes moves that close three identical cycles.
  * If every legal move loses this way, the original first move is returned without searching.
  *
- * @param engine    Engine adapter used for evaluation, move ordering, and optional transposition
- *                  table access; may be null.
- * @param pos       Position to search; must not be null and is restored before the function
- *                  returns.
- * @param limits    Depth, time, and clock-mode configuration; must not be null.
- * @param best_move Output that receives the selected move; must not be null.
- * @param stats     Optional, zero-initialized output for built-in search counters.
- * @return          True if at least one root move exists and a move is selected; false if the
- *                  position is invalid for searching or contains no legal moves.
+ * @param engine        Engine adapter used for evaluation, move ordering, and optional
+ *                      transposition table access; may be null.
+ * @param pos           Position to search; must not be null and is restored before the function
+ *                      returns.
+ * @param limits        Depth, time, and clock-mode configuration; must not be null.
+ * @param best_move     Output that receives the selected move; must not be null.
+ * @param stats         Optional, zero-initialized output for built-in search counters.
+ * @param progress      Optional callback invoked synchronously on the calling thread at iteration
+ *                      start, after each completed root move, and at iteration end (including
+ *                      partial iterations). Null disables notifications. Snapshots are valid only
+ *                      during the callback; do not mutate or reenter the current search. Roots that
+ *                      return before iterative deepening emit no events.
+ * @param progress_user Borrowed user-data pointer passed unchanged to progress; may be null and is
+ *                      ignored when progress is null. Keep referenced data valid until return.
+ * @return              True if at least one root move exists and a move is selected; false if the
+ *                      position is invalid for searching or contains no legal moves.
  */
 static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
-                           const XqSearchLimits *limits, XqMove *best_move, XqSearchStats *stats)
+                           const XqSearchLimits *limits, XqMove *best_move, XqSearchStats *stats,
+                           XqSearchProgressFn progress, void *progress_user)
 {
     XqMoveList list;
     ScoredMove root_moves[XQ_MAX_MOVES];
@@ -2065,6 +2073,13 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
         /* Reset before checking time so the previous iteration cannot authorize an extension. */
         context.iteration_completed_moves = 0;
 
+        if (progress != NULL)
+        {
+            XqSearchProgress update = {XQ_SEARCH_ITERATION_STARTED, current_depth, 0,
+                                       (unsigned)list.count};
+            progress(&update, progress_user);
+        }
+
         if (current_depth > 1)
             tt_new_generation(table);
 
@@ -2112,6 +2127,13 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
                 build_principal_variation(&current_pv, root_moves[i].move, &child_pv);
             }
 
+            if (progress != NULL)
+            {
+                XqSearchProgress update = {XQ_SEARCH_ROOT_MOVE_COMPLETED, current_depth,
+                                           (unsigned)completed_roots, (unsigned)list.count};
+                progress(&update, progress_user);
+            }
+
             /* Only a completed, non-interrupted candidate can establish a winning move. */
             if (score == XQ_MATE_SCORE)
             {
@@ -2120,6 +2142,13 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             }
             if (search_check_time(&context, true))
                 break;
+        }
+
+        if (progress != NULL)
+        {
+            XqSearchProgress update = {XQ_SEARCH_ITERATION_FINISHED, current_depth,
+                                       (unsigned)completed_roots, (unsigned)list.count};
+            progress(&update, progress_user);
         }
 
         if (winning_move_found && completed_roots != list.count)
@@ -2230,6 +2259,51 @@ bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine, XqPositi
                                          const XqSearchLimits *limits, XqMove *best_move,
                                          XqSearchStats *stats)
 {
+    return xq_engine_find_best_move_with_progress(engine, pos, limits, best_move, stats, NULL,
+                                                  NULL);
+}
+
+/**
+ * @brief Finds the best move with optional per-call statistics and root progress notifications.
+ *
+ * Uses default limits when limits is null and normalizes a maximum depth of zero to one. A custom
+ * engine search callback receives that depth, manages its own timing, and emits no progress
+ * notifications through this function. Otherwise, the built-in iterative-deepening search uses the
+ * adapter's evaluator, move ordering, transposition table and history; a null adapter selects the
+ * built-in defaults without a cache or history.
+ *
+ * Built-in progress callbacks run synchronously on the calling thread at iteration start, after
+ * each completed root candidate, and at iteration end, including partial iterations. Roots that
+ * return before iterative deepening emit no events. Completion counts describe the current
+ * iteration, not total search work. Callbacks finish before this function returns; their execution
+ * time contributes to elapsed time and can affect a time-limited search.
+ *
+ * Initializes supplied statistics on every return, including failure. Internal counters and cache
+ * deltas are available only for built-in search; cache counters are not reset. Both search paths
+ * can report monotonic wall time when clock readings succeed, independently of the configured
+ * search time mode. Statistics and progress can be enabled independently.
+ *
+ * @param engine        Optional adapter providing callbacks, a cache and real-game history; null
+ *                      selects the built-in defaults.
+ * @param pos           Position to search. Built-in search requires a non-null position and
+ *                      restores it before returning; custom search receives it unchanged.
+ * @param limits        Optional depth and time limits; null selects the default configuration.
+ * @param best_move     Required output for the selected move; valid only when true is returned.
+ * @param stats         Optional statistics output. Check availability flags before reading internal
+ *                      counters, elapsed time or cache data.
+ * @param progress      Optional observer for built-in root progress; null disables notifications.
+ *                      Snapshots are borrowed only for the callback's duration. Keep callbacks
+ *                      short and do not mutate or reenter the current search or its state.
+ * @param progress_user Borrowed pointer passed unchanged to progress; may be null. Keep referenced
+ *                      data valid until return. Ignored when progress is null or search is custom.
+ * @return              True if a move was selected and written; false if best_move is null,
+ *                      built-in search cannot select a move, or the custom search callback fails.
+ */
+bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine, XqPosition *pos,
+                                            const XqSearchLimits *limits, XqMove *best_move,
+                                            XqSearchStats *stats, XqSearchProgressFn progress,
+                                            void *progress_user)
+{
     XqSearchLimits effective_limits;
     XqTranspositionStats before;
     bool custom = engine != NULL && engine->search != NULL;
@@ -2258,7 +2332,8 @@ bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine, XqPositi
     if (custom)
         found = engine->search(pos, effective_limits.max_depth, best_move, engine->user);
     else
-        found = builtin_search(engine, pos, &effective_limits, best_move, stats);
+        found = builtin_search(engine, pos, &effective_limits, best_move, stats, progress,
+                               progress_user);
     if (stats != NULL)
     {
         int64_t end = monotonic_time_ms();
