@@ -284,6 +284,23 @@ typedef struct ExplainContext
     XqRootSearchExplain   root;
 } ExplainContext;
 
+/**
+ * @brief A principal variation (PV): the best continuation line found from a search node.
+ *
+ * `moves[0]` is the selected move at that node, followed by the opponent's response and subsequent
+ * moves in play order. The first `count` entries are valid, with each entry representing one ply;
+ * `count == 0` means the line is empty. The line holds at most `XQ_MAX_PV_MOVES` moves.
+ *
+ * When a candidate improves the current best score, `build_principal_variation()` prepends that
+ * move to its child's PV and truncates the child line to fit the capacity. On an exact cache
+ * return, `build_pv_from_tt()` may reconstruct a line from sufficiently deep exact entries.
+ * Quiescence moves are not appended, and terminal nodes or an incomplete cache chain may end the
+ * line before the requested depth is reached.
+ *
+ * During iterative deepening, the root retains the completed iteration's PV as an ordering hint for
+ * the next depth, prioritizing its moves along matching prefixes. An interrupted search's partial
+ * PV must be discarded along with its score.
+ */
 typedef struct PrincipalVariation
 {
     XqMove moves[XQ_MAX_PV_MOVES];
