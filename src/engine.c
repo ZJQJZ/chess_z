@@ -307,6 +307,24 @@ typedef struct PrincipalVariation
     int    count;
 } PrincipalVariation;
 
+/**
+ * @brief A cached search result for one position, identified by its full 64-bit hash.
+ *
+ * `key` includes the side to move and is compared in full after selecting a bucket. `score` is the
+ * search result from that position's side-to-move perspective. `score_kind` stores an
+ * `XqSearchScoreKind`: `XQ_SEARCH_SCORE_EXACT` means the value is exact,
+ * `XQ_SEARCH_SCORE_UPPER_BOUND` means the true value is at most `score`, and
+ * `XQ_SEARCH_SCORE_LOWER_BOUND` means it is at least `score`.
+ *
+ * `depth` is the remaining normal-search depth in plies used to obtain the result, capped at
+ * `UINT16_MAX`. A depth of `0` marks an empty entry, so quiescence results are not stored here.
+ * `tt_probe()` reuses a score only when the stored depth is sufficient and the result is exact or
+ * its bound allows a cutoff in the current alpha-beta window. `best_move` is the best candidate
+ * found in that search and can still guide move ordering when the score cannot be reused.
+ *
+ * `generation` records the table generation when the entry was stored or last refreshed after a key
+ * match. Its age helps choose entries to replace; age alone does not invalidate a result.
+ */
 typedef struct XqTranspositionEntry
 {
     uint64_t key;
@@ -317,11 +335,41 @@ typedef struct XqTranspositionEntry
     uint8_t  score_kind;
 } XqTranspositionEntry;
 
+/**
+ * @brief A fixed group of cache entries sharing the same transposition-table bucket index.
+ *
+ * A position selects this bucket with `key & (XQ_TT_BUCKET_COUNT - 1u)`. Its `entries` array holds
+ * `XQ_TT_BUCKET_SIZE` slots, currently `4`, allowing different full keys with the same bucket index
+ * to coexist. Lookup scans these slots for a nonempty entry whose full key matches.
+ *
+ * Stores prefer an empty slot or an entry with the same key. When replacement is needed, depth,
+ * generation age and score kind determine retention priority. A full bucket's weakest entry is
+ * replaced only when the incoming result has at least the same retention priority.
+ */
 typedef struct XqTranspositionBucket
 {
     XqTranspositionEntry entries[XQ_TT_BUCKET_SIZE];
 } XqTranspositionBucket;
 
+/**
+ * @brief A reusable position-search cache containing buckets, an age generation and statistics.
+ *
+ * `buckets` owns a heap-allocated array of `XQ_TT_BUCKET_COUNT` buckets. Each bucket contains
+ * `XQ_TT_BUCKET_SIZE` entries, giving a fixed total capacity of
+ * `XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE`. Search branches use the same table to reuse results
+ * when different move sequences reach the same position and to obtain move-ordering hints.
+ * The table can retain entries across search calls.
+ *
+ * `generation` advances for each iterative-deepening iteration and wraps as a `uint8_t`. Entry
+ * generations are compared with it to estimate age for replacement without clearing the table.
+ * `stats` accumulates probes, hits, cache returns, stores and replacements across search calls;
+ * clearing or successfully loading the table resets these counters, as does an explicit stats
+ * reset.
+ *
+ * `xq_transposition_table_create()` allocates the table and its bucket array, while
+ * `xq_transposition_table_destroy()` releases both. Clearing empties the entries and resets the
+ * generation and statistics while preserving the allocation.
+ */
 struct XqTranspositionTable
 {
     XqTranspositionBucket *buckets; // size: 1 << 18
