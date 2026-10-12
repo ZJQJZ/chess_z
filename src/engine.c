@@ -201,7 +201,38 @@ typedef struct SearchContext
     XqSearchTimeMode time_mode;
 } SearchContext;
 
-/* Only one exact path can match at a time, so no full search tree is retained. */
+/**
+ * @brief Tracks a requested root path and collects a search explanation at its endpoint.
+ *
+ * `path` and `count` identify the target node by a sequence of moves from the root; an empty path
+ * selects the root. `matching` tracks whether the current branch follows that sequence. Only one
+ * endpoint visit is recorded at a time, so no full search tree is retained.
+ *
+ * During iterative deepening, successive depth iterations may reach the same target node again.
+ * `current` holds that node's search record for the current iteration. When an iteration reaches
+ * the target with positive remaining normal-search depth, `trace_begin()` resets `current` and
+ * starts collecting that iteration's search window, candidate results and cache information. An
+ * iteration that does not reach the target with positive remaining depth leaves it unchanged.
+ *
+ * `saved` points to the caller's output result. When a target visit completes without interruption,
+ * `trace_finish()` copies `current` into `*saved`, retaining the latest completed visit. A normal
+ * cutoff or cache return also counts as completion; the returned score may be a bound. If a later
+ * visit is interrupted, its partial `current` does not overwrite the earlier completed result.
+ * For example, a completed depth-`4` visit remains saved if the depth-`5` visit times out. If no
+ * visit completed, `xq_engine_explain_path()` returns the latest partial visit when one exists.
+ *
+ * `ordered` and `order_scores` together retain the target endpoint's candidate moves and their
+ * original heuristic ordering scores: `order_scores[i]` belongs to `ordered.moves[i]`. These are
+ * the next-move candidates at the target position, and their scores describe search priority.
+ * Search results for completed candidates are recorded separately in `current.node.moves`.
+ *
+ * `ordered` preserves the list sorted by heuristic score before a hash or principal-variation
+ * move is prioritized in the actual search list. This keeps the move-to-score mapping intact
+ * after reordering. `trace_move()` finds each searched candidate in `ordered` and copies its
+ * corresponding `order_scores` value into the explanation row's `order_score`.
+ *
+ * `blocked_tt` independently retains an ancestor cache cutoff that prevented reaching the target.
+ */
 typedef struct PathTrace
 {
     const XqMove        *path;
