@@ -237,6 +237,7 @@ enum
     WIN = 30000,
     STATIC_LIMIT = 28999,
     INFINITY_SCORE = 30001,
+    PARALLEL_MAX_PV_MOVES = 64,
     PARALLEL_TT_BUCKET_SIZE = 4,
     PARALLEL_TT_BUCKET_COUNT = 1 << 18
 };
@@ -470,6 +471,65 @@ static bool parallel_tt_try_acquire(ParallelTtBucket *bucket)
 }
 
 /**
+ * @brief Copies a matching cache entry under a single-attempt bucket guard.
+ *
+ * Uses the low bits of key to select a bucket, then attempts exclusive access once. If the bucket
+ * is occupied, returns immediately without retrying, spinning or blocking. While holding the guard,
+ * scans the four slots for a non-empty entry (depth != 0) with the same full position key. Sharing
+ * a bucket alone is not a hit; the full key, including the side to move, must match.
+ *
+ * On a hit, refreshes the shared entry's generation to the current iteration and copies the whole
+ * entry into caller-owned storage. Thus the returned snapshot includes the refreshed generation.
+ * Releases the bucket on both hit and miss paths before returning. The release publishes the
+ * generation update to subsequent acquiring callers; the copied entry can be inspected without
+ * holding the guard, even if another thread later replaces the shared entry. No shared pointer
+ * escapes, and snapshots from successive calls need not describe one consistent table state.
+ *
+ * A true return means only that the key matched: this helper does not check search depth, score
+ * kind, cutoff eligibility or move legality. parallel_tt_probe() handles score reuse, while PV
+ * reconstruction checks exactness, depth and the hinted move separately. No cache counters are
+ * changed here; ordinary probes count their own activity and PV lookups remain uncounted.
+ *
+ * The table must stay alive and its generation must remain stable during concurrent lookups.
+ * Clearing, destroying or advancing the table belongs between searches/iterations, after helper
+ * work has completed. Output storage must be private to the caller and must not alias table data.
+ *
+ * @param table    Initialized table borrowed by the search; NULL disables lookup.
+ * @param key      Full position hash used for bucket selection and entry matching.
+ * @param snapshot Non-null caller-owned output; written only on a hit, otherwise left unchanged.
+ * @return         True on a matching entry; false for a disabled table, bucket contention or a
+ *                 missing key. Inspect snapshot only when true is returned.
+ */
+static bool parallel_tt_snapshot(XqParallelTranspositionTable *table, uint64_t key,
+                                 ParallelTtEntry *snapshot)
+{
+    ParallelTtBucket *bucket;
+    bool hit = false;
+    int i;
+    if (table == NULL)
+        return false;
+    bucket = &table->buckets[key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
+    if (!parallel_tt_try_acquire(bucket))
+        return false;
+    /* Ordinary entry fields may be accessed only while this bucket is exclusively owned. */
+    for (i = 0; i < PARALLEL_TT_BUCKET_SIZE; ++i)
+    {
+        ParallelTtEntry *entry = &bucket->entries[i];
+        if (entry->depth != 0 && entry->key == key)
+        {
+            /* Refresh before copying so the snapshot reflects this iteration's generation. */
+            entry->generation = table->generation;
+            *snapshot = *entry;
+            hit = true;
+            break;
+        }
+    }
+    /* A miss must release the bucket too; callers receive a copy, never a borrowed entry. */
+    atomic_store_explicit(&bucket->occupied, 0, memory_order_release);
+    return hit;
+}
+
+/**
  * @brief Looks up a cached position and reports whether its score can resolve this search node.
  *
  * Selects a bucket using the low key bits and attempts to acquire it once. A busy bucket skips the
@@ -505,27 +565,11 @@ static bool parallel_tt_probe(XqParallelTranspositionTable *table, uint64_t key,
                               int alpha, int beta, bool ordering_only, ParallelTtEntry *snapshot,
                               bool *hit, XqTranspositionStats *stats)
 {
-    ParallelTtBucket *bucket;
-    int i;
     *hit = false;
     if (table == NULL)
         return false;
     ++stats->probes;
-    bucket = &table->buckets[key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
-    if (!parallel_tt_try_acquire(bucket))
-        return false;
-    for (i = 0; i < PARALLEL_TT_BUCKET_SIZE; ++i)
-    {
-        ParallelTtEntry *entry = &bucket->entries[i];
-        if (entry->depth != 0 && entry->key == key)
-        {
-            entry->generation = table->generation;
-            *snapshot = *entry;
-            *hit = true;
-            break;
-        }
-    }
-    atomic_store_explicit(&bucket->occupied, 0, memory_order_release);
+    *hit = parallel_tt_snapshot(table, key, snapshot);
     if (!*hit)
         return false;
     ++stats->hits;
@@ -656,7 +700,7 @@ release:
 }
 
 /**
- * @brief Moves a matching cached move to the front of the generated move list.
+ * @brief Moves a matching cache or PV hint to the front of the generated move list.
  *
  * Follows engine.c's prioritize_move behavior: matches only the from/to squares and promotes the
  * first match, shifting preceding moves one position to the right. Retains the complete move from
@@ -664,14 +708,15 @@ release:
  * order, and the move count is unchanged. An absent hint, an empty list, or a match already at the
  * front leaves the list unchanged.
  *
- * The cached move is only an ordering hint; this function does not add moves or validate their
+ * The supplied move is only an ordering hint; this function does not add moves or validate their
  * legality. The caller supplies the generated candidate list and must have exclusive access while
  * it is reordered, before sharing the list or assigning child ranges to workers.
  *
  * @param list Non-null generated move list to reorder in place.
- * @param move Cached move whose from/to squares identify the candidate to prioritize.
+ * @param move Hint whose from/to squares identify the candidate to prioritize.
+ * @return     True if the move was found, including when it was already first.
  */
-static void parallel_tt_prioritize_move(XqMoveList *list, XqMove move)
+static bool parallel_prioritize_move(XqMoveList *list, XqMove move)
 {
     int i;
     for (i = 0; i < list->count; ++i)
@@ -681,8 +726,192 @@ static void parallel_tt_prioritize_move(XqMoveList *list, XqMove move)
             for (; i > 0; --i)
                 list->moves[i] = list->moves[i - 1];
             list->moves[0] = prioritized;
-            return;
+            return true;
         }
+    return false;
+}
+
+/**
+ * @brief Stably sorts candidates by the built-in capture-ordering score, highest first.
+ *
+ * Calls xq_engine_default_move_order_score() once per move, reusing engine.c's piece values and
+ * MVV-LVA-style formula: quiet moves score zero; captures score CAPTURE_ORDER_BASE plus sixteen
+ * times the victim's value minus the attacker's value. Captures precede quiet moves, with valuable
+ * victims and cheaper attackers generally preferred. Both MAX and MIN nodes sort descending: these
+ * scores predict promising moves for the moving side, not the root's position evaluation.
+ *
+ * Uses insertion sort directly on list->moves, keeping a parallel local array of ordering scores.
+ * At iteration i, the prefix [0, i) is already sorted and its scores are initialized. Saves the
+ * current move before shifting that prefix, then inserts the move and score at the same index. Only
+ * strictly smaller scores shift right, so equal-scoring moves retain their input order. The move
+ * count and all move metadata are preserved; the position is never modified.
+ *
+ * Call for the first root iteration and continuing internal nodes, before promoting cache/PV hints
+ * and before assigning batches to helpers. Later root iterations retain their previous
+ * search-result ordering instead. Terminal, depth-zero and cache-cutoff nodes skip this work. This
+ * function provides no synchronization: the caller must exclusively own the move list. It neither
+ * checks move legality nor searches children, and does not invoke a custom scorer.
+ *
+ * Empty and single-move lists require no shifts. Worst-case time is O(count squared), with
+ * O(XQ_MAX_MOVES) stack storage and no heap allocation.
+ *
+ * @param position Position in which the candidates were generated; must not be null. Passed to the
+ *                 default scorer, which currently does not inspect it; left unchanged.
+ * @param list     Exclusively owned generated move list, sorted in place; must not be null and have
+ *                 count in 0..XQ_MAX_MOVES with valid piece/captured metadata.
+ */
+static void parallel_order_moves(const XqPosition *position, XqMoveList *list)
+{
+    int scores[XQ_MAX_MOVES];
+    int i;
+    for (i = 0; i < list->count; ++i)
+    {
+        /* The unprocessed suffix is untouched; score this original candidate exactly once. */
+        XqMove move = list->moves[i];
+        int score = xq_engine_default_move_order_score(position, move, NULL);
+        int j = i;
+        /* Move each score together with its candidate; strict comparison preserves ties. */
+        while (j > 0 && scores[j - 1] < score)
+        {
+            list->moves[j] = list->moves[j - 1];
+            scores[j] = scores[j - 1];
+            --j;
+        }
+        /* Close the gap with the saved candidate, extending the sorted prefix by one. */
+        list->moves[j] = move;
+        scores[j] = score;
+    }
+}
+
+typedef struct ParallelPv
+{
+    XqMove moves[PARALLEL_MAX_PV_MOVES];
+    int count;
+} ParallelPv;
+
+/* Each node has at most two batches. Retain only each batch's selected child PV, rather than
+ * allocating a full variation for every move. The batch's physical thread is its sole writer. */
+typedef struct BatchPv
+{
+    int best_index; /* -1 until this batch submits a valid child. */
+    ParallelPv child_pv;
+} BatchPv;
+
+/**
+ * @brief Prepends a selected move to its child's PV, truncating to the 64-move hint capacity.
+ *
+ * Builds the current node's line as [move] followed by the child's continuation. The child PV
+ * starts after move has been played and must not already include it. For example, move A and child
+ * line [B, C] produce [A, B, C]; an empty child line produces the one-move line [A].
+ *
+ * Reserves the first slot for move and copies at most PARALLEL_MAX_PV_MOVES - 1 child moves. A full
+ * 64-move child line therefore loses its last move when prepended. Only the resulting prefix and
+ * count are overwritten; any old array elements beyond count remain irrelevant. The child is
+ * unchanged, and complete XqMove records are copied without modifying metadata.
+ *
+ * Called after the node selects its final best child and waits for any helper to finish. The
+ * destination must be exclusively owned, and the child must be stable and visible to this thread.
+ * The two objects must not overlap: writing the first move and using memcpy are not safe for
+ * in-place prepending. This function supplies no synchronization or allocation of its own.
+ *
+ * Concatenates hints only; it does not validate move legality, search positions or change scores.
+ * Truncation limits the next iteration's ordering hints, never the requested search depth. The
+ * caller must discard cancelled child results before selecting a continuation to concatenate.
+ *
+ * @param pv    Non-null caller-owned output; receives a line of length 1..PARALLEL_MAX_PV_MOVES.
+ * @param move  Selected move at the current node, placed at the start of the output line.
+ * @param child Non-null child continuation, distinct from pv, with count in
+ *              0..PARALLEL_MAX_PV_MOVES and that many initialized moves; left unchanged.
+ */
+static void parallel_build_pv(ParallelPv *pv, XqMove move, const ParallelPv *child)
+{
+    int count = child->count;
+    /* Leave one slot for the current move, preserving the beginning of the child's line. */
+    if (count > PARALLEL_MAX_PV_MOVES - 1)
+        count = PARALLEL_MAX_PV_MOVES - 1;
+    pv->moves[0] = move;
+    memcpy(pv->moves + 1, child->moves, (size_t)count * sizeof(*pv->moves));
+    /* Only this prefix is valid; trailing slots need not be cleared. */
+    pv->count = count + 1;
+}
+
+/**
+ * @brief Reconstructs ordering hints from sufficiently deep exact cache snapshots.
+ *
+ * Clears pv->count and starts with the caller's already-probed entry, avoiding a second lookup of
+ * the initial position. The caller must have matched first->key to position; this function does not
+ * repeat that check. Copies both inputs locally and follows cached best moves without modifying the
+ * caller's position or snapshot. No unmake operations are needed.
+ *
+ * At each position, requires both kings to exist and an exact cache entry searched to at least the
+ * remaining depth. Matches its best move by from/to against freshly generated pseudo-legal moves,
+ * then uses the generated move's complete metadata rather than trusting cached piece and captured
+ * fields. Makes that move on another copy and appends it only if making succeeds and the mover's
+ * king is not in check afterward. A position with no legal continuation therefore cannot contribute
+ * a move, even if its pseudo-legal list is non-empty.
+ *
+ * After appending, advances the local position, decreases the remaining depth, and reads the next
+ * entry through parallel_tt_snapshot(). Each lookup tries its bucket once and copies the entry
+ * before releasing the guard. A missing or occupied bucket, non-exact entry, insufficient depth,
+ * missing king, absent candidate or illegal move stops reconstruction without discarding the prefix
+ * already collected. Reaching depth zero or the 64-move capacity also stops it; these limits bound
+ * cycles without a separate repetition detector. An initial depth of zero yields an empty line, and
+ * array elements beyond the returned count are unspecified.
+ *
+ * Successive snapshots need not represent one consistent table state because other workers can
+ * replace entries between lookups. The line is only an ordering hint: it neither proves a score nor
+ * changes the score that caused the original cache cutoff. Reconstruction lookups refresh hit
+ * generations but do not change cache counters. The table must remain alive with a stable
+ * generation; its per-bucket guards protect concurrent entry access, not external clear/destroy.
+ *
+ * Does not inspect node cancellation. The caller must check its node afterward and clear the PV if
+ * the result was cancelled. Output storage must be exclusively owned and must not overlap the
+ * inputs or shared table storage.
+ *
+ * @param table    Search's borrowed cache for subsequent positions; NULL stops further lookups but
+ *                 does not prevent using the supplied first entry.
+ * @param position Non-null starting position corresponding to first; left unchanged.
+ * @param depth    Maximum number of moves to reconstruct and initial required cache depth.
+ * @param first    Non-null, stable entry snapshot already matched to position; left unchanged.
+ * @param pv       Non-null caller-owned output; receives a possibly empty or truncated prefix.
+ */
+static void parallel_pv_from_tt(XqParallelTranspositionTable *table, const XqPosition *position,
+                                unsigned depth, const ParallelTtEntry *first, ParallelPv *pv)
+{
+    XqPosition current = *position;
+    ParallelTtEntry cached = *first;
+    /* Discard any old line, including when the requested depth is zero. */
+    pv->count = 0;
+    while (depth > 0 && pv->count < PARALLEL_MAX_PV_MOVES)
+    {
+        XqMoveList moves;
+        XqPosition next;
+        int i;
+        if (xq_position_king_square(&current, XQ_RED) == XQ_NO_SQUARE ||
+            xq_position_king_square(&current, XQ_BLACK) == XQ_NO_SQUARE ||
+            cached.score_kind != XQ_SEARCH_SCORE_EXACT || cached.depth < depth)
+            break;
+        /* Use the current position's move metadata; the cached move supplies only from/to. */
+        xq_generate_pseudo_legal(&current, &moves);
+        for (i = 0; i < moves.count; ++i)
+            if (moves.moves[i].from == cached.best_move.from &&
+                moves.moves[i].to == cached.best_move.to)
+                break;
+        if (i == moves.count)
+            break;
+        /* Validate before extending the prefix so an invalid hint is never appended. */
+        next = current;
+        if (!xq_position_make_move(&next, moves.moves[i]) ||
+            xq_position_in_check(&next, current.side_to_move))
+            break;
+        pv->moves[pv->count++] = moves.moves[i];
+        current = next;
+        --depth;
+        /* Short-circuit at either limit without probing an unnecessary continuation. */
+        if (depth == 0 || pv->count == PARALLEL_MAX_PV_MOVES ||
+            !parallel_tt_snapshot(table, xq_position_hash(&current), &cached))
+            break;
+    }
 }
 
 /**
@@ -734,10 +963,12 @@ typedef enum NodeState
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "parallel search requires lock-free atomic int");
 
 /* The owner keeps this stack-allocated node and its parent chain alive until its helper completes.
- * Position, moves, depth, parent and maximizing are immutable once shared. Bounds, window and state
- * use atomic access, as do submission counters and best_index. Each child slot has one writer and
- * is immutable after publication through best_index. Helper completion is acquired through its task
- * completion record after consuming the notification, before the owner returns. State combines
+ * Position, moves, depth, parent, maximizing and PV hints are immutable once shared. The previous
+ * iteration's hint storage stays alive until the root and all helpers return. Each batch PV has one
+ * writer; the owner reads the helper's PV only after completion synchronization. Bounds, window and
+ * state use atomic access, as do submission counters and best_index. Each child slot has one writer
+ * and is immutable after publication through best_index. Helper completion is acquired through its
+ * task completion record after consuming the notification, before the owner returns. State combines
  * finished/cancelled in one atomic transition so readers never see a partial stop.
  */
 typedef struct Node
@@ -747,6 +978,10 @@ typedef struct Node
     XqMoveList moves;
     unsigned depth;
     bool maximizing;
+    const XqMove *pv_hint;
+    int pv_hint_count; /* Nonzero only when the hint's first move matched and was moved to index 0.
+                        */
+    BatchPv owner_pv, helper_pv;
     AtomicInterval value;
     Interval children[XQ_MAX_MOVES];
     atomic_int submitted_count;
@@ -1116,11 +1351,11 @@ static void retain_root_order(Search *search, const Node *node, int best)
         scores[j] = score;
     }
     /* A bound tied with the best score is not necessarily an equally good move. */
-    parallel_tt_prioritize_move(&search->root_moves, node->moves.moves[best]);
+    (void)parallel_prioritize_move(&search->root_moves, node->moves.moves[best]);
 }
 
 static Interval search_node(Search *, const XqPosition *, Node *, unsigned, XqMove *,
-                            XqTranspositionStats *);
+                            const XqMove *, int, ParallelPv *, XqTranspositionStats *);
 
 /**
  * @brief Searches a disjoint batch of child moves without an explicit scheduling mutex.
@@ -1129,30 +1364,53 @@ static Interval search_node(Search *, const XqPosition *, Node *, unsigned, XqMo
  * submitted once through lock-free aggregate(); cancelled results are excluded. A completed node
  * can still accept valid in-flight submissions. check_node() then refreshes its window and
  * atomically publishes any completion or cancellation.
+ * Only the matched PV move at index zero inherits the hint suffix. The batch retains its best
+ * child's variation using the same bound comparison and strict tie rule as aggregate(). Within a
+ * batch submissions are sequential, so a final global best_index must also be its batch's retained
+ * best_index. The other batch never reads or writes this batch's PV while it runs.
  *
  * @param search Shared search state; must not be null.
  * @param node   Parent with generated moves and positive depth; keep it and its parent chain alive.
  * @param begin  Inclusive start index of this thread's batch.
  * @param end    Exclusive end index, with 0 <= begin <= end <= node->moves.count.
+ * @param batch  Exclusively owned PV output, initialized with best_index == -1 before dispatch.
  * @param stats  Cache counters owned by the executing thread, not by the node's owner.
  */
-static void search_range(Search *search, Node *node, int begin, int end,
+static void search_range(Search *search, Node *node, int begin, int end, BatchPv *batch,
                          XqTranspositionStats *stats)
 {
     int i;
     for (i = begin; i < end; ++i)
     {
         XqPosition child_position;
+        ParallelPv child_pv = {0};
+        const XqMove *child_hint = NULL;
+        int child_hint_count = 0;
         Interval child;
         if (check_node(node))
             break;
 
+        if (i == 0 && node->pv_hint_count > 1)
+        {
+            child_hint = node->pv_hint + 1;
+            child_hint_count = node->pv_hint_count - 1;
+        }
         child_position = node->position;
         xq_position_make_move(&child_position, node->moves.moves[i]);
-        child = search_node(search, &child_position, node, node->depth - 1, NULL, stats);
+        child = search_node(search, &child_position, node, node->depth - 1, NULL, child_hint,
+                            child_hint_count, &child_pv, stats);
 
         if (!child.cancelled)
+        {
+            int best = batch->best_index;
+            if (best < 0 || (node->maximizing && child.lower > node->children[best].lower) ||
+                (!node->maximizing && child.upper < node->children[best].upper))
+            {
+                batch->best_index = i;
+                batch->child_pv = child_pv;
+            }
             aggregate(node, i, child);
+        }
         (void)check_node(node);
     }
 }
@@ -1188,7 +1446,8 @@ static void *worker_main(void *argument)
         if (atomic_load_explicit(&worker->state, memory_order_acquire) != WORKER_READY)
             abort();
         completion = worker->completion;
-        search_range(search, worker->node, worker->begin, worker->end, &worker->cache_stats);
+        search_range(search, worker->node, worker->begin, worker->end, &worker->node->helper_pv,
+                     &worker->cache_stats);
         worker->node = NULL;
         worker->begin = worker->end = 0;
         worker->completion = NULL;
@@ -1301,7 +1560,13 @@ static int split_node(Search *search, Node *node, TaskCompletion **pending)
  * After terminal and depth-zero checks, an optional table supplies a hash move and may resolve a
  * non-root node with a sufficiently deep exact value or cutoff bound. Bounds remain intervals; the
  * root uses only the move hint in its first iteration; later iterations reuse the previous root
- * ordering. Cached deeper results may change fixed-depth scores.
+ * ordering. Cached deeper results may change fixed-depth scores. Exact cache cutoffs reconstruct a
+ * PV prefix from guarded snapshots; bound-only cutoffs return an empty PV.
+ *
+ * Continuing nodes apply stable capture ordering (except a root reusing its prior ordering), then
+ * promote the cache move and finally the matched previous-iteration PV move. Hints are matched by
+ * from/to and only the matching child inherits their suffix. All ordering and hint metadata is
+ * finalized before splitting. Leaf and cache-cutoff paths skip this sorting work.
  *
  * For a continuing internal node, initializes all child intervals as unknown and calls
  * `split_node()` once to assign a tail batch if a helper is available. Searches the retained front
@@ -1315,35 +1580,47 @@ static int split_node(Search *search, Node *node, TaskCompletion **pending)
  * returns an interval marked `cancelled`, which callers must exclude from score aggregation. The
  * root has no ancestor thresholds and returns a collapsed interval. For a searched root with a
  * selected child, retains root ordering and writes `best_move` if requested; the child's proven
- * lower bound witnesses the root score. Early returns leave that output unchanged.
+ * lower bound witnesses the root score. Early returns leave that output unchanged. Builds pv_out
+ * from the final best_index's batch only after helper synchronization. No PV is retained for a
+ * cancelled result; all PVs are ordering hints and never replace proven score intervals.
  *
  * No explicit scheduling mutex is used. Running operations are not interrupted asynchronously, so
  * ancestor changes are observed at later checkpoints. The input position is read-only, and its
  * parent chain must remain valid throughout the call. Custom evaluation callbacks must support
  * concurrent invocation.
  *
- * @param search    Initialized shared search state; must not be null.
- * @param position  Position to search; must not be null and must remain unchanged during the call.
- * @param parent    Parent node, or `NULL` for the root.
- * @param depth     Remaining search depth; `0` evaluates a non-terminal leaf.
- * @param best_move Optional root move output; pass `NULL` for recursive child searches.
- * @param stats     Cache counters owned by the executing thread throughout this recursion.
- * @return          Proven interval, exact or bounded, if `cancelled` is `false`; otherwise a
- *                  cancellation marker whose score bounds must not be used.
+ * @param search        Initialized shared search state; must not be null.
+ * @param position      Position to search; must not be null and must remain unchanged during the
+ *                      call.
+ * @param parent        Parent node, or `NULL` for the root.
+ * @param depth         Remaining search depth; `0` evaluates a non-terminal leaf.
+ * @param best_move     Optional root move output; pass `NULL` for recursive child searches.
+ * @param pv_hint       Read-only previous-iteration PV, or NULL for an unmatched path. Its storage
+ *                      must outlive this call and all helpers and must not overlap pv_out.
+ * @param pv_hint_count Number of available hint moves, in 0..PARALLEL_MAX_PV_MOVES.
+ * @param pv_out        Required caller-owned output, cleared on entry; terminal/leaf/cancelled
+ *                      results leave it empty. Bound cutoffs may truncate a searched line.
+ * @param stats         Cache counters owned by the executing thread throughout this recursion.
+ * @return              Proven interval, exact or bounded, if `cancelled` is `false`; otherwise a
+ *                      cancellation marker whose score bounds must not be used.
  */
 static Interval search_node(Search *search, const XqPosition *position, Node *parent,
-                            unsigned depth, XqMove *best_move, XqTranspositionStats *stats)
+                            unsigned depth, XqMove *best_move, const XqMove *pv_hint,
+                            int pv_hint_count, ParallelPv *pv_out, XqTranspositionStats *stats)
 {
     Node node = {0};
     TaskCompletion *pending;
     Interval value;
+    XqMove hash_move = {0};
     uint64_t key = 0;
     int score = 0, end, i;
-    bool leaf = false;
+    bool leaf = false, has_hash_move = false;
+    pv_out->count = 0;
     node.parent = parent;
     node.position = *position;
     node.depth = depth;
     node.maximizing = position->side_to_move == search->root_color;
+    node.owner_pv.best_index = node.helper_pv.best_index = -1;
     atomic_init(&node.submitted_count, 0);
     atomic_init(&node.submitted_bound, node.maximizing ? -WIN : WIN);
     atomic_init(&node.value.lower, -WIN);
@@ -1443,17 +1720,35 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
              */
             atomic_store_explicit(&node.value.lower, value.lower, memory_order_relaxed);
             atomic_store_explicit(&node.value.upper, value.upper, memory_order_relaxed);
+            if (cached.score_kind == XQ_SEARCH_SCORE_EXACT)
+                parallel_pv_from_tt(search->options.transposition_table, position, depth, &cached,
+                                    pv_out);
             (void)check_node(&node);
-            return node_value(&node);
+            value = node_value(&node);
+            if (value.cancelled)
+                pv_out->count = 0;
+            return value;
         }
         if (hit)
-            parallel_tt_prioritize_move(&node.moves, cached.best_move);
+        {
+            hash_move = cached.best_move;
+            has_hash_move = true;
+        }
+    }
+    if (parent != NULL || search->root_moves.count == 0)
+        parallel_order_moves(position, &node.moves);
+    if (has_hash_move)
+        (void)parallel_prioritize_move(&node.moves, hash_move);
+    if (pv_hint != NULL && pv_hint_count > 0 && parallel_prioritize_move(&node.moves, pv_hint[0]))
+    {
+        node.pv_hint = pv_hint;
+        node.pv_hint_count = pv_hint_count;
     }
     for (i = 0; i < node.moves.count; ++i)
         node.children[i] = (Interval){-WIN, WIN, false};
     end = split_node(search, &node, &pending);
 
-    search_range(search, &node, 0, end, stats);
+    search_range(search, &node, 0, end, &node.owner_pv, stats);
 
     /* Node completion does not release the borrowed node: always consume the helper's notification.
      * Helpers observe cancellation themselves. A notification posted early remains available. */
@@ -1476,6 +1771,10 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
         int best = atomic_load_explicit(&node.best_index, memory_order_relaxed);
         if (best >= 0)
         {
+            const BatchPv *batch =
+                node.owner_pv.best_index == best ? &node.owner_pv : &node.helper_pv;
+            assert(batch->best_index == best);
+            parallel_build_pv(pv_out, node.moves.moves[best], &batch->child_pv);
             if (parent == NULL)
                 retain_root_order(search, &node, best);
             if (best_move != NULL)
@@ -1558,12 +1857,15 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * Depth and total thread count must be at least one, and the split percentage must be in 0..100.
  * The calling thread searches the root; on POSIX platforms, creates `thread_count - 1` helpers
  * before starting the search and reuses them across iterations from depth 1 through options.depth.
- * Completed root scores order the next iteration even without a table; an enabled table retains
- * entries and advances its generation each iteration. Stops at the maximum depth, a terminal root,
- * or a proven winning move, as in the built-in search. Each iteration waits for all its helper work
- * before the next begins. A split percentage of zero disables task splitting, not helper creation.
- * The search is synchronous, has no deadline or quiescence search, and does not use the engine
- * adapter's cache or history.
+ * Completed root scores order the next iteration even without a table. Internal nodes and the first
+ * root iteration use the built-in capture ordering, with cache and then previous-PV moves promoted
+ * to the front. PV hints are retained for up to 64 moves and passed only along matching paths; they
+ * may end early at terminal positions or cache bounds/misses/contention. This does not limit search
+ * depth or alter score-bound semantics. An enabled table retains entries and advances its
+ * generation each iteration. Stops at the maximum depth, a terminal root, or a proven winning move,
+ * as in the built-in search. Each iteration waits for all its helper work before the next begins. A
+ * split percentage of zero disables task splitting, not helper creation. The search is synchronous,
+ * has no deadline or quiescence search, and does not use the engine adapter's cache or history.
  *
  * All scores use the root side-to-move's perspective. A null evaluator selects
  * `xq_engine_default_static_evaluate`; ordinary leaf scores are clamped to [-STATIC_LIMIT,
@@ -1582,10 +1884,11 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * for that node; failure to create the initial worker pool returns a resource error.
  *
  * Zeroes a non-null `result` before validating arguments, leaving it zeroed on failure. On success,
- * fills the move and score. Cache counters accumulate on the optional borrowed table; no trace,
- * timing or other search counters are collected. Joins all created helpers and releases initialized
- * resources before returning, including after partial thread-creation failure. The input position
- * is never modified, and no helper remains running after the call.
+ * fills the move and score. Cache counters accumulate on the optional borrowed table; PV cache
+ * reconstruction does not contribute to them. No trace, timing or other search counters are
+ * collected. Joins all created helpers and releases initialized resources before returning,
+ * including after partial thread-creation failure. The input position is never modified, and no
+ * helper remains running after the call.
  *
  * @param pos                           Root position; must not be null and must remain valid and
  *                                      unchanged during the call. Its side to move must be XQ_RED
@@ -1623,6 +1926,7 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
 #else
     {
         Search search = {0};
+        ParallelPv previous_pv = {0};
         Interval value;
         XqMove best = {0};
         unsigned i, current_depth;
@@ -1662,11 +1966,15 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
         }
         for (current_depth = 1;; ++current_depth)
         {
+            ParallelPv current_pv = {0};
             parallel_tt_new_iteration(effective.transposition_table, search.evaluate,
                                       search.evaluate_user, search.root_color);
             best = (XqMove){0};
-            value = search_node(&search, pos, NULL, current_depth, &best, &search.cache_stats);
+            value = search_node(&search, pos, NULL, current_depth, &best, previous_pv.moves,
+                                previous_pv.count, &current_pv, &search.cache_stats);
             assert(!value.cancelled && value.lower == value.upper);
+            /* All helper tasks have completed; no thread still borrows previous_pv. */
+            previous_pv = current_pv;
             result->score = value.lower;
             result->best_move = best;
             result->move_available = best.from != best.to;

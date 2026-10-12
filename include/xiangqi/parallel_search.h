@@ -55,7 +55,14 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * reusing the helper pool and previous root scores for ordering, even without a table. Stops early
  * for a terminal root or proven winning move. Without a table, scores are exact for the last
  * iteration's depth. Table generations advance per iteration and entries survive between them.
- * TT statistics accumulate on the table; no trace or other search statistics are collected.
+ * The first root iteration and internal nodes use the built-in stable capture ordering, then
+ * promote cache and previous-iteration PV moves (PV takes precedence). Later root iterations
+ * retain the previous root ordering. PV suffixes follow only matching moves; up to 64 moves are
+ * retained even without a table, without limiting search depth. Exact cache cutoffs may rebuild
+ * a PV prefix; terminal positions, cache bounds/misses/contention or invalid moves can shorten it.
+ * PV hints affect ordering only and are not exposed in the result. No custom move scorer is used.
+ * TT statistics accumulate on the table, excluding PV reconstruction lookups; no trace or other
+ * search statistics are collected.
  * Results are initialized even on failure.
  * Equal-score choices may depend on scheduling. POSIX pthread implementation requiring
  * always-lock-free atomic int; Windows returns UNSUPPORTED. */
