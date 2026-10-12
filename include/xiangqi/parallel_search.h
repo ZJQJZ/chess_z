@@ -28,7 +28,7 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
 
 typedef struct XqParallelOptions
 {
-    unsigned depth;          /* >= 1; default 3. No deadline or quiescence. */
+    unsigned depth;          /* Maximum iterative-deepening depth >= 1; default 3. No deadline or quiescence. */
     unsigned thread_count;   /* >= 1, includes calling thread; default 2. */
     unsigned split_percent;  /* 0..100; zero disables splitting; default 50. */
     XqParallelTranspositionTable *transposition_table; /* Borrowed; NULL disables caching (default). */
@@ -38,7 +38,7 @@ typedef struct XqParallelResult
 {
     bool move_available;
     XqMove best_move;
-    int score; /* Root-side value on OK; with caching, deeper stored results may be reused. */
+    int score; /* Last iteration's root-side value on OK; deeper cached results may be reused. */
 } XqParallelResult;
 
 XqParallelOptions xq_parallel_options_default(void);
@@ -51,7 +51,10 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * changing root color also clears it for custom evaluators. Clear it explicitly after mutating
  * evaluation parameters behind the same user pointer. No adapter cache/history/search is used.
  * Internal TT scores use the side-to-move perspective and may come from greater search depths;
- * the root probes only for move ordering. Without a table, scores retain fixed-depth semantics.
+ * the root probes only for move ordering in the first iteration. Searches depths 1..options.depth,
+ * reusing the helper pool and previous root scores for ordering, even without a table. Stops early
+ * for a terminal root or proven winning move. Without a table, scores are exact for the last
+ * iteration's depth. Table generations advance per iteration and entries survive between them.
  * TT statistics accumulate on the table; no trace or other search statistics are collected.
  * Results are initialized even on failure.
  * Equal-score choices may depend on scheduling. POSIX pthread implementation requiring

@@ -12,7 +12,7 @@
 /**
  * @brief Creates a default configuration for the parallel minimax search.
  *
- * The default configuration searches to a fixed depth of 3 plies, uses 2 threads including the
+ * The default configuration iteratively deepens to at most 3 plies, uses 2 threads including the
  * calling thread, and assigns 50 percent of a node's children to an available helper thread when
  * splitting is possible. The search has no time limit and no transposition table by default.
  *
@@ -401,7 +401,7 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
 }
 
 /**
- * @brief Prepares the table's evaluator binding and generation for a new top-level search.
+ * @brief Prepares the table's evaluator binding and generation for a new search iteration.
  *
  * has_context indicates whether the stored evaluator configuration is valid, not whether the table
  * contains entries or a search is running. If a previous binding exists, changing the evaluator or
@@ -410,23 +410,24 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * cached scores to side-to-move perspective alone is insufficient. The built-in evaluator is
  * antisymmetric and allows reuse across root-color changes.
  *
- * Records the new binding, marks it valid and advances the uint8_t generation once per search,
+ * Records the new binding, marks it valid and advances the uint8_t generation once per iteration,
  * wrapping modulo 256. Compatible bindings retain their entries and cumulative statistics; after a
  * clear, the generation advances from zero to one. Mutations behind an unchanged user pointer
  * cannot be detected, so callers must explicitly clear the table when those mutations change
  * evaluation semantics.
  *
- * Call with exclusive access before publishing any search tasks. The context and generation remain
- * unchanged while workers access the table; this function provides no synchronization with active
- * searches or external table users.
+ * Call with exclusive access before publishing any tasks for this iteration, after the preceding
+ * root search has waited for all its helpers. The context and generation remain unchanged while
+ * workers access the table; this function provides no synchronization with active searches or
+ * external table users.
  *
  * @param table         Borrowed table to prepare; NULL disables caching and does nothing here.
  * @param evaluate      Effective non-null evaluator, with the default already resolved.
  * @param evaluate_user Borrowed user-data pointer passed to the evaluator; may be NULL.
  * @param root_color    Root side whose perspective is used for this search's evaluations.
  */
-static void parallel_tt_new_search(XqParallelTranspositionTable *table, XqEvaluateFn evaluate,
-                                   void *evaluate_user, XqColor root_color)
+static void parallel_tt_new_iteration(XqParallelTranspositionTable *table, XqEvaluateFn evaluate,
+                                      void *evaluate_user, XqColor root_color)
 {
     if (table == NULL)
         return;
@@ -786,6 +787,7 @@ typedef struct Search
     XqColor root_color;
     XqEvaluateFn evaluate;
     void *evaluate_user;
+    XqMoveList root_moves; /* Caller-only ordering retained between completed iterations. */
     XqTranspositionStats cache_stats; /* Caller-local during search; merged after worker joins. */
 } Search;
 
@@ -1064,6 +1066,59 @@ static void aggregate(Node *node, int index, Interval child)
     }
 }
 
+/**
+ * @brief Retains root moves in descending score order for the next iteration.
+ *
+ * Copies the root's move list into search->root_moves and stably sorts it by descending child upper
+ * bound. All scores use the root side's perspective, so larger values are searched first. A child
+ * pruned against the root's alpha may supply only an upper bound; its lower bound can remain
+ * unknown. The upper bound therefore supplies an ordering hint, not necessarily an exact
+ * evaluation. The temporary scores array moves in step with the copied moves during sorting.
+ *
+ * Equal scores retain their input order during insertion sort. Finally promotes the selected best
+ * move so a tied upper bound cannot precede the move that actually proves the root score. This
+ * promotion preserves the relative order of all other moves. best always indexes the original
+ * node->moves list, which is not modified by this function.
+ *
+ * Called only by the root owner after all helper tasks have completed and their results are
+ * visible. Requires exclusive access to search->root_moves; no atomic operations are needed here.
+ * Updates only the retained move order, not the node's results or the transposition table. The next
+ * iteration creates fresh bounds and child results, so these hints cannot justify pruning. If a
+ * proven win stopped the root early, unsubmitted children retain unknown upper bounds; the
+ * resulting order is unused because the search driver does not start another iteration.
+ *
+ * @param search Search state receiving the next iteration's root move order; must not be null.
+ * @param node   Finished MAX root with initialized child slots and no active helpers; must not be
+ *               null and remains unchanged.
+ * @param best   Index of the selected, submitted child in node->moves, in [0, node->moves.count).
+ */
+static void retain_root_order(Search *search, const Node *node, int best)
+{
+    int scores[XQ_MAX_MOVES];
+    int i;
+    /* Keep the original move-to-child mapping intact while sorting a separate copy. */
+    search->root_moves = node->moves;
+    for (i = 0; i < node->moves.count; ++i)
+        scores[i] = node->children[i].upper;
+    /* Shift only strictly smaller scores, preserving the input order for ties. */
+    for (i = 1; i < search->root_moves.count; ++i)
+    {
+        XqMove move = search->root_moves.moves[i];
+        int score = scores[i];
+        int j = i;
+        while (j > 0 && scores[j - 1] < score)
+        {
+            search->root_moves.moves[j] = search->root_moves.moves[j - 1];
+            scores[j] = scores[j - 1];
+            --j;
+        }
+        search->root_moves.moves[j] = move;
+        scores[j] = score;
+    }
+    /* A bound tied with the best score is not necessarily an equally good move. */
+    parallel_tt_prioritize_move(&search->root_moves, node->moves.moves[best]);
+}
+
 static Interval search_node(Search *, const XqPosition *, Node *, unsigned, XqMove *,
                             XqTranspositionStats *);
 
@@ -1245,7 +1300,8 @@ static int split_node(Search *search, Node *node, TaskCompletion **pending)
  *
  * After terminal and depth-zero checks, an optional table supplies a hash move and may resolve a
  * non-root node with a sufficiently deep exact value or cutoff bound. Bounds remain intervals; the
- * root uses only the move hint. Cached deeper results may change fixed-depth scores.
+ * root uses only the move hint in its first iteration; later iterations reuse the previous root
+ * ordering. Cached deeper results may change fixed-depth scores.
  *
  * For a continuing internal node, initializes all child intervals as unknown and calls
  * `split_node()` once to assign a tail batch if a helper is available. Searches the retained front
@@ -1258,8 +1314,8 @@ static int split_node(Search *search, Node *node, TaskCompletion **pending)
  * threshold. If ancestor completion causes cancellation before a normal completion is published,
  * returns an interval marked `cancelled`, which callers must exclude from score aggregation. The
  * root has no ancestor thresholds and returns a collapsed interval. For a searched root with a
- * selected child, writes `best_move` if requested; the child's proven lower bound witnesses the
- * root score. Early returns leave that output unchanged.
+ * selected child, retains root ordering and writes `best_move` if requested; the child's proven
+ * lower bound witnesses the root score. Early returns leave that output unchanged.
  *
  * No explicit scheduling mutex is used. Running operations are not interrupted asynchronously, so
  * ancestor changes are observed at later checkpoints. The input position is read-only, and its
@@ -1324,7 +1380,12 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
     else
     {
         if (parent == NULL)
-            xq_generate_legal(position, &node.moves);
+        {
+            if (search->root_moves.count > 0)
+                node.moves = search->root_moves;
+            else
+                xq_generate_legal(position, &node.moves);
+        }
         else
             xq_generate_pseudo_legal(position, &node.moves);
         if (node.moves.count == 0)
@@ -1368,11 +1429,12 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
     if (search->options.transposition_table != NULL)
     {
         ParallelTtEntry cached;
-        bool hit;
+        bool hit = false;
         int alpha = atomic_load_explicit(&node.alpha, memory_order_relaxed);
         int beta = atomic_load_explicit(&node.beta, memory_order_relaxed);
         key = xq_position_hash(position);
-        if (parallel_tt_probe(search->options.transposition_table, key, depth,
+        if ((parent != NULL || search->root_moves.count == 0) &&
+            parallel_tt_probe(search->options.transposition_table, key, depth,
                               node.maximizing ? alpha : -beta, node.maximizing ? beta : -alpha,
                               parent == NULL, &cached, &hit, stats))
         {
@@ -1414,6 +1476,8 @@ static Interval search_node(Search *search, const XqPosition *position, Node *pa
         int best = atomic_load_explicit(&node.best_index, memory_order_relaxed);
         if (best >= 0)
         {
+            if (parent == NULL)
+                retain_root_order(search, &node, best);
             if (best_move != NULL)
             {
                 assert(node.children[best].lower == value.lower);
@@ -1488,23 +1552,28 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
 #endif
 
 /**
- * @brief Searches a position to a fixed depth using a per-call pool of helper threads.
+ * @brief Searches a position with iterative deepening using a per-call pool of helper threads.
  *
  * Copies the supplied options, or uses `xq_parallel_options_default()` when `options` is null.
  * Depth and total thread count must be at least one, and the split percentage must be in 0..100.
  * The calling thread searches the root; on POSIX platforms, creates `thread_count - 1` helpers
- * before starting the search. A split percentage of zero disables task splitting, not helper
- * creation. The search is synchronous, has no deadline or quiescence search, and does not use the
- * engine adapter's cache or history.
+ * before starting the search and reuses them across iterations from depth 1 through options.depth.
+ * Completed root scores order the next iteration even without a table; an enabled table retains
+ * entries and advances its generation each iteration. Stops at the maximum depth, a terminal root,
+ * or a proven winning move, as in the built-in search. Each iteration waits for all its helper work
+ * before the next begins. A split percentage of zero disables task splitting, not helper creation.
+ * The search is synchronous, has no deadline or quiescence search, and does not use the engine
+ * adapter's cache or history.
  *
  * All scores use the root side-to-move's perspective. A null evaluator selects
  * `xq_engine_default_static_evaluate`; ordinary leaf scores are clamped to [-STATIC_LIMIT,
  * STATIC_LIMIT], while terminal wins and losses receive WIN and -WIN. Terminal positions are
  * checked before the depth limit, and having no legal moves is a loss even without check. On
- * success, returns a root value and a best move when available. Without caching, the value is exact
- * for the requested depth; an enabled table may reuse results from greater depths. Terminal roots
- * also succeed but have `move_available == false`; callers must check that flag before using
- * `best_move`. Equal-score move selection may depend on thread scheduling.
+ * success, returns the last iteration's root value and a best move when available. Without caching,
+ * the value is exact for that iteration's depth; a proven win may stop before the requested
+ * maximum. An enabled table may reuse results from greater depths. Terminal roots also succeed but
+ * have `move_available == false`; callers must check that flag before using `best_move`.
+ * Equal-score move selection may depend on thread scheduling.
  *
  * Evaluators may be called concurrently; the callback and its user data must support this and must
  * not modify positions. Scheduling uses atomic states and semaphores, without explicit mutexes.
@@ -1556,7 +1625,7 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
         Search search = {0};
         Interval value;
         XqMove best = {0};
-        unsigned i;
+        unsigned i, current_depth;
         atomic_init(&search.shutdown, 0);
         search.options = effective;
         search.root_color = pos->side_to_move;
@@ -1591,13 +1660,20 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition *pos, const XqParall
             }
             ++search.worker_count;
         }
-        parallel_tt_new_search(effective.transposition_table, search.evaluate, search.evaluate_user,
-                               search.root_color);
-        value = search_node(&search, pos, NULL, effective.depth, &best, &search.cache_stats);
-        assert(!value.cancelled && value.lower == value.upper);
-        result->score = value.lower;
-        result->best_move = best;
-        result->move_available = best.from != best.to;
+        for (current_depth = 1;; ++current_depth)
+        {
+            parallel_tt_new_iteration(effective.transposition_table, search.evaluate,
+                                      search.evaluate_user, search.root_color);
+            best = (XqMove){0};
+            value = search_node(&search, pos, NULL, current_depth, &best, &search.cache_stats);
+            assert(!value.cancelled && value.lower == value.upper);
+            result->score = value.lower;
+            result->best_move = best;
+            result->move_available = best.from != best.to;
+            /* Check before incrementing so even UINT_MAX cannot wrap the iteration depth. */
+            if (!result->move_available || result->score == WIN || current_depth == effective.depth)
+                break;
+        }
         stop_pool(&search);
         if (effective.transposition_table != NULL)
             parallel_tt_add_stats(&effective.transposition_table->stats, &search.cache_stats);

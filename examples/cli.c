@@ -45,10 +45,10 @@ static void print_usage(const char *program)
     printf("  --search builtin|parallel  search implementation (default builtin)\n");
     printf("  --threads N                parallel threads including caller (default 2)\n");
     printf("  --split-percent P          parallel batch percentage, 0..100 (default 50)\n");
-    printf("  parallel: fixed depth (default 3), in-memory cache, no time limit or TT files\n");
+    printf("  parallel: iterative deepening (default max depth 3), in-memory cache, no time limit or TT files\n");
     printf("  %-21s  %s\n", "-f, --fen FEN", "initialize the position from FEN");
     printf("  %-21s  %s\n", "-e, --engine COLOR", "choose the engine side: red or black");
-    printf("  %-21s  %s\n", "    --depth N", "search depth in plies (builtin default 10; parallel fixed default 3)");
+    printf("  %-21s  %s\n", "    --depth N", "maximum search depth in plies (builtin default 10; parallel default 3)");
     printf("  %-21s  %s\n", "    --time-ms MS", "default thinking time per engine move (positive integer milliseconds)");
     printf("  %-21s  %s\n", "", "a nearly complete iteration may finish after this budget");
     printf("  %-21s  %s\n", "    --tt-file PATH", "load a saved transposition table before the first search");
@@ -228,7 +228,7 @@ static void print_help(bool parallel)
 {
     printf("commands:\n");
     if (parallel)
-        printf("  a0a1            move; parallel search uses fixed depth, without time_ms\n");
+        printf("  a0a1            move; parallel search uses iterative deepening, without time_ms\n");
     else
     {
         printf("  a0a1 [time_ms]  move; optional positive integer time limit for the next engine reply\n");
@@ -666,7 +666,7 @@ int main(int argc, char **argv)
     if (search_detail)
         search_log = open_search_detail(&pos, engine_color);
     if (parallel)
-        printf("Search mode: parallel, fixed depth %u, threads %u, split %u%%; no time limit; in-memory cache %s.\n",
+        printf("Search mode: parallel, iterative deepening to max depth %u, threads %u, split %u%%; no time limit; in-memory cache %s.\n",
                parallel_options.depth, parallel_options.thread_count, parallel_options.split_percent,
                parallel_options.transposition_table != NULL ? "enabled" : "disabled");
 
