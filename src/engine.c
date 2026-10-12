@@ -156,6 +156,38 @@ typedef struct ScoredMove
     unsigned completed_depth;
 } ScoredMove;
 
+/**
+ * @brief Shared timing, progress and stop state for one built-in search invocation.
+ *
+ * The root search driver owns this context and passes it by pointer to recursive negamax and
+ * quiescence searches. All nodes and iterative-deepening iterations in that invocation share the
+ * same counters and stop decision. Each search invocation owns an independent context.
+ *
+ * `nodes` accumulates visited nodes across iterations.
+ *
+ * `iteration_completed_moves` counts root candidate moves whose searches have returned a result
+ * without being stopped in the current depth iteration. Each candidate's search may visit many
+ * descendant nodes; a normal return after alpha-beta pruning also counts as completion. A candidate
+ * still being searched or interrupted by a stop request does not increase this count. The root
+ * driver resets `iteration_completed_moves` to `0` at the start of each depth iteration and
+ * increments it after recording each completed candidate's result. For example, with `10` root
+ * candidates at depth `4`, completing two candidates leaves the count at `2` while the third is
+ * being searched. Starting the depth-`5` iteration resets it to `0`. Together with
+ * `iteration_total_moves`, it measures the fraction of root candidates completed for the timeout
+ * extension decision.
+ *
+ * `iteration_total_moves` is the number of root candidate moves to search in each depth iteration,
+ * taken from the legal root-move list after `filter_root_cycles()`. It remains unchanged across
+ * depth iterations because they search the same candidate list. Descendant nodes do not contribute
+ * to this total. For example, `iteration_completed_moves == 6` and `iteration_total_moves == 10`
+ * mean that `60%` of the root candidates have completed their searches in the current iteration.
+ *
+ * `deadline_reached` records a detected timeout without necessarily requesting an immediate stop.
+ * If root completion strictly exceeds `XQ_FINISH_ITERATION_THRESHOLD_PERCENT`, an unfinished
+ * iteration may continue with `finish_iteration == true` and `stopped == false`. The driver then
+ * exits after committing that iteration. Otherwise timeout sets `stopped`; clock read failures also
+ * set it, even during an extension. Once set, `stopped` remains true for this search.
+ */
 typedef struct SearchContext
 {
     uint64_t         deadline_ms;
