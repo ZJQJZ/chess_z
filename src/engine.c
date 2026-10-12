@@ -134,6 +134,21 @@ enum
     XQ_TT_BUCKET_COUNT                    = 1 << 18
 };
 
+/**
+ * @brief A move with a context-dependent score and optional root-search depth metadata.
+ *
+ * In `order_moves()` and `order_moves_for_explain()`, `score` is a heuristic ordering priority
+ * returned by `move_order_score()`. Higher values are searched first; these values do not evaluate
+ * the resulting position and are not comparable to search scores.
+ *
+ * For root candidates, `score` is the negamax result from the root side's perspective: higher
+ * values favor that side. Alpha-beta search may return a bound rather than an exact value; this
+ * structure does not store the bound kind. A root candidate with `completed_depth == 0` has no
+ * valid search score; `INT_MIN / 2` is used as a placeholder.
+ *
+ * `completed_depth` is initialized and used only for root candidates. Ordinary move-ordering
+ * records leave it unused, so callers must not read it in that context.
+ */
 typedef struct ScoredMove
 {
     XqMove   move;
