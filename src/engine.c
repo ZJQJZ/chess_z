@@ -246,13 +246,40 @@ typedef struct PathTrace
     XqExplainTtBlock     blocked_tt;
 } PathTrace;
 
-/* Explanation state borrows its own root driver's ordinary timing/counter context.
- * Ordinary negamax and quiescence remain independent of path records. */
+/**
+ * @brief Connects search state, path tracing, cache access and root decisions for explanation.
+ *
+ * `search` points to the explanation root driver's `SearchContext`, sharing its timing, node
+ * counters and stop state across recursive calls. The driver owns this object as a local variable,
+ * so the pointer is valid only while `builtin_search_for_explain()` is running and is cleared
+ * after the driver returns.
+ *
+ * `trace` points to the `PathTrace` that matches the requested root path and collects the target
+ * endpoint's search records. It explains how that target position's candidates were searched and
+ * which candidate had the best recorded search score in the retained visit.
+ *
+ * `root` records the final move selected from the starting position, the candidate results used
+ * for that selection and the initial root cache lookup used for move ordering. It explains which
+ * move the engine ultimately chose at the root of the whole search.
+ *
+ * `trace` and `root` describe decisions at two different levels: a local candidate choice at the
+ * requested path's endpoint, and the overall root move selection. The target may be deep in the
+ * search tree, so its best candidate is a move from that target position and need not be the move
+ * selected at the root. These records are kept separately; the retained target visit may also
+ * belong to a different depth iteration from the final root decision.
+ *
+ * `table` borrows the adapter's optional transposition table, shared by all branches of this
+ * search, to reuse cached results and record the actual cache-probe outcomes. A null `table`
+ * disables transposition-table access.
+ *
+ * This context borrows the objects referenced by `search`, `trace` and `table`; it does not allocate
+ * or free them. Ordinary negamax and quiescence remain independent of path-recording state.
+ */
 typedef struct ExplainContext
 {
-    SearchContext        *search; /* Valid only while builtin_search_for_explain is running. */
+    SearchContext        *search;
     PathTrace            *trace;
-    XqTranspositionTable *table; /* Borrowed for this search, shared by all branches. */
+    XqTranspositionTable *table;
     XqRootSearchExplain   root;
 } ExplainContext;
 
