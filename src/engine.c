@@ -464,7 +464,7 @@ static int64_t cpu_time_ms(void)
  *
  * @param mode Timing mode. `XQ_SEARCH_TIME_CPU` uses process CPU time; all other values use
  *             monotonic wall-clock time.
- * @return     The current time in milliseconds from the selected clock, or -1 if the underlying
+ * @return     The current time in milliseconds from the selected clock, or `-1` if the underlying
  *             clock cannot be read.
  */
 static int64_t search_time_ms(XqSearchTimeMode mode)
@@ -493,13 +493,15 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
     if (limits->time_limit_ms == 0)
         return;
 
-    now                   = search_time_ms(context->time_mode);
     context->time_limited = true;
+
+    now = search_time_ms(context->time_mode);
     if (now < 0)
     {
         context->stopped = true;
         return;
     }
+
     if (UINT64_MAX - (uint64_t)now < limits->time_limit_ms)
         context->deadline_ms = UINT64_MAX;
     else
