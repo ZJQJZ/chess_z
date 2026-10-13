@@ -157,7 +157,7 @@ typedef struct ScoredMove
 } ScoredMove;
 
 /**
- * @brief Shared timing, progress and stop state for one built-in search invocation.
+ * @brief Shared timing, progress and time-related stop state for one built-in search invocation.
  *
  * The root search driver owns this context and passes it by pointer to recursive negamax and
  * quiescence searches. All nodes and iterative-deepening iterations in that invocation share the
@@ -184,9 +184,11 @@ typedef struct ScoredMove
  *
  * `deadline_reached` records a detected timeout without necessarily requesting an immediate stop.
  * If root completion strictly exceeds `XQ_FINISH_ITERATION_THRESHOLD_PERCENT`, an unfinished
- * iteration may continue with `finish_iteration == true` and `stopped == false`. The driver then
- * exits after committing that iteration. Otherwise timeout sets `stopped`; clock read failures also
- * set it, even during an extension. Once set, `stopped` remains true for this search.
+ * iteration may continue with `finish_iteration == true` and `time_stop_required == false`. The
+ * driver then exits after committing that iteration. Otherwise timeout sets `time_stop_required`;
+ * clock read failures also set it, even during an extension. This flag requests immediate
+ * termination due to time control and stays `false` when no time limit is enabled. Once set, it
+ * remains `true` for this search.
  */
 typedef struct SearchContext
 {
@@ -197,7 +199,7 @@ typedef struct SearchContext
     bool             time_limited;
     bool             deadline_reached;
     bool             finish_iteration;
-    bool             stopped;
+    bool             time_stop_required;
     XqSearchTimeMode time_mode;
 } SearchContext;
 
@@ -478,7 +480,7 @@ static int64_t search_time_ms(XqSearchTimeMode mode)
  * The function resets the node count and stop state, normalizes the timing mode, and calculates the
  * absolute deadline when the time limit is nonzero. A zero time limit disables timeout checks.
  *
- * If the clock cannot be read for a timed search, the search is marked as stopped.
+ * If the clock cannot be read for a timed search, `time_stop_required` is set to `true`.
  *
  * @param context Search context to initialize; must not be null.
  * @param limits  Depth, time, and timing mode configuration; must not be null.
@@ -498,7 +500,7 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
     now = search_time_ms(context->time_mode);
     if (now < 0)
     {
-        context->stopped = true;
+        context->time_stop_required = true;
         return;
     }
 
@@ -511,30 +513,52 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
 /**
  * @brief Checks whether timing requires an immediate stop or permits finishing this iteration.
  *
- * A non-forced check reads the clock only when the node count is a multiple of 1024, reducing the
- * overhead of frequent system clock queries. A forced check reads the clock immediately. At the
- * first detected deadline, an unfinished iteration strictly above the completed-root threshold may
- * finish. Its recursive results remain valid because `stopped` stays false; the root driver must
- * exit after committing this iteration. Otherwise the search stops immediately. Clock read failure
- * always stops the search, including during an extension, and a stop is never revoked.
+ * A non-forced check reads the clock only when the node count is a multiple of `1024`, reducing the
+ * overhead of frequent system clock queries. A forced check reads the clock immediately.
  *
- * @param context The current search context. If null, the search is considered active and no time
+ * The completion percentage is evaluated only when the deadline is first detected. An unfinished
+ * iteration strictly above the completed-root threshold may finish; otherwise the search stops
+ * immediately. Permission to finish sets `deadline_reached` and `finish_iteration` to `true`, while
+ * `time_stop_required` stays `false`, keeping recursive search results valid.
+ *
+ * During this extension, subsequent calls return `false` unless a clock read fails. Non-forced
+ * calls still skip clock reads between node-count multiples of `1024`; forced calls still read the
+ * clock immediately. Since `deadline_reached` is already `true`, successful clock reads do not
+ * enter the deadline-handling branch again or recompute the completion percentage. `force` controls
+ * when the clock is checked and does not override permission to finish the iteration. Even
+ * completing all root candidates does not set `time_stop_required`; the root driver commits the
+ * iteration's result and exits because `deadline_reached` is `true`, without starting another depth
+ * iteration.
+ *
+ * Clock read failure always stops a timed search, including during an extension, by setting
+ * `time_stop_required` to `true`. Once requested, this immediate stop is never revoked.
+ *
+ * @param context The current search context. If `NULL`, the search is considered active and no time
  *                check is performed.
- * @param force   If true, checks the time immediately; if false, checks only when the node count is
- *                a multiple of 1024.
- * @return        True for an immediate stop; false while active or allowed to finish the iteration.
+ * @param force   If `true`, checks the time immediately; if `false`, checks only when the node
+ *                count is a multiple of `1024`.
+ * @return        `true` for an immediate stop; `false` while active or allowed to finish the
+ *                iteration.
  */
 static bool search_check_time(SearchContext *context, bool force)
 {
     int64_t now;
 
-    if (context == NULL || context->stopped || !context->time_limited)
-        return context != NULL && context->stopped;
+    if (context == NULL)
+        return false;
+
+    if (!context->time_limited)
+        return false;
+
+    if (context->time_stop_required)
+        return true;
+
     if (!force && (context->nodes & UINT64_C(1023)) != 0)
         return false;
+
     now = search_time_ms(context->time_mode);
     if (now < 0)
-        context->stopped = true;
+        context->time_stop_required = true;
     else if (!context->deadline_reached && (uint64_t)now >= context->deadline_ms)
     {
         context->deadline_reached = true;
@@ -543,10 +567,12 @@ static bool search_check_time(SearchContext *context, bool force)
             context->iteration_completed_moves < context->iteration_total_moves &&
             (uint64_t)context->iteration_completed_moves * 100 >
                 (uint64_t)context->iteration_total_moves * XQ_FINISH_ITERATION_THRESHOLD_PERCENT;
+
         if (!context->finish_iteration)
-            context->stopped = true;
+            context->time_stop_required = true;
     }
-    return context->stopped;
+
+    return context->time_stop_required;
 }
 
 /**
@@ -1790,7 +1816,7 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
         xq_position_make_move(pos, list.moves[i]);
         score = -quiescence(engine, pos, depth - 1, -beta, -alpha, context);
         xq_position_unmake_move(pos, list.moves[i]);
-        if (context != NULL && context->stopped)
+        if (context != NULL && context->time_stop_required)
             return 0;
         if (score > best)
             best = score;
@@ -1855,14 +1881,15 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  * enabled, it reads the configured clock every 1024 nodes. At the deadline, the shared context
  * either stops the search or permits finishing the current root iteration based on its progress.
  * These periodic checks do not guarantee an exact cutoff at the deadline. A null context disables
- * node counting and time checks; a context with no time limit still counts nodes and honors an
- * existing stop request.
+ * node counting and time checks; a context with no time limit still counts nodes without reading
+ * the clock.
  *
- * After each recursive child search, the move is undone before checking `context->stopped`. If
- * stopped, the function returns zero immediately, without using the child's score or storing the
- * interrupted node in the transposition table. The zero is an interruption placeholder, not a
- * draw evaluation: callers must check `context->stopped` and discard the score and any partial
- * `pv_out`. The root search then selects a move from previously completed search results.
+ * After each recursive child search, the move is undone before checking
+ * `context->time_stop_required`. If stopped, the function returns zero immediately, without using
+ * the child's score or storing the interrupted node in the transposition table. The zero is an
+ * interruption placeholder, not a draw evaluation: callers must check `context->time_stop_required`
+ * and discard the score and any partial `pv_out`. The root search then selects a move from
+ * previously completed search results.
  *
  * @param engine        Engine adapter used for static evaluation and move ordering; may be null.
  * @param table         Transposition table used for probing, move ordering, and storage; may be
@@ -1949,7 +1976,7 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
         score = -negamax(engine, table, pos, depth - 1, -beta, -alpha, child_hint, child_hint_count,
                          pv_out != NULL ? &child_pv : NULL, context);
         xq_position_unmake_move(pos, list.moves[i]);
-        if (context != NULL && context->stopped)
+        if (context != NULL && context->time_stop_required)
             return 0;
         if (score > best)
         {
@@ -2203,7 +2230,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
 
     search_context_init(&context, limits);
     if (stats != NULL)
-        stats->stopped = context.stopped || context.deadline_reached;
+        stats->stopped = context.time_stop_required || context.deadline_reached;
 
     *best_move      = list.moves[0];
     filtered_cycles = filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
@@ -2270,7 +2297,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
                              child_hint_count, &child_pv, &context);
             xq_position_unmake_move(pos, root_moves[i].move);
 
-            if (context.stopped)
+            if (context.time_stop_required)
                 break;
 
             root_moves[i].score           = score;
@@ -2345,7 +2372,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
             tt_store(table, root_key, current_depth, root_moves[0].score, XQ_SEARCH_SCORE_EXACT,
                      root_moves[0].move);
 
-        if (winning_move_found || context.stopped || context.deadline_reached ||
+        if (winning_move_found || context.time_stop_required || context.deadline_reached ||
             current_depth == depth)
             break;
     }
@@ -2353,7 +2380,7 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
     if (stats != NULL)
     {
         stats->nodes              = context.nodes;
-        stats->stopped            = context.stopped || context.deadline_reached;
+        stats->stopped            = context.time_stop_required || context.deadline_reached;
         stats->winning_move_found = winning_move_found;
         for (i = 0; i < list.count; ++i)
             if (moves_equal(root_moves[i].move, *best_move))
@@ -2993,7 +3020,7 @@ static void trace_move(ExplainContext *context, bool record, XqMove move, int al
  */
 static int trace_finish(ExplainContext *context, bool record, int score)
 {
-    if (record && !context->search->stopped)
+    if (record && !context->search->time_stop_required)
     {
         PathTrace *trace                = context->trace;
         trace->current.complete         = true;
@@ -3107,7 +3134,8 @@ static void trace_tt_block(ExplainContext *context, unsigned depth, int ply, int
  *                      searching children. Later cache stores do not update this snapshot. When
  *                      non-null, initialized on every call: disabled without a table, or not-probed
  *                      until a lookup occurs (e.g. depth-zero or early terminal returns).
- * @return              Side-to-move score, or zero on interruption. Check context->search->stopped.
+ * @return              Side-to-move score, or zero on interruption. Check
+ *                      `context->search->time_stop_required`.
  */
 static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth,
                                int ply, int alpha, int beta, const XqMove *pv_hint,
@@ -3195,7 +3223,7 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
                                      record ? &child_tt : NULL);
         xq_position_unmake_move(pos, list.moves[i]);
         trace_pop(context, matching);
-        if (search->stopped)
+        if (search->time_stop_required)
             return 0;
         trace_move(context, record, list.moves[i], alpha, beta, score, record ? &child_tt : NULL);
         if (score > best)
@@ -3328,7 +3356,8 @@ static void trace_root_selection(ExplainContext *context, const ScoredMove *move
  * @param hint_count Number of moves in hint.
  * @param pv         Output child PV, invalid on interruption; may be null.
  * @param context    Explanation context borrowing the driver's SearchContext; must not be null.
- * @return           Root-side recursive score; invalid if context->search->stopped is true.
+ * @return           Root-side recursive score; invalid if `context->search->time_stop_required` is
+ *                   `true`.
  */
 static int search_root_move_for_explain(const XqEngineAdapter *engine, XqPosition *pos, XqMove move,
                                         unsigned depth, int alpha, int beta, const XqMove *hint,
@@ -3344,7 +3373,7 @@ static int search_root_move_for_explain(const XqEngineAdapter *engine, XqPositio
                                  context, record ? &child_tt : NULL);
     xq_position_unmake_move(pos, move);
     trace_pop(context, matching);
-    if (!context->search->stopped)
+    if (!context->search->time_stop_required)
         trace_move(context, record, move, alpha, beta, score, record ? &child_tt : NULL);
     return score;
 }
@@ -3413,7 +3442,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
 
     search_context_init(&context, limits);
     if (stats != NULL)
-        stats->stopped = context.stopped || context.deadline_reached;
+        stats->stopped = context.time_stop_required || context.deadline_reached;
 
     *best_move      = list.moves[0];
     filtered_cycles = filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
@@ -3476,7 +3505,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
                                                  alpha, beta, child_hint, child_hint_count,
                                                  &child_pv, explain);
 
-            if (context.stopped)
+            if (context.time_stop_required)
                 break;
 
             root_moves[i].score           = score;
@@ -3492,7 +3521,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
                 build_principal_variation(&current_pv, root_moves[i].move, &child_pv);
             }
 
-            /* Save a complete root visit before the final clock check can set stopped. */
+            /* Save a complete root visit before the final time check can request a stop. */
             if (completed_roots == list.count)
                 trace_root_finish(explain, alpha);
             /* Only a completed, non-interrupted candidate can establish a winning move. */
@@ -3540,7 +3569,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
             tt_store(table, root_key, current_depth, root_moves[0].score, XQ_SEARCH_SCORE_EXACT,
                      root_moves[0].move);
 
-        if (winning_move_found || context.stopped || context.deadline_reached ||
+        if (winning_move_found || context.time_stop_required || context.deadline_reached ||
             current_depth == depth)
             break;
     }
@@ -3549,7 +3578,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
     if (stats != NULL)
     {
         stats->nodes              = context.nodes;
-        stats->stopped            = context.stopped || context.deadline_reached;
+        stats->stopped            = context.time_stop_required || context.deadline_reached;
         stats->winning_move_found = winning_move_found;
         for (i = 0; i < list.count; ++i)
             if (moves_equal(root_moves[i].move, *best_move))
