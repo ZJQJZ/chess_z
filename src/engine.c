@@ -1485,8 +1485,10 @@ static void tt_try_store_result(XqTranspositionTable *table,
 static int evaluate_side(const XqPosition *pos,
                          XqColor           color)
 {
-    int score = 0;
+    int score;
     int type;
+
+    score = 0;
 
     for (type = 0; type < XQ_PIECE_TYPE_NB; ++type)
     {
@@ -1494,9 +1496,13 @@ static int evaluate_side(const XqPosition *pos,
 
         while (!xq_bb_is_empty(remaining))
         {
-            XqSquare sq   = xq_bb_first_square(remaining);
-            int      rank = xq_square_rank(sq);
-            int      file = xq_square_file(sq);
+            XqSquare sq;
+            int      rank;
+            int      file;
+
+            sq   = xq_bb_first_square(remaining);
+            rank = xq_square_rank(sq);
+            file = xq_square_file(sq);
 
             xq_bb_clear(&remaining, sq);
             if (color == XQ_BLACK)
@@ -1504,6 +1510,7 @@ static int evaluate_side(const XqPosition *pos,
             score += piece_values[type] + piece_square_values[type][rank][file];
         }
     }
+
     return score;
 }
 
