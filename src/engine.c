@@ -219,18 +219,18 @@ typedef struct SearchContext
  * `saved` points to the caller's output result. When a target visit completes without interruption,
  * `trace_finish()` copies `current` into `*saved`, retaining the latest completed visit. A normal
  * cutoff or cache return also counts as completion; the returned score may be a bound. If a later
- * visit is interrupted, its partial `current` does not overwrite the earlier completed result.
- * For example, a completed depth-`4` visit remains saved if the depth-`5` visit times out. If no
- * visit completed, `xq_engine_explain_path()` returns the latest partial visit when one exists.
+ * visit is interrupted, its partial `current` does not overwrite the earlier completed result. For
+ * example, a completed depth-`4` visit remains saved if the depth-`5` visit times out. If no visit
+ * completed, `xq_engine_explain_path()` returns the latest partial visit when one exists.
  *
  * `ordered` and `order_scores` together retain the target endpoint's candidate moves and their
  * original heuristic ordering scores: `order_scores[i]` belongs to `ordered.moves[i]`. These are
  * the next-move candidates at the target position, and their scores describe search priority.
  * Search results for completed candidates are recorded separately in `current.node.moves`.
  *
- * `ordered` preserves the list sorted by heuristic score before a hash or principal-variation
- * move is prioritized in the actual search list. This keeps the move-to-score mapping intact
- * after reordering. `trace_move()` finds each searched candidate in `ordered` and copies its
+ * `ordered` preserves the list sorted by heuristic score before a hash or principal-variation move
+ * is prioritized in the actual search list. This keeps the move-to-score mapping intact after
+ * reordering. `trace_move()` finds each searched candidate in `ordered` and copies its
  * corresponding `order_scores` value into the explanation row's `order_score`.
  *
  * `blocked_tt` independently retains an ancestor cache cutoff that prevented reaching the target.
@@ -357,10 +357,10 @@ typedef struct XqTranspositionBucket
  * @brief A reusable position-search cache containing buckets, an age generation and statistics.
  *
  * `buckets` owns a heap-allocated array of `XQ_TT_BUCKET_COUNT` buckets. Each bucket contains
- * `XQ_TT_BUCKET_SIZE` entries, giving a fixed total capacity of
- * `XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE`. Search branches use the same table to reuse results
- * when different move sequences reach the same position and to obtain move-ordering hints.
- * The table can retain entries across search calls.
+ * `XQ_TT_BUCKET_SIZE` entries, giving a fixed total capacity of `XQ_TT_BUCKET_COUNT` times
+ * `XQ_TT_BUCKET_SIZE` entries. Search branches use the same table to reuse results when different
+ * move sequences reach the same position and to obtain move-ordering hints. The table can retain
+ * entries across search calls.
  *
  * `generation` advances for each iterative-deepening iteration and wraps as a `uint8_t`. Entry
  * generations are compared with it to estimate age for replacement without clearing the table.
@@ -379,9 +379,11 @@ struct XqTranspositionTable
     XqTranspositionStats   stats;
 };
 
-/* Bump FORMAT_VERSION when the wire layout changes. Bump ENGINE_VERSION whenever evaluation,
+/*
+ * Bump FORMAT_VERSION when the wire layout changes. Bump ENGINE_VERSION whenever evaluation,
  * score/search semantics, piece encoding, or Zobrist hashing changes. Compatibility is explicitly
- * maintained, not inferred from source edits. Only the built-in engine's cache is supported. */
+ * maintained, not inferred from source edits. Only the built-in engine's cache is supported.
+ */
 enum
 {
     XQ_TT_FORMAT_VERSION   = 1,
@@ -1706,8 +1708,8 @@ static void build_principal_variation(PrincipalVariation       *pv,
  * prefix already collected. Matching a pseudo-legal move does not verify that the moving side's
  * king remains safe, nor does it rule out a full hash collision.
  *
- * The function temporarily makes each move while reconstructing the line, then unmakes all moves
- * in reverse order before returning so that `pos` is restored.
+ * The function temporarily makes each move while reconstructing the line, then unmakes all moves in
+ * reverse order before returning so that `pos` is restored.
  *
  * @param table Transposition table used to find subsequent exact entries; may be null, in which
  *              case an empty variation is produced.
@@ -1806,9 +1808,9 @@ static void order_moves_for_explain(const XqEngineAdapter *engine,
  * function falls back to static evaluation after `XQ_MAX_QUIESCENCE_DEPTH` plies. Win and loss
  * scores are fixed and do not depend on the node's distance from the root.
  *
- * Before generating moves, an attacked opponent king is scored as a win by king capture on the
- * next ply. This rejects a preceding pseudo-legal move that left its own king attacked, even when
- * both kings are attacked, before legal check-evasion generation or stand pat can hide that fact.
+ * Before generating moves, an attacked opponent king is scored as a win by king capture on the next
+ * ply. This rejects a preceding pseudo-legal move that left its own king attacked, even when both
+ * kings are attacked, before legal check-evasion generation or stand pat can hide that fact.
  *
  * When the side to move is not in check, the static evaluation is used as the stand-pat score and
  * only captures are searched. When the side to move is in check, stand pat is not allowed and every
@@ -2017,11 +2019,13 @@ static int negamax(const XqEngineAdapter *engine,
         return -XQ_MATE_SCORE;
     order_moves(engine, pos, &list);
 
-    /* For example, suppose the requested depth is 6, the window is [50, 100], and the table
+    /*
+     * For example, suppose the requested depth is 6, the window is [50, 100], and the table
      * contains an older entry with depth=8, LOWER_BOUND=80, and best_move=A. Because 80 < beta, the
      * cached score cannot produce a cutoff, but the entry still supplies hash_move=A. If the first
      * move of the previous iteration's complete PV is B, then pv_hint[0]=B and the hash move
-     * differs from the PV move. */
+     * differs from the PV move.
+     */
     if (has_hash_move)
         (void)prioritize_move(&list, hash_move);
     if (pv_hint != NULL && pv_hint_count > 0)
@@ -2474,8 +2478,8 @@ static bool builtin_search(const XqEngineAdapter *engine,
 /**
  * @brief Finds the best move using a custom search callback or the built-in search.
  *
- * Default search limits are created only when `limits` is null. Otherwise, the supplied limits
- * are used. A maximum depth of zero is normalized to one. If `engine` provides a custom search
+ * Default search limits are created only when `limits` is null. Otherwise, the supplied limits are
+ * used. A maximum depth of zero is normalized to one. If `engine` provides a custom search
  * callback, it receives the normalized maximum depth and manages its own time limit.
  *
  * Otherwise, `builtin_search()` is used.
@@ -2499,17 +2503,16 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine,
 /**
  * @brief Finds the best move and optionally collects per-call search statistics.
  *
- * Default search limits are used when `limits` is null, and a maximum depth of zero is
- * normalized to one. If `engine` provides a custom search callback, it receives the normalized
- * maximum depth and manages its own time limit. Otherwise, `builtin_search()` is used; a null
- * engine selects the default evaluation and move ordering without a transposition table or
- * game history.
+ * Default search limits are used when `limits` is null, and a maximum depth of zero is normalized
+ * to one. If `engine` provides a custom search callback, it receives the normalized maximum depth
+ * and manages its own time limit. Otherwise, `builtin_search()` is used; a null engine selects the
+ * default evaluation and move ordering without a transposition table or game history.
  *
  * When supplied, `stats` is initialized even if the search fails. Internal search counters are
- * available only for the built-in search. Cache statistics are per-call counter differences
- * when the built-in search uses a transposition table; collecting them does not reset the cache
- * or its cumulative counters. Elapsed time is measured with the monotonic clock for either
- * search path when clock readings succeed, independently of the configured search time mode.
+ * available only for the built-in search. Cache statistics are per-call counter differences when
+ * the built-in search uses a transposition table; collecting them does not reset the cache or its
+ * cumulative counters. Elapsed time is measured with the monotonic clock for either search path
+ * when clock readings succeed, independently of the configured search time mode.
  *
  * @param engine    Engine adapter that may provide custom callbacks, a cache, and history; may be
  *                  null to use the built-in defaults.
@@ -2883,8 +2886,8 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter     *engine,
  * captured-piece fields are ignored. Descending beyond the target node clears the match as well.
  *
  * The caller saves the returned parent state and passes it to `trace_pop()` after returning from
- * the child, so one branch's mismatch does not affect its siblings in normal search. If no trace
- * is attached, the function changes nothing and returns false.
+ * the child, so one branch's mismatch does not affect its siblings in normal search. If no trace is
+ * attached, the function changes nothing and returns false.
  *
  * @param context Explanation context containing the path trace; may be null.
  * @param ply     Current parent node's distance from the root, also the index of the next target
@@ -2910,8 +2913,8 @@ static bool trace_push(ExplainContext *context,
  *
  * Pairs with `trace_push()` by restoring the state it returned before descending into the child.
  * This prevents the child's match or mismatch from affecting subsequent sibling branches in normal
- * search. Only the prefix-match flag is restored; collected search records are left unchanged.
- * Does nothing if the context or its trace is null.
+ * search. Only the prefix-match flag is restored; collected search records are left unchanged. Does
+ * nothing if the context or its trace is null.
  *
  * @param context  Explanation context containing the path trace; may be null.
  * @param previous Parent prefix-match state returned by the corresponding `trace_push()` call.
@@ -2926,9 +2929,9 @@ static void trace_pop(ExplainContext *context,
 /**
  * @brief Initializes a record at the target path's endpoint in normal search.
  *
- * Recording requires an attached trace, a matching path prefix, ply equal to the path length,
- * and remaining normal-search depth of at least one. An empty path selects the root. Nodes at
- * depth zero or inside quiescence search are never recorded. Failed checks leave the trace intact.
+ * Recording requires an attached trace, a matching path prefix, ply equal to the path length, and
+ * remaining normal-search depth of at least one. An empty path selects the root. Nodes at depth
+ * zero or inside quiescence search are never recorded. Failed checks leave the trace intact.
  *
  * Clears the current visit, marks it visited, and records the root iteration depth, remaining
  * depth, ply, and incoming alpha-beta window. The best index starts at -1, with no score available
@@ -3376,9 +3379,9 @@ static int negamax_for_explain(const XqEngineAdapter *engine,
 /**
  * @brief Snapshots the root ordering lookup already performed by builtin_search_for_explain.
  *
- * This read-only lookup adds no probe/hit counters and cannot return a cached score. It runs
- * before descendants can change the entry. Later iterations use the previous root scores for
- * ordering and do not probe the root again, exactly as in ordinary CLI search.
+ * This read-only lookup adds no probe/hit counters and cannot return a cached score. It runs before
+ * descendants can change the entry. Later iterations use the previous root scores for ordering and
+ * do not probe the root again, exactly as in ordinary CLI search.
  *
  * @param context        Explanation context borrowing the driver's table; must not be null.
  * @param key            Root position hash used by the preceding tt_get_hash_move call.
@@ -3472,8 +3475,8 @@ static void trace_root_selection(ExplainContext   *context,
  * @brief Observes one root edge while using the same recursive window and PV as CLI search.
  *
  * The explanation root driver owns ordering, iterations, time checks and selection. This wrapper
- * only maintains the target prefix and records a completed child. It always restores the board
- * and prefix before returning; interrupted scores never become candidate rows.
+ * only maintains the target prefix and records a completed child. It always restores the board and
+ * prefix before returning; interrupted scores never become candidate rows.
  *
  * @param engine     Adapter supplying evaluation/ordering callbacks; may be null.
  * @param pos        Root position, restored before return; must not be null.
@@ -3518,13 +3521,13 @@ static int search_root_move_for_explain(const XqEngineAdapter *engine,
  *
  * Keep root generation, initial hash-move ordering, history filtering, iteration ordering, PV
  * hints, time checks, cache stores and timeout selection aligned with builtin_search. Reuse the
- * same ordinary helpers for those operations; the production driver has no explanation hooks.
- * Only candidate observation and recursion through negamax_for_explain are added here.
+ * same ordinary helpers for those operations; the production driver has no explanation hooks. Only
+ * candidate observation and recursion through negamax_for_explain are added here.
  *
  * A completed root visit is saved before the final clock check, so a deadline reached just after
- * the last candidate does not discard that visit. Final move selection is captured separately
- * from the retained target visit and may use the last complete iteration, the partial first one, or
- * a partial iteration that found a winning move. An incomplete root visit stays incomplete.
+ * the last candidate does not discard that visit. Final move selection is captured separately from
+ * the retained target visit and may use the last complete iteration, the partial first one, or a
+ * partial iteration that found a winning move. An incomplete root visit stays incomplete.
  *
  * @param engine    Adapter supplying evaluation, ordering, optional cache and history; may be null.
  * @param pos       Root position; restored before returning. A null position returns false.
@@ -3732,12 +3735,12 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine,
  * @brief Observes one path using an independent explanation search aligned with CLI search.
  *
  * Search starts from pos and matches the complete from/to sequence in path; an empty path selects
- * the root. The caller validates move legality. Only matching normal nodes with remaining depth
- * at least one are recorded. Pruned, beyond-horizon or interrupted paths are not searched again.
- * The board is restored on every return and limits is unchanged.
+ * the root. The caller validates move legality. Only matching normal nodes with remaining depth at
+ * least one are recorded. Pruned, beyond-horizon or interrupted paths are not searched again. The
+ * board is restored on every return and limits is unchanged.
  *
- * builtin_search_for_explain mirrors builtin_search without adding hooks to it. Iterations start
- * at one, the initial root cache query supplies only a move-ordering hint, later root ordering uses
+ * builtin_search_for_explain mirrors builtin_search without adding hooks to it. Iterations start at
+ * one, the initial root cache query supplies only a move-ordering hint, later root ordering uses
  * the previous iteration's scores, and history filtering, PV hints, generations, stores and time
  * checks follow the same rules. Internal nodes still use cached scores when their depth and bound
  * allow it. Tracing neither adds probes nor introduces extra clock checks. Recording costs wall
@@ -3752,8 +3755,8 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine,
  * separately in root.ordering_tt; the root target's tt is not-probed after iteration one because
  * the root is not queried again.
  *
- * blocked_tt independently retains the latest strict-ancestor cache cutoff and its iteration.
- * Cache PV reconstruction does not count as visiting the target. A terminal root is recorded with
+ * blocked_tt independently retains the latest strict-ancestor cache cutoff and its iteration. Cache
+ * PV reconstruction does not count as visiting the target. A terminal root is recorded with
  * root_depth zero before iterative deepening; no move is selected. A root filtered entirely by
  * history returns the same unsearched fallback as ordinary search.
  *

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Format selected Doxygen paragraphs in one C source file."""
+"""Reflow prose paragraphs and selected Doxygen tags in C block comments."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ _TAG_RE = re.compile(
 _COMMENT_LINE_RE = re.compile(r"^[ \t]*\*(?P<after>.*)$")
 _LIST_RE = re.compile(r"(?:[-+*]|\d+[.)])[ \t]+")
 _FENCE_RE = re.compile(r"(?:```|~~~)")
+_VERBATIM_RE = re.compile(r"(?:[@\\](?:code|verbatim|dot|msc|startuml)\b|<pre\b|```|~~~)")
 _URL_RE = re.compile(r"(?:https?|ftp)://|www\.", re.IGNORECASE)
 _SINGLE_LINE_DOC_RE = re.compile(
     r"^(?P<indent>[ \t]*)/\*\*[ \t]*(?P<content>@(?:brief|return|retval|param)\b.*?)"
@@ -129,7 +130,12 @@ def _wrap_paragraph(
 def _is_protected(lines: list[str]) -> bool:
     for line in lines:
         stripped = line.lstrip()
-        if _LIST_RE.match(stripped) or _FENCE_RE.match(stripped):
+        if (
+            _LIST_RE.match(stripped)
+            or _FENCE_RE.match(stripped)
+            or stripped.startswith(("|", ">", "@", "\\"))
+            or re.match(r"(?:[-=]{3,}|#{1,6}[ \t])", stripped)
+        ):
             return True
     return False
 
@@ -164,6 +170,36 @@ def _render_lines(
 def _format_doc_comment(
     comment: str, start_line: int, newline: str
 ) -> tuple[str, list[tuple[int, str]]]:
+    # Verbatim blocks have meaningful physical lines. Leave their entire comment intact.
+    if _VERBATIM_RE.search(comment):
+        return comment, []
+    # Inline opening/closing prose belongs to the same paragraph as the starred
+    # continuation lines. Normalize those delimiters before collecting paragraphs.
+    marker = "/**" if comment.startswith("/**") else "/*"
+    inner = comment[len(marker):-2]
+    inner_lines = inner.splitlines()
+    if inner_lines and (
+        inner_lines[0].strip()
+        or (len(inner_lines) > 1 and inner_lines[-1].strip())
+    ):
+        if len(inner_lines) == 1 and display_width(comment) <= COLUMN_LIMIT:
+            return comment, []
+        continuation = next((re.match(r"^([ \t]*)\*", line)
+                             for line in inner_lines[1:] if line.strip()), None)
+        indent = continuation.group(1)[:-1] if continuation else ""
+        body_lines = []
+        for line in inner_lines:
+            if not line.strip():
+                body_lines.append(indent + " *")
+            elif re.match(r"^[ \t]*\*", line):
+                body_lines.append(line.rstrip())
+            else:
+                body_lines.append(indent + " * " + line.strip())
+        while body_lines and body_lines[0].strip() == "*":
+            body_lines.pop(0)
+        while body_lines and body_lines[-1].strip() == "*":
+            body_lines.pop()
+        comment = marker + newline + newline.join(body_lines) + newline + indent + " */"
     single_line = _SINGLE_LINE_DOC_RE.match(comment)
     if single_line is not None and display_width(comment) > COLUMN_LIMIT:
         indent = single_line.group("indent")
@@ -239,8 +275,52 @@ def _format_doc_comment(
     while index < len(plain_lines):
         match = _TAG_RE.match(plain_lines[index])
         if match is None:
-            output.append(source_lines[index])
-            index += 1
+            prose = _COMMENT_LINE_RE.match(plain_lines[index])
+            if (
+                prose is None
+                or plain_lines[index].lstrip().startswith("*/")
+                or not prose.group("after").strip()
+            ):
+                output.append(source_lines[index])
+                index += 1
+                continue
+
+            paragraph_lines = [prose.group("after").strip()]
+            consumed_end = index + 1
+            while consumed_end < len(plain_lines):
+                if plain_lines[consumed_end].lstrip().startswith("*/"):
+                    break
+                continuation = _COMMENT_LINE_RE.match(plain_lines[consumed_end])
+                if continuation is None:
+                    break
+                body = continuation.group("after").strip()
+                if not body or body.startswith(("@", "\\")):
+                    break
+                paragraph_lines.append(body)
+                consumed_end += 1
+
+            # Preserve lists, tables, directives and indented code examples.
+            bodies = [
+                _COMMENT_LINE_RE.match(line).group("after")
+                for line in plain_lines[index:consumed_end]
+            ]
+            if _is_protected(paragraph_lines) or any(
+                body.startswith(("    ", "\t")) for body in bodies
+            ):
+                output.extend(source_lines[index:consumed_end])
+            else:
+                prefix = plain_lines[index][: prose.start("after")] + " "
+                content, tokens = _wrap_paragraph(
+                    _join_paragraph_lines(paragraph_lines),
+                    COLUMN_LIMIT - display_width(prefix),
+                )
+                output.append(_render_lines(
+                    [prefix + line for line in content],
+                    endings[index:consumed_end],
+                    newline,
+                ))
+                warnings.extend((start_line + index, token[:48]) for token in tokens)
+            index = consumed_end
             continue
 
         body = match.group("body").strip()
@@ -254,7 +334,7 @@ def _format_doc_comment(
                 break
             after_star = continuation.group("after")
             stripped = after_star.strip()
-            if not stripped or stripped.startswith("@"):
+            if not stripped or stripped.startswith(("@", "\\")):
                 break
             paragraph_lines.append(stripped)
             consumed_end += 1
@@ -284,10 +364,9 @@ def _format_doc_comment(
         formatted_content: list[str]
         warning_tokens: list[str] = []
         if _is_protected(paragraph_lines):
-            formatted_content = paragraph_lines
-            for line in formatted_content:
-                if display_width(continuation_prefix + line) > COLUMN_LIMIT:
-                    warning_tokens.append(line)
+            output.extend(source_lines[index:consumed_end])
+            index = consumed_end
+            continue
         else:
             paragraph = _join_paragraph_lines(paragraph_lines)
             formatted_content, warning_tokens = _wrap_paragraph(paragraph, capacity)
@@ -309,6 +388,7 @@ def _find_doc_comments(source: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     index = 0
     state = "normal"
+    formatting_enabled = True
     while index < len(source):
         character = source[index]
         following = source[index + 1] if index + 1 < len(source) else ""
@@ -321,18 +401,34 @@ def _find_doc_comments(source: str) -> list[tuple[int, int]]:
                 state = "character"
                 index += 1
             elif character == "/" and following == "/":
+                end = source.find("\n", index)
+                directive = source[index:end if end != -1 else len(source)]
+                if re.match(r"//\s*clang-format off\b", directive):
+                    formatting_enabled = False
+                elif re.match(r"//\s*clang-format on\b", directive):
+                    formatting_enabled = True
                 state = "line_comment"
                 index += 2
             elif character == "/" and following == "*":
-                is_documentation = index + 2 < len(source) and source[index + 2] == "*"
                 end = source.find("*/", index + 2)
                 if end == -1:
                     line_number = len(re.findall(r"\r\n|\n|\r", source[:index])) + 1
                     raise FormatError(
                         f"unterminated block comment at line {line_number}"
                     )
-                if is_documentation:
-                    ranges.append((index, end + 2))
+                directive = source[index:end + 2]
+                if re.match(r"/\*\s*clang-format off\b", directive):
+                    formatting_enabled = False
+                elif re.match(r"/\*\s*clang-format on\b", directive):
+                    formatting_enabled = True
+                elif formatting_enabled:
+                    line_start = max(source.rfind("\n", 0, index), source.rfind("\r", 0, index)) + 1
+                    line_end_match = re.search(r"[\r\n]", source[end + 2:])
+                    line_end = end + 2 + line_end_match.start() if line_end_match else len(source)
+                    # Expanding an inline comment could split a preprocessor directive
+                    # or alter the layout of code surrounding it.
+                    if not source[line_start:index].strip() and not source[end + 2:line_end].strip():
+                        ranges.append((index, end + 2))
                 index = end + 2
             else:
                 index += 1
@@ -406,7 +502,7 @@ def _atomic_write(path: Path, content: bytes, mode: int) -> None:
 
 def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Format @brief, @param, @return and @retval paragraphs in one C file."
+        description="Reflow block-comment prose and @brief/@param/@return/@retval paragraphs."
     )
     parser.add_argument("file", type=Path, help="UTF-8 .c file to modify in place")
     return parser
