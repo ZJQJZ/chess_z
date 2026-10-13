@@ -409,27 +409,17 @@ static int64_t monotonic_time_ms(void)
     LARGE_INTEGER counter;
     LARGE_INTEGER frequency;
 
-    /*
-     * Both `counter` and `frequency` use counter ticks as the unit for QuadPart, but their QuadPart
-     * values have different meanings:
-     *     - `counter`'s represents the total number of ticks accumulated so far.
-     *     - `frequency`'s represents the number of ticks added per second by the high-resolution
-     *       performance counter.
-     */
     if (!QueryPerformanceFrequency(&frequency) || !QueryPerformanceCounter(&counter) ||
         frequency.QuadPart <= 0)
         return -1;
+
     return (int64_t)((long double)counter.QuadPart * 1000.0L / (long double)frequency.QuadPart);
 #else
     struct timespec now;
 
-    /*
-     * Similar to the `_WIN32` branch, this retrieves the elapsed time since an unspecified fixed
-     * reference point. The result consists of the seconds stored in `now.tv_sec` plus the
-     * nanoseconds stored in `now.tv_nsec`. The final return value discards any fractional
-     * millisecond. */
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
         return -1;
+
     return (int64_t)now.tv_sec * INT64_C(1000) + (int64_t)now.tv_nsec / INT64_C(1000000);
 #endif
 }
@@ -453,6 +443,7 @@ static int64_t cpu_time_ms(void)
 
     if (now == (clock_t)-1)
         return -1;
+
     return (int64_t)((double)now * 1000.0 / (double)CLOCKS_PER_SEC);
 }
 
