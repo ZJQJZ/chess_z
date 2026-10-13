@@ -125,6 +125,9 @@ static const int piece_square_values[XQ_PIECE_TYPE_NB][XQ_RANKS][XQ_FILES] =
 enum
 {
     CAPTURE_ORDER_BASE                    = 100000,
+    XQ_DEFAULT_SEARCH_MAX_DEPTH           = 10,
+    XQ_DEFAULT_SEARCH_TIME_LIMIT_MS       = 3000,
+    XQ_DEFAULT_SEARCH_TIME_MODE           = XQ_SEARCH_TIME_MONOTONIC,
     XQ_FINISH_ITERATION_THRESHOLD_PERCENT = 50,
     XQ_MAX_QUIESCENCE_DEPTH               = 500,
     XQ_MAX_PV_MOVES                       = 64,
@@ -1183,9 +1186,9 @@ XqSearchLimits xq_search_limits_default(void)
 {
     XqSearchLimits limits;
 
-    limits.max_depth     = 10;
-    limits.time_limit_ms = 3000;
-    limits.time_mode     = XQ_SEARCH_TIME_MONOTONIC;
+    limits.max_depth     = XQ_DEFAULT_SEARCH_MAX_DEPTH;
+    limits.time_limit_ms = XQ_DEFAULT_SEARCH_TIME_LIMIT_MS;
+    limits.time_mode     = XQ_DEFAULT_SEARCH_TIME_MODE;
 
     return limits;
 }
