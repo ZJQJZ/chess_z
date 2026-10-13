@@ -650,6 +650,7 @@ void xq_transposition_table_destroy(XqTranspositionTable *table)
 {
     if (table == NULL)
         return;
+
     free(table->buckets);
     free(table);
 }
