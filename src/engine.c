@@ -1244,38 +1244,6 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
 }
 
 /**
- * @brief Checks whether a completed search result proves the maximum possible score.
- *
- * Fixed win/loss scores and bounded static evaluations guarantee that no valid score exceeds
- * `XQ_WIN_SCORE` (`+30000`). Reaching this value proves a win only if the result is exact or a
- * lower bound; an upper bound of `+30000` still allows the true score to be lower.
- *
- * For the window used to obtain `score`:
- * - `score <= alpha` is fail-low: it may be only an upper bound, so do not promote it to
- *   `XQ_SEARCH_SCORE_EXACT`.
- * - `alpha < score < beta` is an exact result.
- * - `score >= beta` is fail-high: it is a lower bound. At `+30000` this also proves an exact win,
- *   because the true score cannot exceed `+30000`.
- * Thus `score == XQ_WIN_SCORE && score > alpha` covers both forms of proof without needing `beta`.
- * For example, `+30000` with `alpha=100` proves a win; with `alpha=30000` it is not sufficient
- * proof.
- *
- * Callers must discard interrupted results first. For a child result, negate it to the parent's
- * perspective and pass the parent's `alpha` from BEFORE searching that child. Passing `alpha` after
- * raising it to `score` would incorrectly reject the proof. This helper neither writes the cache
- * nor stops the search; the caller decides how to use the proof.
- *
- * @param score Completed search result, in the same perspective as `alpha`.
- * @param alpha Lower bound of the search window that produced `score`, before any score update.
- * @return      `true` when the result proves `+XQ_WIN_SCORE`, `false` otherwise.
- */
-static bool score_proves_win(int score,
-                             int alpha)
-{
-    return score == XQ_WIN_SCORE && score > alpha;
-}
-
-/**
  * @brief Probes the transposition table and refreshes the generation of a matching entry.
  *
  * The function also returns the hash move and score kind when requested. It accepts a cached score
@@ -1965,7 +1933,7 @@ static int quiescence(const XqEngineAdapter *engine,
             return 0;
         if (score > best)
             best = score;
-        if (score_proves_win(score, alpha))
+        if (score == XQ_WIN_SCORE)
             return best;
         if (score >= beta)
             return best;
@@ -2019,7 +1987,8 @@ static int quiescence(const XqEngineAdapter *engine,
  * the previous iteration's principal-variation move first, and stores the resulting exact score or
  * bound after the node has been searched. A completed candidate proving `+XQ_WIN_SCORE` reaches the
  * maximum possible value: store it as `XQ_SEARCH_SCORE_EXACT` and return immediately, regardless of
- * `beta`. A fail-low upper bound at that value alone is not proof of a win.
+ * `beta`. Continuing search windows keep `alpha < XQ_WIN_SCORE`, so this winning score cannot be a
+ * fail-low upper bound.
  *
  * Time control is shared across recursive calls, including quiescence search, through `context`. On
  * entry, `search_count_node_and_check_time()` counts the node and checks time control. With a time
@@ -2140,7 +2109,7 @@ static int negamax(const XqEngineAdapter *engine,
             if (pv_out != NULL)
                 build_principal_variation(pv_out, list.moves[i], &child_pv);
         }
-        if (score_proves_win(score, alpha))
+        if (score == XQ_WIN_SCORE)
         {
             tt_store(table, key, depth, best, XQ_SEARCH_SCORE_EXACT, node_best_move);
             return best;
@@ -2792,7 +2761,7 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine,
             result->best_index    = result->count;
             explained->score_kind = XQ_SEARCH_SCORE_EXACT;
         }
-        if (score_proves_win(score, alpha_before))
+        if (score == XQ_WIN_SCORE)
         {
             explained->caused_cutoff = score >= beta;
             ++result->count;
@@ -2934,7 +2903,7 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter     *engine,
             best               = score;
             result->best_index = result->count;
         }
-        if (score_proves_win(score, alpha_before))
+        if (score == XQ_WIN_SCORE)
         {
             explained->score_kind    = XQ_SEARCH_SCORE_EXACT;
             explained->caused_cutoff = score >= beta;
@@ -3098,9 +3067,10 @@ static void trace_order(const XqEngineAdapter *engine,
  * @brief Classifies a completed search score relative to its original alpha-beta window.
  *
  * A score at or above `beta` is a lower bound (fail-high); a score at or below `alpha` is an upper
- * bound (fail-low). A winning score above `alpha` proves the maximum possible value and is exact,
- * even when it fails high. Otherwise only a score strictly inside the window is exact. This
- * function does not verify that the search completed or that the score is valid.
+ * bound (fail-low). The current search windows keep `alpha < XQ_WIN_SCORE`, so a score equal to
+ * `XQ_WIN_SCORE` proves the maximum possible value and is exact even when it fails high. Otherwise
+ * only a score strictly inside the window is exact. This function does not verify that the search
+ * completed or that the score is valid.
  *
  * @param score Completed search score, expressed from the same perspective as `alpha` and `beta`.
  * @param alpha Lower window bound before the search, not the `alpha` updated using this score.
@@ -3111,7 +3081,7 @@ static XqSearchScoreKind trace_score_kind(int score,
                                           int alpha,
                                           int beta)
 {
-    if (score_proves_win(score, alpha))
+    if (score == XQ_WIN_SCORE)
         return XQ_SEARCH_SCORE_EXACT;
     return score >= beta    ? XQ_SEARCH_SCORE_LOWER_BOUND
            : score <= alpha ? XQ_SEARCH_SCORE_UPPER_BOUND
@@ -3457,7 +3427,7 @@ static int negamax_for_explain(const XqEngineAdapter *engine,
             if (pv_out != NULL)
                 build_principal_variation(pv_out, list.moves[i], &child_pv);
         }
-        if (score_proves_win(score, alpha))
+        if (score == XQ_WIN_SCORE)
         {
             tt_store(context->table, key, depth, best, XQ_SEARCH_SCORE_EXACT, best_move);
             return trace_finish(context, record, best);
