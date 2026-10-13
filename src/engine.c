@@ -893,16 +893,16 @@ static FILE *tt_open_temporary(char  *path,
  * All integers are little endian; CRC covers the header and records, not its own bytes.
  *
  * Writes to an exclusively created temporary file beside the destination, then replaces the
- * destination only after all writes and fclose() succeed. Failure preserves the old destination and
- * attempts temporary-file cleanup. Parent directories must already exist. The caller must prevent
- * concurrent table mutation; no game position, history, or search limits are saved.
+ * destination only after all writes and `fclose()` succeed. Failure preserves the old destination
+ * and attempts temporary-file cleanup. Parent directories must already exist. The caller must
+ * prevent concurrent table mutation; no game position, history, or search limits are saved.
  *
- * @param table Initialized table to save; must not be null.
- * @param path  Nonempty destination path; must not be null. An existing file is replaced on
+ * @param table Initialized table to save; must not be `NULL`.
+ * @param path  Nonempty destination path; must not be `NULL`. An existing file is replaced on
  *              success.
- * @return      XQ_TT_IO_OK on success; XQ_TT_IO_INVALID_ARGUMENT for null or empty arguments
- *              XQ_TT_IO_NO_MEMORY for path-size overflow or allocation failure, or
- *              XQ_TT_IO_FILE_ERROR for temporary-file, write, close, or replacement failures.
+ * @return      `XQ_TT_IO_OK` on success; `XQ_TT_IO_INVALID_ARGUMENT` for `NULL` or empty arguments
+ *              `XQ_TT_IO_NO_MEMORY` for path-size overflow or allocation failure, or
+ *              `XQ_TT_IO_FILE_ERROR` for temporary-file, write, close, or replacement failures.
  */
 XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *table,
                                                     const char                 *path)
@@ -1001,12 +1001,13 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
  * any failure preserves its previous contents and statistics. Loading replaces rather than merges
  * entries and does not restore a game. The caller must prevent concurrent access to the table.
  *
- * @param table Initialized table receiving the loaded entries; must not be null.
- * @param path  Nonempty path to an existing cache file; must not be null and is left unchanged.
- * @return      XQ_TT_IO_OK on success; XQ_TT_IO_INVALID_ARGUMENT for null or empty arguments,
- *              XQ_TT_IO_FILE_ERROR for file I/O failures, XQ_TT_IO_INVALID_FORMAT for malformed,
- *              truncated, or checksum-invalid data, XQ_TT_IO_INCOMPATIBLE for version or dimension
- *              mismatches, or XQ_TT_IO_NO_MEMORY if the temporary bucket array cannot be allocated.
+ * @param table Initialized table receiving the loaded entries; must not be `NULL`.
+ * @param path  Nonempty path to an existing cache file; must not be `NULL` and is left unchanged.
+ * @return      `XQ_TT_IO_OK` on success; `XQ_TT_IO_INVALID_ARGUMENT` for `NULL` or empty arguments,
+ *              `XQ_TT_IO_FILE_ERROR` for file I/O failures, `XQ_TT_IO_INVALID_FORMAT` for
+ *              malformed, truncated, or checksum-invalid data, `XQ_TT_IO_INCOMPATIBLE` for version
+ *              or dimension mismatches, or `XQ_TT_IO_NO_MEMORY` if the temporary bucket array
+ *              cannot be allocated.
  */
 XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
                                                     const char           *path)
@@ -1067,7 +1068,7 @@ XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
         encoded_score = (uint32_t)tt_get_le(record + 12, 4);
         score         = encoded_score <= INT32_MAX ? (int64_t)encoded_score
                                                    : (int64_t)encoded_score - INT64_C(4294967296);
-        /* Version 2 stores ordinary bounded evaluations or fixed win/loss scores. */
+        /* Version `2` stores ordinary bounded evaluations or fixed win/loss scores. */
         if (slot >= XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE ||
             slot / XQ_TT_BUCKET_SIZE != (key & (XQ_TT_BUCKET_COUNT - 1u)) ||
             tt_get_le(record + 16, 2) == 0 ||
@@ -1117,7 +1118,7 @@ done:
 /**
  * @brief Creates a default limit configuration for the built-in search.
  *
- * The default configuration limits the search to depth 10 and 3 seconds, using a monotonic wall
+ * The default configuration limits the search to depth `10` and `3` seconds, using a monotonic wall
  * clock.
  *
  * @return The default limit configuration.
@@ -1139,9 +1140,9 @@ XqSearchLimits xq_search_limits_default(void)
  * The `generation` field of `table` is a `uint8_t`, so it wraps around according to unsigned
  * integer rules when it reaches its maximum value.
  *
- * Does nothing if `table` is null.
+ * Does nothing if `table` is `NULL`.
  *
- * @param table The transposition table whose generation is incremented; may be null.
+ * @param table The transposition table whose generation is incremented; may be `NULL`.
  */
 static void tt_new_generation(XqTranspositionTable *table)
 {
@@ -1154,16 +1155,16 @@ static void tt_new_generation(XqTranspositionTable *table)
  *        in the selected bucket for a valid entry whose full 64-bit key matches `key`.
  *
  * Two keys with the same low-bit index but different full keys constitute a bucket-index collision
- * and can be distinguished by comparing their full keys. An entry whose depth is zero is treated as
- * an empty slot and does not match anything.
+ * and can be distinguished by comparing their full keys. An entry whose `depth` is `0` is treated
+ * as an empty slot and does not match anything.
  *
  * Different positions may generate the same 64-bit Zobrist key. The transposition table does not
  * store complete position data for secondary verification to avoid increasing entry size and
  * memory-access overhead. It therefore accepts the extremely low probability of such a collision.
  *
- * @param table The transposition table to search; may be null.
+ * @param table The transposition table to search; may be `NULL`.
  * @param key   The full 64-bit position hash to look up.
- * @return      A pointer to the matching entry, or null if no matching entry exists.
+ * @return      A pointer to the matching entry, or `NULL` if no matching entry exists.
  */
 static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
                                            uint64_t              key)
@@ -1185,25 +1186,27 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
  * @brief Checks whether a completed search result proves the maximum possible score.
  *
  * Fixed win/loss scores and bounded static evaluations guarantee that no valid score exceeds
- * XQ_MATE_SCORE (+30000). Reaching this value proves a win only if the result is exact or a lower
- * bound; an upper bound of +30000 still allows the true score to be lower.
+ * `XQ_MATE_SCORE` (`+30000`). Reaching this value proves a win only if the result is exact or a
+ * lower bound; an upper bound of `+30000` still allows the true score to be lower.
  *
- * For the window used to obtain score:
- * - score <= alpha is fail-low: it may be only an upper bound, so do not promote it to EXACT.
- * - alpha < score < beta is an exact result.
- * - score >= beta is fail-high: it is a lower bound. At +30000 this also proves an exact win,
- *   because the true score cannot exceed +30000.
- * Thus score == XQ_MATE_SCORE && score > alpha covers both forms of proof without needing beta. For
- * example, +30000 with alpha=100 proves a win; with alpha=30000 it is not sufficient proof.
+ * For the window used to obtain `score`:
+ * - `score <= alpha` is fail-low: it may be only an upper bound, so do not promote it to
+ *   `XQ_SEARCH_SCORE_EXACT`.
+ * - `alpha < score < beta` is an exact result.
+ * - `score >= beta` is fail-high: it is a lower bound. At `+30000` this also proves an exact win,
+ *   because the true score cannot exceed `+30000`.
+ * Thus `score == XQ_MATE_SCORE && score > alpha` covers both forms of proof without needing `beta`.
+ * For example, `+30000` with `alpha=100` proves a win; with `alpha=30000` it is not sufficient
+ * proof.
  *
  * Callers must discard interrupted results first. For a child result, negate it to the parent's
- * perspective and pass the parent's alpha from BEFORE searching that child. Passing alpha after
- * raising it to score would incorrectly reject the proof. This helper neither writes the cache nor
- * stops the search; the caller decides how to use the proof.
+ * perspective and pass the parent's `alpha` from BEFORE searching that child. Passing `alpha` after
+ * raising it to `score` would incorrectly reject the proof. This helper neither writes the cache
+ * nor stops the search; the caller decides how to use the proof.
  *
- * @param score Completed search result, in the same perspective as alpha.
- * @param alpha Lower bound of the search window that produced score, before any score update.
- * @return      True when the result proves +XQ_MATE_SCORE, false otherwise.
+ * @param score Completed search result, in the same perspective as `alpha`.
+ * @param alpha Lower bound of the search window that produced `score`, before any score update.
+ * @return      `true` when the result proves `+XQ_MATE_SCORE`, `false` otherwise.
  */
 static bool score_proves_win(int score,
                              int alpha)
@@ -1218,21 +1221,22 @@ static bool score_proves_win(int score,
  * only when the stored depth is sufficient and the score is either exact or a bound that directly
  * cuts off the current search.
  *
- * A false return value does not necessarily mean that the probe missed; a returned hash move may
+ * A `false` return value does not necessarily mean that the probe missed; a returned hash move may
  * still be used for move ordering.
  *
- * @param table         Transposition table to probe; may be null, in which case the function
- *                      returns false immediately.
+ * @param table         Transposition table to probe; may be `NULL`, in which case the function
+ *                      returns `false` immediately.
  * @param key           Full 64-bit hash of the current position, including the side to move.
  * @param depth         Remaining search depth required at the current node.
  * @param alpha         Lower bound of the current alpha-beta search window.
  * @param beta          Upper bound of the current alpha-beta search window.
- * @param score         Optional output; receives the reusable side-to-move score on a true return.
+ * @param score         Optional output; receives the reusable side-to-move score on a `true`
+ *                      return.
  * @param hash_move     Optional output; receives the cached best move when an entry matches.
  * @param has_hash_move Optional output; receives whether a matching entry supplied a hash move.
  * @param score_kind    Optional output; receives the cached score's bound kind when an entry
  *                      matches.
- * @return              True if the cached score can be reused or can cut off the search; false
+ * @return              `true` if the cached score can be reused or can cut off the search; `false`
  *                      otherwise.
  */
 static bool tt_probe(XqTranspositionTable *table,
@@ -1295,11 +1299,12 @@ static bool tt_probe(XqTranspositionTable *table,
  * The caller validates the move against the current move list, so the hint affects only search
  * order, not correctness.
  *
- * @param table     Transposition table to query; may be null, in which case the function returns
- *                  false.
+ * @param table     Transposition table to query; may be `NULL`, in which case the function returns
+ *                  `false`.
  * @param key       Full 64-bit hash of the current position, including the side to move.
- * @param hash_move Output that receives the cached best move; must not be null.
- * @return          True if a matching entry was found and written to `hash_move`; false otherwise.
+ * @param hash_move Output that receives the cached best move; must not be `NULL`.
+ * @return          `true` if a matching entry was found and written to `hash_move`; `false`
+ *                  otherwise.
  */
 static bool tt_get_hash_move(XqTranspositionTable *table,
                              uint64_t              key,
@@ -1325,11 +1330,11 @@ static bool tt_get_hash_move(XqTranspositionTable *table,
  * @brief Computes the retention score of a transposition-table entry.
  *
  * Entries with lower scores are more likely to be evicted after a bucket collision. The formula is
- * `8 * depth - 4 * age + type_bonus`, where an exact entry receives a bonus of 3. For example, an
- * exact entry of depth 5 from generation 7 has age 3 in generation 10, giving a retention score of
- * `8 * 5 - 4 * 3 + 3 = 31`.
+ * `8 * depth - 4 * age + type_bonus`, where an exact entry receives a bonus of `3`. For example, an
+ * exact entry of `depth` `5` from `generation` `7` has `age` `3` in `current_generation` `10`,
+ * giving a retention score of `8 * 5 - 4 * 3 + 3 = 31`.
  *
- * @param entry              Transposition-table entry to evaluate; must not be null.
+ * @param entry              Transposition-table entry to evaluate; must not be `NULL`.
  * @param current_generation Current generation of the transposition table.
  * @return                   The entry's retention score; a higher value makes the entry more
  *                           desirable to retain.
@@ -1347,15 +1352,16 @@ static int tt_retention_score(const XqTranspositionEntry *entry,
  * @brief Stores a search result in the transposition table.
  *
  * The function prefers an empty slot or an entry with the same key. When the bucket is full, it
- * chooses the entry with the lowest retention score based on depth, age, and score kind, and
+ * chooses the entry with the lowest retention score based on `depth`, `age`, and score kind, and
  * replaces it only if the incoming entry is not weaker.
  *
- * Quiescence nodes at depth zero are not cached because zero is reserved as the empty-entry marker.
+ * Quiescence nodes at `depth == 0` are not cached because `0` is reserved as the empty-entry
+ * marker.
  *
- * @param table      Transposition table in which to store the result; may be null, in which case
+ * @param table      Transposition table in which to store the result; may be `NULL`, in which case
  *                   the function does nothing.
  * @param key        Full 64-bit hash of the current position, including the side to move.
- * @param depth      Remaining search depth at the current node; a value of zero is not stored.
+ * @param depth      Remaining search depth at the current node; a value of `0` is not stored.
  * @param score      Side-to-move search score, stored unchanged, including fixed win/loss scores.
  * @param score_kind Score kind: exact, lower bound, or upper bound.
  * @param best_move  Best move found while searching the current position.
@@ -1432,8 +1438,8 @@ static void tt_store(XqTranspositionTable *table,
  *
  * Black's ranks are reflected so both sides use the same tables relative to their own home rank.
  *
- * @param pos   Position to evaluate; must not be null and is left unchanged.
- * @param color Side whose pieces are evaluated; must be XQ_RED or XQ_BLACK.
+ * @param pos   Position to evaluate; must not be `NULL` and is left unchanged.
+ * @param color Side whose pieces are evaluated; must be `XQ_RED` or `XQ_BLACK`.
  * @return      Total material value plus piece-square bonuses for the specified side, without
  *              subtracting the opponent's score.
  */
@@ -1466,11 +1472,11 @@ static int evaluate_side(const XqPosition *pos,
  * @brief Evaluates a position from the requested side's perspective using the built-in evaluator.
  *
  * The evaluator adds a piece-square bonus to each piece's fixed material value, then subtracts the
- * opponent's total from the perspective side's total. Positive scores favor perspective.
+ * opponent's total from the perspective side's total. Positive scores favor `perspective`.
  *
  * Legal-move mobility support is present but currently disabled.
  *
- * @param pos         Position to evaluate; must not be null.
+ * @param pos         Position to evaluate; must not be `NULL`.
  * @param perspective Side for which a positive score is favorable.
  * @param user        Unused user-data pointer, accepted for compatibility with `XqEvaluateFn`.
  * @return            Static position score from `perspective`'s point of view.
@@ -1494,10 +1500,10 @@ int xq_engine_default_static_evaluate(const XqPosition *pos,
  *
  * If `engine` provides a custom static evaluator, the function invokes it with the adapter's user
  * data. Otherwise, it falls back to `xq_engine_default_static_evaluate()`. Both are clamped to
- * [-XQ_MAX_STATIC_SCORE, XQ_MAX_STATIC_SCORE] so static estimates cannot claim a proven win/loss.
+ * `[-XQ_MAX_STATIC_SCORE, XQ_MAX_STATIC_SCORE]` so static estimates cannot claim a proven win/loss.
  *
- * @param engine      Engine adapter that may provide a custom evaluator; may be null.
- * @param pos         Position to evaluate; must not be null.
+ * @param engine      Engine adapter that may provide a custom evaluator; may be `NULL`.
+ * @param pos         Position to evaluate; must not be `NULL`.
  * @param perspective Side for which a positive score is favorable.
  * @return            Static position score from `perspective`'s point of view.
  */
@@ -1525,12 +1531,12 @@ static int static_evaluate(const XqEngineAdapter *engine,
  * `CAPTURE_ORDER_BASE + captured_piece_value * 16 - moving_piece_value`
  *
  * `CAPTURE_ORDER_BASE` ensures that captures as a group precede quiet moves. Multiplying the
- * captured piece's value by 16 generally prioritizes more valuable victims, while subtracting the
+ * captured piece's value by `16` generally prioritizes more valuable victims, while subtracting the
  * moving piece's value favors less valuable attackers when the victim is the same. For example, a
  * pawn capturing a rook is ordered before a rook capturing a pawn, and a pawn capturing a cannon is
  * ordered before a rook capturing a cannon.
  *
- * The factor 16 is an empirical weight and does not guarantee strict lexicographic MVV-LVA order.
+ * The factor `16` is an empirical weight and does not guarantee strict lexicographic MVV-LVA order.
  * This formula is not an evaluation of the resulting position; it only predicts promising moves so
  * that cutoffs occur earlier. It affects search efficiency but not the result of a complete
  * alpha-beta search.
@@ -1581,9 +1587,9 @@ static int move_order_score(const XqEngineAdapter *engine,
  * Scores are computed once per move, and stable insertion sort preserves the relative order of
  * moves with equal scores.
  *
- * @param engine Engine adapter used to score moves; may be null.
- * @param pos    Position in which the moves are being ordered; must not be null.
- * @param list   Move list to reorder in place; must not be null.
+ * @param engine Engine adapter used to score moves; may be `NULL`.
+ * @param pos    Position in which the moves are being ordered; must not be `NULL`.
+ * @param list   Move list to reorder in place; must not be `NULL`.
  */
 static void order_moves(const XqEngineAdapter *engine,
                         const XqPosition      *pos,
@@ -1616,7 +1622,7 @@ static void order_moves(const XqEngineAdapter *engine,
  *
  * Moves with equal scores retain their relative order from the previous iteration.
  *
- * @param moves Root-move array to reorder in place; must not be null.
+ * @param moves Root-move array to reorder in place; must not be `NULL`.
  * @param count Number of initialized entries in `moves`.
  */
 static void order_root_moves(ScoredMove *moves,
@@ -1645,7 +1651,7 @@ static void order_root_moves(ScoredMove *moves,
  *
  * @param a First move to compare.
  * @param b Second move to compare.
- * @return  True if both moves have identical source and destination squares; false otherwise.
+ * @return  `true` if both moves have identical source and destination squares; `false` otherwise.
  */
 static bool moves_equal(XqMove a,
                         XqMove b)
@@ -1656,9 +1662,9 @@ static bool moves_equal(XqMove a,
 /**
  * @brief Moves a matching move to the front of a move list while preserving all other order.
  *
- * @param list Move list to modify in place; must not be null.
+ * @param list Move list to modify in place; must not be `NULL`.
  * @param move Move to prioritize, matched by source and destination squares.
- * @return     True if the move was found and moved to the front; false otherwise.
+ * @return     `true` if the move was found and moved to the front; `false` otherwise.
  */
 static bool prioritize_move(XqMoveList *list,
                             XqMove      move)
@@ -1688,9 +1694,9 @@ static bool prioritize_move(XqMoveList *list,
  * The child variation is truncated when necessary so the resulting line fits within
  * `XQ_MAX_PV_MOVES`.
  *
- * @param pv       Output principal variation; must not be null.
+ * @param pv       Output principal variation; must not be `NULL`.
  * @param move     Best move at the current node, placed at the start of the variation.
- * @param child_pv Child node's principal variation; may be null.
+ * @param child_pv Child node's principal variation; may be `NULL`.
  */
 static void build_principal_variation(PrincipalVariation       *pv,
                                       XqMove                    move,
@@ -1726,12 +1732,12 @@ static void build_principal_variation(PrincipalVariation       *pv,
  * The function temporarily makes each move while reconstructing the line, then unmakes all moves in
  * reverse order before returning so that `pos` is restored.
  *
- * @param table Transposition table used to find subsequent exact entries; may be null, in which
+ * @param table Transposition table used to find subsequent exact entries; may be `NULL`, in which
  *              case an empty variation is produced.
- * @param pos   Position at the start of the principal variation; must not be null and is restored
+ * @param pos   Position at the start of the principal variation; must not be `NULL` and is restored
  *              before the function returns.
  * @param depth Maximum remaining search depth to reconstruct.
- * @param pv    Output principal variation; must not be null and is cleared before reconstruction.
+ * @param pv    Output principal variation; must not be `NULL` and is cleared before reconstruction.
  */
 static void build_pv_from_tt(XqTranspositionTable *table,
                              XqPosition           *pos,
@@ -1776,9 +1782,9 @@ static void build_pv_from_tt(XqTranspositionTable *table,
  * This follows the same stable descending ordering as `order_moves()`, while also writing the score
  * associated with each reordered move to the parallel `scores` array.
  *
- * @param engine Engine adapter used to score moves; may be null.
- * @param pos    Position in which the moves are being ordered; must not be null.
- * @param list   Move list to reorder in place; must not be null.
+ * @param engine Engine adapter used to score moves; may be `NULL`.
+ * @param pos    Position in which the moves are being ordered; must not be `NULL`.
+ * @param list   Move list to reorder in place; must not be `NULL`.
  * @param scores Output array that receives one ordering score per reordered move; must have room
  *               for at least `list->count` entries.
  */
@@ -1833,13 +1839,13 @@ static void order_moves_for_explain(const XqEngineAdapter *engine,
  * alpha-beta semantics: it returns the best searched score, which may lie outside the original
  * window and represent an upper or lower bound rather than an exact value.
  *
- * @param engine  Engine adapter used for static evaluation and move ordering; may be null.
- * @param pos     Current position; must not be null and is restored before the function returns.
- * @param depth   Internal quiescence depth, decreasing from zero into negative values.
+ * @param engine  Engine adapter used for static evaluation and move ordering; may be `NULL`.
+ * @param pos     Current position; must not be `NULL` and is restored before the function returns.
+ * @param depth   Internal quiescence depth, decreasing from `0` into negative values.
  * @param alpha   Lower bound of the current alpha-beta search window.
  * @param beta    Upper bound of the current alpha-beta search window.
- * @param context Search context used for node counting and time control; may be null.
- * @return        Quiescence score from the side-to-move perspective, or zero if the search is
+ * @param context Search context used for node counting and time control; may be `NULL`.
+ * @return        Quiescence score from the side-to-move perspective, or `0` if the search is
  *                stopped by the time limit.
  */
 static int quiescence(const XqEngineAdapter *engine,
@@ -1924,21 +1930,21 @@ static int quiescence(const XqEngineAdapter *engine,
  *                   /           \
  * MAX :          (4:y)      (5:!(<=x),!(>=y))
  *
- * Suppose node 2 has score `x` and node 4 has score `y`. Node 2 establishes that node 1 has a score
- * of at least `x`; consequently, node 3 cannot change the result if its score is at most `x`. In
- * the diagram, `!(expression)` means that satisfying `expression` cannot affect the result already
- * found, so node 3 is marked `!(<=x)`. Node 4 also establishes that node 3 has a score no greater
- * than `y`. Combining this with `!(<=x)` shows that node 5 cannot affect the result if its score is
- * either at most `x` or at least `y`. Thus the alpha and beta values used to search node 5 are `x`
- * and `y`, respectively.
+ * Suppose node `2` has score `x` and node `4` has score `y`. Node `2` establishes that node `1` has
+ * a score of at least `x`; consequently, node `3` cannot change the result if its score is at most
+ * `x`. In the diagram, `!(expression)` means that satisfying `expression` cannot affect the result
+ * already found, so node `3` is marked `!(<=x)`. Node `4` also establishes that node `3` has a
+ * score no greater than `y`. Combining this with `!(<=x)` shows that node `5` cannot affect the
+ * result if its score is either at most `x` or at least `y`. Thus the `alpha` and `beta` values
+ * used to search node `5` are `x` and `y`, respectively.
  *
  * More specifically, while evaluating a MAX node, each completed child can only raise the known
- * lower bound of its parent. For example, after node 2 produces `x`, node 1 is known to be at least
- * `x`. Raising the parent score to at least `beta` lets the search skip the remaining children of a
- * MAX node. This is the beta cutoff. If a child's score instead falls inside `(alpha, beta)`, the
- * intersection between the parent's newly established range and the search window remains inside
- * `(alpha, beta)`, so `alpha` can be raised to that child's score. The logic for a MIN node is
- * symmetric with signs reversed.
+ * lower bound of its parent. For example, after node `2` produces `x`, node `1` is known to be at
+ * least `x`. Raising the parent score to at least `beta` lets the search skip the remaining
+ * children of a MAX node. This is the `beta` cutoff. If a child's score instead falls inside
+ * `(alpha, beta)`, the intersection between the parent's newly established range and the search
+ * window remains inside `(alpha, beta)`, so `alpha` can be raised to that child's score. The logic
+ * for a MIN node is symmetric with signs reversed.
  *
  * Negamax simplifies the minimax implementation by negating the opponent's position score, thereby
  * expressing both sides as maximizers with the same code path.
@@ -1950,38 +1956,38 @@ static int quiescence(const XqEngineAdapter *engine,
  *
  * The function probes the transposition table before generating moves, orders a valid hash move and
  * the previous iteration's principal-variation move first, and stores the resulting exact score or
- * bound after the node has been searched. A completed candidate proving +XQ_MATE_SCORE reaches the
- * maximum possible value: store it as EXACT and return immediately, regardless of beta. A fail-low
- * upper bound at that value alone is not proof of a win.
+ * bound after the node has been searched. A completed candidate proving `+XQ_MATE_SCORE` reaches
+ * the maximum possible value: store it as `XQ_SEARCH_SCORE_EXACT` and return immediately,
+ * regardless of `beta`. A fail-low upper bound at that value alone is not proof of a win.
  *
  * Time control is shared across recursive calls, including quiescence search, through `context`. On
  * entry, `search_count_node_and_check_time()` counts the node and checks time control. With a time
  * limit enabled, it reads the configured clock every `1024` nodes. At the deadline, the shared
  * context either stops the search or permits finishing the current root iteration based on its
- * progress. These periodic checks do not guarantee an exact cutoff at the deadline. A null context
- * disables node counting and time checks; a context with no time limit still counts nodes without
- * reading the clock.
+ * progress. These periodic checks do not guarantee an exact cutoff at the deadline. A `NULL`
+ * `context` disables node counting and time checks; a context with no time limit still counts nodes
+ * without reading the clock.
  *
  * After each recursive child search, the move is undone before checking
- * `context->time_stop_required`. If stopped, the function returns zero immediately, without using
- * the child's score or storing the interrupted node in the transposition table. The zero is an
+ * `context->time_stop_required`. If stopped, the function returns `0` immediately, without using
+ * the child's score or storing the interrupted node in the transposition table. The `0` is an
  * interruption placeholder, not a draw evaluation: callers must check `context->time_stop_required`
  * and discard the score and any partial `pv_out`. The root search then selects a move from
  * previously completed search results.
  *
- * @param engine        Engine adapter used for static evaluation and move ordering; may be null.
+ * @param engine        Engine adapter used for static evaluation and move ordering; may be `NULL`.
  * @param table         Transposition table used for probing, move ordering, and storage; may be
- *                      null.
- * @param pos           Current position; must not be null and is restored before the function
+ *                      `NULL`.
+ * @param pos           Current position; must not be `NULL` and is restored before the function
  *                      returns.
- * @param depth         Remaining normal-search depth. At zero, quiescence search is entered.
+ * @param depth         Remaining normal-search depth. At `0`, quiescence search is entered.
  * @param alpha         Lower bound of the current alpha-beta search window.
  * @param beta          Upper bound of the current alpha-beta search window.
  * @param pv_hint       Optional principal-variation moves from the previous iteration.
  * @param pv_hint_count Number of valid moves available in `pv_hint`.
  * @param pv_out        Optional output for the best principal variation found at this node.
- * @param context       Search context used for node counting and time control; may be null.
- * @return              Search score from the side-to-move perspective, or zero if the search is
+ * @param context       Search context used for node counting and time control; may be `NULL`.
+ * @return              Search score from the side-to-move perspective, or `0` if the search is
  *                      stopped by the time limit.
  */
 static int negamax(const XqEngineAdapter *engine,
@@ -2035,11 +2041,11 @@ static int negamax(const XqEngineAdapter *engine,
     order_moves(engine, pos, &list);
 
     /*
-     * For example, suppose the requested depth is 6, the window is [50, 100], and the table
-     * contains an older entry with depth=8, LOWER_BOUND=80, and best_move=A. Because 80 < beta, the
-     * cached score cannot produce a cutoff, but the entry still supplies hash_move=A. If the first
-     * move of the previous iteration's complete PV is B, then pv_hint[0]=B and the hash move
-     * differs from the PV move.
+     * For example, suppose the requested depth is `6`, the window is `[50, 100]`, and the table
+     * contains an older entry with `depth=8`, `LOWER_BOUND=80`, and `best_move=A`. Because `80 <
+     * beta`, the cached score cannot produce a cutoff, but the entry still supplies `hash_move=A`.
+     * If the first move of the previous iteration's complete PV is `B`, then `pv_hint[0]=B` and the
+     * hash move differs from the PV move.
      */
     if (has_hash_move)
         (void)prioritize_move(&list, hash_move);
@@ -2104,21 +2110,21 @@ static int negamax(const XqEngineAdapter *engine,
  * @brief Computes the rolling hash of the move sequence between two recorded positions.
  *
  * Position indices are used as boundaries: the path includes moves in entries `begin + 1` through
- * `end`. For example, begin=2 and end=5 selects the three moves in entries 3, 4, and 5.
+ * `end`. For example, `begin=2` and `end=5` selects the three moves in entries `3`, `4`, and `5`.
  *
- * Let H[i] be the prefix hash through entry i and B the hash base. Subtracting `H[begin] * B^(end -
- * begin)` from `H[end]` removes the earlier moves and leaves the requested path hash. Each entry's
- * `power` stores B raised to its index, so the calculation takes constant time without traversing
- * moves. Unsigned arithmetic intentionally wraps modulo 2^64.
+ * Let `H[i]` be the prefix hash through entry `i` and `B` the hash base. Subtracting `H[begin] *
+ * B^(end - begin)` from `H[end]` removes the earlier moves and leaves the requested path hash. Each
+ * entry's `power` stores `B` raised to its index, so the calculation takes constant time without
+ * traversing moves. Unsigned arithmetic intentionally wraps modulo `2^64`.
  *
  * Equal-length identical paths have equal hashes regardless of their offsets in history. Hash
  * equality alone does not prove path equality; callers must compare the moves to exclude hash
  * collisions and check position hashes separately when detecting a closed cycle.
  *
- * @param history Recorded game history; must not be null and is left unchanged.
- * @param begin   Starting position index; must satisfy begin <= end.
- * @param end     Ending position index; must be less than history->count.
- * @return        Hash of the selected move sequence, or zero for an empty path (begin == end).
+ * @param history Recorded game history; must not be `NULL` and is left unchanged.
+ * @param begin   Starting position index; must satisfy `begin <= end`.
+ * @param end     Ending position index; must be less than `history->count`.
+ * @return        Hash of the selected move sequence, or `0` for an empty path (`begin == end`).
  */
 static uint64_t history_path_hash(const XqHistory *history,
                                   size_t           begin,
@@ -2131,26 +2137,28 @@ static uint64_t history_path_hash(const XqHistory *history,
 /**
  * @brief Determines whether completing a detected threefold cycle makes the moving side lose.
  *
- * The caller has already verified that appending candidate would complete three consecutive,
+ * The caller has already verified that appending `candidate` would complete three consecutive,
  * identical move sequences whose four boundary positions have matching hashes. This function
- * applies the loss rule only; it does not detect cycles or play the candidate move.
+ * applies the loss rule only; it does not detect cycles or play the `candidate` move.
  *
- * The current rule always returns true, making the side to move in root lose for closing the third
- * cycle. Keeping this decision separate allows future rules to inspect the cycle, for example to
- * require that every move by the closing side gives check before declaring a loss.
+ * The current rule always returns `true`, making the side to move in `root` lose for closing the
+ * third cycle. Keeping this decision separate allows future rules to inspect the cycle, for example
+ * to require that every move by the closing side gives check before declaring a loss.
  *
- * History contains only real moves, and root is the position before candidate. The third cycle's
- * final move is supplied separately as candidate and is not yet present in history. A future rule
- * can use a copy of root and the recorded moves to reconstruct and inspect the cycle positions.
+ * `history` contains only real moves, and `root` is the position before `candidate`. The third
+ * cycle's final move is supplied separately as `candidate` and is not yet present in `history`. A
+ * future rule can use a copy of `root` and the recorded moves to reconstruct and inspect the cycle
+ * positions.
  *
- * @param history   Real-game history ending at root; must not be null and is left unchanged.
+ * @param history   Real-game history ending at `root`; must not be `NULL` and is left unchanged.
  * @param start     Position index at the beginning of the first of the three cycles.
- * @param length    Number of individual moves in one cycle; a positive even number satisfying start
- *                  + 3 * length == history->count.
- * @param root      Position before candidate is played; must not be null and is left unchanged.
+ * @param length    Number of individual moves in one cycle; a positive even number satisfying
+ *                  `start + 3 * length == history->count`.
+ * @param root      Position before `candidate` is played; must not be `NULL` and is left unchanged.
  * @param candidate Legal root move that would close the third identical cycle.
- * @return          True if the side playing candidate loses under the cycle rule. The current
- *                  implementation always returns true; future rules may return false to allow it.
+ * @return          `true` if the side playing `candidate` loses under the cycle rule. The current
+ *                  implementation always returns `true`; future rules may return `false` to allow
+ *                  it.
  */
 static bool root_cycle_is_loss(const XqHistory  *history,
                                size_t            start,
@@ -2170,9 +2178,9 @@ static bool root_cycle_is_loss(const XqHistory  *history,
  * @brief Removes legal root moves that would complete a cycle penalized as a loss.
  *
  * Called once before iterative deepening, this function examines only real-game history plus a
- * candidate root move. It does not detect repetitions inside negamax or quiescence search. Null,
- * empty, or mismatched history leaves the move list unchanged; matching requires the last recorded
- * position hash to equal the current position hash.
+ * candidate root move. It does not detect repetitions inside `negamax()` or `quiescence()` search.
+ * `NULL`, empty, or mismatched history leaves the move list unchanged; matching requires the last
+ * recorded position hash to equal the current position hash.
  *
  * The virtual position index after the candidate is `end = history->count`. For each possible even
  * cycle length, the first cycle starts at `end - 3 * length`. Only even lengths can return to the
@@ -2185,15 +2193,15 @@ static bool root_cycle_is_loss(const XqHistory  *history,
  * `root_cycle_is_loss()` decides whether the verified cycle penalizes the moving side, keeping rule
  * changes separate from cycle detection. Candidates are never appended to real history.
  *
- * Prefix-hash screening takes O(history->count) time; matching paths additionally require move
+ * Prefix-hash screening takes `O(history->count)` time; matching paths additionally require move
  * lookup and exact comparison. Rejected moves are removed in place while preserving the relative
  * order of surviving moves. The list may become empty; choosing a fallback is the caller's job.
  *
- * @param history Optional real-game history ending at pos; may be null and is left unchanged.
- * @param pos     Root position; must not be null and is restored after each temporary move.
- * @param list    Legal root moves to filter in place; must not be null. Both moves and count are
- *                updated when candidates are rejected.
- * @return        True if at least one move was removed; false if no move was removed, including
+ * @param history Optional real-game history ending at `pos`; may be `NULL` and is left unchanged.
+ * @param pos     Root position; must not be `NULL` and is restored after each temporary move.
+ * @param list    Legal root moves to filter in place; must not be `NULL`. Both `moves` and `count`
+ *                are updated when candidates are rejected.
+ * @return        `true` if at least one move was removed; `false` if no move was removed, including
  *                when history is absent, empty, or does not match the root position.
  */
 static bool filter_root_cycles(const XqHistory *history,
@@ -2260,10 +2268,10 @@ static bool filter_root_cycles(const XqHistory *history,
 /**
  * @brief Runs the built-in iterative-deepening search.
  *
- * The function searches only legal root moves from depth 1 through the requested maximum depth.
+ * The function searches only legal root moves from depth `1` through the requested maximum depth.
  * Scores from all root moves in the previous completed iteration determine their ordering in the
  * next iteration, while the previous principal variation supplies an additional ordering hint. A
- * completed root candidate with score == XQ_MATE_SCORE is selected immediately, before the next
+ * completed root candidate with `score == XQ_MATE_SCORE` is selected immediately, before the next
  * time check, without waiting for the remaining candidates or looking for a faster mate.
  *
  * At the first detected deadline, an unfinished iteration strictly above the completed-root
@@ -2276,21 +2284,22 @@ static bool filter_root_cycles(const XqHistory *history,
  * If every legal move loses this way, the original first move is returned without searching.
  *
  * @param engine        Engine adapter used for evaluation, move ordering, and optional
- *                      transposition table access; may be null.
- * @param pos           Position to search; must not be null and is restored before the function
+ *                      transposition table access; may be `NULL`.
+ * @param pos           Position to search; must not be `NULL` and is restored before the function
  *                      returns.
- * @param limits        Depth, time, and clock-mode configuration; must not be null.
- * @param best_move     Output that receives the selected move; must not be null.
+ * @param limits        Depth, time, and clock-mode configuration; must not be `NULL`.
+ * @param best_move     Output that receives the selected move; must not be `NULL`.
  * @param stats         Optional, zero-initialized output for built-in search counters.
  * @param progress      Optional callback invoked synchronously on the calling thread at iteration
  *                      start, after each completed root move, and at iteration end (including
- *                      partial iterations). Null disables notifications. Snapshots are valid only
+ *                      partial iterations). `NULL` disables notifications. Snapshots are valid only
  *                      during the callback; do not mutate or reenter the current search. Roots that
  *                      return before iterative deepening emit no events.
- * @param progress_user Borrowed user-data pointer passed unchanged to progress; may be null and is
- *                      ignored when progress is null. Keep referenced data valid until return.
- * @return              True if at least one root move exists and a move is selected; false if the
- *                      position is invalid for searching or contains no legal moves.
+ * @param progress_user Borrowed user-data pointer passed unchanged to `progress`; may be `NULL` and
+ *                      is ignored when `progress` is `NULL`. Keep referenced data valid until
+ *                      return.
+ * @return              `true` if at least one root move exists and a move is selected; `false` if
+ *                      the position is invalid for searching or contains no legal moves.
  */
 static bool builtin_search(const XqEngineAdapter *engine,
                            XqPosition            *pos,
@@ -2493,19 +2502,19 @@ static bool builtin_search(const XqEngineAdapter *engine,
 /**
  * @brief Finds the best move using a custom search callback or the built-in search.
  *
- * Default search limits are created only when `limits` is null. Otherwise, the supplied limits are
- * used. A maximum depth of zero is normalized to one. If `engine` provides a custom search
+ * Default search limits are created only when `limits` is `NULL`. Otherwise, the supplied limits
+ * are used. A maximum depth of `0` is normalized to `1`. If `engine` provides a custom search
  * callback, it receives the normalized maximum depth and manages its own time limit.
  *
  * Otherwise, `builtin_search()` is used.
  *
- * @param engine    Engine adapter that may provide a custom search callback; may be null.
- * @param pos       Position to search. The built-in search requires a non-null position and
+ * @param engine    Engine adapter that may provide a custom search callback; may be `NULL`.
+ * @param pos       Position to search. The built-in search requires a non-`NULL` position and
  *                  restores it before returning.
- * @param limits    Optional search limits; null selects the default configuration.
- * @param best_move Output that receives the selected move; must not be null.
- * @return          True if a best move was found and written; false on invalid input, when no move
- *                  is available, or when the custom search callback fails.
+ * @param limits    Optional search limits; `NULL` selects the default configuration.
+ * @param best_move Output that receives the selected move; must not be `NULL`.
+ * @return          `true` if a best move was found and written; `false` on invalid input, when no
+ *                  move is available, or when the custom search callback fails.
  */
 bool xq_engine_find_best_move(const XqEngineAdapter *engine,
                               XqPosition            *pos,
@@ -2518,10 +2527,10 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine,
 /**
  * @brief Finds the best move and optionally collects per-call search statistics.
  *
- * Default search limits are used when `limits` is null, and a maximum depth of zero is normalized
- * to one. If `engine` provides a custom search callback, it receives the normalized maximum depth
- * and manages its own time limit. Otherwise, `builtin_search()` is used; a null engine selects the
- * default evaluation and move ordering without a transposition table or game history.
+ * Default search limits are used when `limits` is `NULL`, and a maximum depth of `0` is normalized
+ * to `1`. If `engine` provides a custom search callback, it receives the normalized maximum depth
+ * and manages its own time limit. Otherwise, `builtin_search()` is used; a `NULL` engine selects
+ * the default evaluation and move ordering without a transposition table or game history.
  *
  * When supplied, `stats` is initialized even if the search fails. Internal search counters are
  * available only for the built-in search. Cache statistics are per-call counter differences when
@@ -2530,15 +2539,15 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine,
  * when clock readings succeed, independently of the configured search time mode.
  *
  * @param engine    Engine adapter that may provide custom callbacks, a cache, and history; may be
- *                  null to use the built-in defaults.
- * @param pos       Position to search. The built-in search requires a non-null position and
+ *                  `NULL` to use the built-in defaults.
+ * @param pos       Position to search. The built-in search requires a non-`NULL` position and
  *                  restores it before returning.
- * @param limits    Optional search limits; null selects the default configuration.
- * @param best_move Output that receives the selected move; must not be null.
- * @param stats     Optional output statistics; null disables diagnostics collection. Check the
+ * @param limits    Optional search limits; `NULL` selects the default configuration.
+ * @param best_move Output that receives the selected move; must not be `NULL`.
+ * @param stats     Optional output statistics; `NULL` disables diagnostics collection. Check the
  *                  availability flags before using internal counters, elapsed time, or cache data.
- * @return          True if a best move was found and written; false on invalid input, when no move
- *                  is available, or when the custom search callback fails.
+ * @return          `true` if a best move was found and written; `false` on invalid input, when no
+ *                  move is available, or when the custom search callback fails.
  */
 bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine,
                                          XqPosition            *pos,
@@ -2553,10 +2562,10 @@ bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine,
 /**
  * @brief Finds the best move with optional per-call statistics and root progress notifications.
  *
- * Uses default limits when limits is null and normalizes a maximum depth of zero to one. A custom
- * engine search callback receives that depth, manages its own timing, and emits no progress
+ * Uses default limits when `limits` is `NULL` and normalizes a maximum depth of `0` to `1`. A
+ * custom engine search callback receives that depth, manages its own timing, and emits no progress
  * notifications through this function. Otherwise, the built-in iterative-deepening search uses the
- * adapter's evaluator, move ordering, transposition table and history; a null adapter selects the
+ * adapter's evaluator, move ordering, transposition table and history; a `NULL` adapter selects the
  * built-in defaults without a cache or history.
  *
  * Built-in progress callbacks run synchronously on the calling thread at iteration start, after
@@ -2570,20 +2579,21 @@ bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine,
  * can report monotonic wall time when clock readings succeed, independently of the configured
  * search time mode. Statistics and progress can be enabled independently.
  *
- * @param engine        Optional adapter providing callbacks, a cache and real-game history; null
+ * @param engine        Optional adapter providing callbacks, a cache and real-game history; `NULL`
  *                      selects the built-in defaults.
- * @param pos           Position to search. Built-in search requires a non-null position and
+ * @param pos           Position to search. Built-in search requires a non-`NULL` position and
  *                      restores it before returning; custom search receives it unchanged.
- * @param limits        Optional depth and time limits; null selects the default configuration.
- * @param best_move     Required output for the selected move; valid only when true is returned.
+ * @param limits        Optional depth and time limits; `NULL` selects the default configuration.
+ * @param best_move     Required output for the selected move; valid only when `true` is returned.
  * @param stats         Optional statistics output. Check availability flags before reading internal
  *                      counters, elapsed time or cache data.
- * @param progress      Optional observer for built-in root progress; null disables notifications.
+ * @param progress      Optional observer for built-in root progress; `NULL` disables notifications.
  *                      Snapshots are borrowed only for the callback's duration. Keep callbacks
  *                      short and do not mutate or reenter the current search or its state.
- * @param progress_user Borrowed pointer passed unchanged to progress; may be null. Keep referenced
- *                      data valid until return. Ignored when progress is null or search is custom.
- * @return              True if a move was selected and written; false if best_move is null,
+ * @param progress_user Borrowed pointer passed unchanged to `progress`; may be `NULL`. Keep
+ *                      referenced data valid until return. Ignored when `progress` is `NULL` or
+ *                      search is custom.
+ * @return              `true` if a move was selected and written; `false` if `best_move` is `NULL`,
  *                      built-in search cannot select a move, or the custom search callback fails.
  */
 bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine,
@@ -2649,19 +2659,21 @@ bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine,
 /**
  * @brief Explains one ply of the normal search at the current position.
  *
- * Moves are visited in search order. For each visited move, the result records the alpha value
- * before the move, beta, recursive score, ordering score, bound kind, and whether the move became
+ * Moves are visited in search order. For each visited move, the result records the `alpha` value
+ * before the move, `beta`, recursive score, ordering score, bound kind, and whether the move became
  * best or caused a cutoff. The recursive searches do not use a transposition table or time limit.
  *
  * The adapter's custom search callback is not invoked; only its evaluation and move-ordering
  * callbacks are relevant.
  *
- * @param engine Engine adapter used for evaluation and move ordering; may be null.
- * @param pos    Position to explain; must not be null and is restored before the function returns.
- * @param depth  Remaining normal-search depth; zero is normalized to one.
- * @param result Output explanation structure; must not be null and is initialized by the function.
- * @return       True if at least one move was explained; false on invalid input or when no move is
- *               available.
+ * @param engine Engine adapter used for evaluation and move ordering; may be `NULL`.
+ * @param pos    Position to explain; must not be `NULL` and is restored before the function
+ *               returns.
+ * @param depth  Remaining normal-search depth; `0` is normalized to `1`.
+ * @param result Output explanation structure; must not be `NULL` and is initialized by the
+ *               function.
+ * @return       `true` if at least one move was explained; `false` on invalid input or when no move
+ *               is available.
  */
 bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine,
                                       XqPosition            *pos,
@@ -2752,11 +2764,13 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine,
  * Each move's score is still computed by a recursive call to `quiescence()` so that the explanation
  * remains consistent with the real search.
  *
- * @param engine Engine adapter used for static evaluation and move ordering; may be null.
- * @param pos    Position to explain; must not be null and is restored before the function returns.
- * @param result Output explanation structure; must not be null and is initialized by the function.
- * @return       True when an explanation is produced; false if `pos` or `result` is null or the
- *               side to move has no king.
+ * @param engine Engine adapter used for static evaluation and move ordering; may be `NULL`.
+ * @param pos    Position to explain; must not be `NULL` and is restored before the function
+ *               returns.
+ * @param result Output explanation structure; must not be `NULL` and is initialized by the
+ *               function.
+ * @return       `true` when an explanation is produced; `false` if `pos` or `result` is `NULL` or
+ *               the side to move has no king.
  */
 bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter     *engine,
                                           XqPosition                *pos,
@@ -2902,14 +2916,14 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter     *engine,
  *
  * The caller saves the returned parent state and passes it to `trace_pop()` after returning from
  * the child, so one branch's mismatch does not affect its siblings in normal search. If no trace is
- * attached, the function changes nothing and returns false.
+ * attached, the function changes nothing and returns `false`.
  *
- * @param context Explanation context containing the path trace; may be null.
+ * @param context Explanation context containing the path trace; may be `NULL`.
  * @param ply     Current parent node's distance from the root, also the index of the next target
  *                move to compare; must be nonnegative.
  * @param move    Move about to be searched from the current parent node.
  * @return        The previous prefix-match state for restoration, not the updated child state;
- *                false if the context or its trace is null.
+ *                `false` if the `context` or its `trace` is `NULL`.
  */
 static bool trace_push(ExplainContext *context,
                        int             ply,
@@ -2929,9 +2943,9 @@ static bool trace_push(ExplainContext *context,
  * Pairs with `trace_push()` by restoring the state it returned before descending into the child.
  * This prevents the child's match or mismatch from affecting subsequent sibling branches in normal
  * search. Only the prefix-match flag is restored; collected search records are left unchanged. Does
- * nothing if the context or its trace is null.
+ * nothing if the `context` or its `trace` is `NULL`.
  *
- * @param context  Explanation context containing the path trace; may be null.
+ * @param context  Explanation context containing the path trace; may be `NULL`.
  * @param previous Parent prefix-match state returned by the corresponding `trace_push()` call.
  */
 static void trace_pop(ExplainContext *context,
@@ -2944,21 +2958,21 @@ static void trace_pop(ExplainContext *context,
 /**
  * @brief Initializes a record at the target path's endpoint in normal search.
  *
- * Recording requires an attached trace, a matching path prefix, ply equal to the path length, and
- * remaining normal-search depth of at least one. An empty path selects the root. Nodes at depth
- * zero or inside quiescence search are never recorded. Failed checks leave the trace intact.
+ * Recording requires an attached trace, a matching path prefix, `ply` equal to the path length, and
+ * remaining normal-search depth of at least `1`. An empty path selects the root. Nodes at depth `0`
+ * or inside quiescence search are never recorded. Failed checks leave the trace intact.
  *
  * Clears the current visit, marks it visited, and records the root iteration depth, remaining
- * depth, ply, and incoming alpha-beta window. The best index starts at -1, with no score available
- * and the visit incomplete. Previously saved results are preserved during this new visit.
+ * `depth`, `ply`, and incoming alpha-beta window. The best index starts at `-1`, with no score
+ * available and the visit incomplete. Previously saved results are preserved during this new visit.
  *
- * @param context Explanation context containing the path trace; may be null.
+ * @param context Explanation context containing the path trace; may be `NULL`.
  * @param ply     Current node's distance from the root; must be nonnegative.
- * @param depth   Remaining normal-search depth; zero disables recording at this node.
+ * @param depth   Remaining normal-search depth; `0` disables recording at this node.
  * @param alpha   Lower bound of the incoming search window.
  * @param beta    Upper bound of the incoming search window.
- * @return        True if the target record was initialized; false if tracing is disabled, depth is
- *                zero, or this node is not the target path's endpoint.
+ * @return        `true` if the target record was initialized; `false` if tracing is disabled,
+ *                `depth` is `0`, or this node is not the target path's endpoint.
  */
 static bool trace_begin(ExplainContext *context,
                         int             ply,
@@ -2994,12 +3008,13 @@ static bool trace_begin(ExplainContext *context,
  *
  * When recording is disabled, delegates to ordinary move ordering without accessing the trace.
  *
- * @param engine  Engine adapter supplying the optional move-scoring callback; may be null to use
+ * @param engine  Engine adapter supplying the optional move-scoring callback; may be `NULL` to use
  *                the built-in ordering scores.
- * @param pos     Position in which the candidates are scored; must not be null and is unchanged.
- * @param list    Candidate move list to reorder in place; must not be null.
- * @param context Explanation context whose trace receives the sorted moves and scores. Both context
- *                and its trace must be non-null when record is true; otherwise context is unused.
+ * @param pos     Position in which the candidates are scored; must not be `NULL` and is unchanged.
+ * @param list    Candidate move list to reorder in place; must not be `NULL`.
+ * @param context Explanation context whose trace receives the sorted moves and scores. Both
+ *                `context` and its `trace` must be non-`NULL` when `record` is `true`; otherwise
+ *                `context` is unused.
  * @param record  Whether to retain the move-to-score mapping for the target node's explanation.
  */
 static void trace_order(const XqEngineAdapter *engine,
@@ -3021,14 +3036,14 @@ static void trace_order(const XqEngineAdapter *engine,
 /**
  * @brief Classifies a completed search score relative to its original alpha-beta window.
  *
- * A score at or above beta is a lower bound (fail-high); a score at or below alpha is an upper
- * bound (fail-low). A winning score above alpha proves the maximum possible value and is exact,
+ * A score at or above `beta` is a lower bound (fail-high); a score at or below `alpha` is an upper
+ * bound (fail-low). A winning score above `alpha` proves the maximum possible value and is exact,
  * even when it fails high. Otherwise only a score strictly inside the window is exact. This
  * function does not verify that the search completed or that the score is valid.
  *
- * @param score Completed search score, expressed from the same perspective as alpha and beta.
- * @param alpha Lower window bound before the search, not the alpha updated using this score.
- * @param beta  Upper window bound used for the search; must be greater than alpha.
+ * @param score Completed search score, expressed from the same perspective as `alpha` and `beta`.
+ * @param alpha Lower window bound before the search, not the `alpha` updated using this score.
+ * @param beta  Upper window bound used for the search; must be greater than `alpha`.
  * @return      Lower-bound, upper-bound, or exact score kind according to the window comparison.
  */
 static XqSearchScoreKind trace_score_kind(int score,
@@ -3046,7 +3061,7 @@ static XqSearchScoreKind trace_score_kind(int score,
  * @brief Appends one completed candidate's search result to the target node's explanation.
  *
  * Called after searching a direct child and converting its returned score to the target node's
- * perspective, before updating the search's alpha. The caller must discard interrupted child
+ * perspective, before updating the search's `alpha`. The caller must discard interrupted child
  * results before calling this function; it does not check the search stop state itself.
  *
  * Writes the move, remaining normal-search depth, window, score, bound kind, and cutoff flag to
@@ -3059,16 +3074,19 @@ static XqSearchScoreKind trace_score_kind(int score,
  * normal-search candidates only; their recursive searches may still use quiescence evaluation.
  *
  * Only explanation data is updated: this function neither performs a cutoff nor marks the node
- * complete or saves a finished visit. When record is false, it returns without accessing context.
+ * complete or saves a finished visit. When `record` is `false`, it returns without accessing
+ * `context`.
  *
  * @param context  Explanation context with an initialized target-node record and ordering map.
- *                 Context and its trace must be non-null when recording, and the node table must
+ *                 Context and its trace must be non-`NULL` when recording, and the node table must
  *                 have room for another row (`node->count < XQ_MAX_MOVES`).
  * @param record   Whether the current parent node is the target whose candidates are being
  *                 recorded.
  * @param move     Direct candidate whose child search has completed.
- * @param alpha    Parent-side alpha before searching this candidate, before updating it with score.
- * @param beta     Parent-side beta used for this candidate's search; must be greater than alpha.
+ * @param alpha    Parent-side `alpha` before searching this candidate, before updating it with
+ *                 `score`.
+ * @param beta     Parent-side `beta` used for this candidate's search; must be greater than
+ *                 `alpha`.
  * @param score    Completed child-search result converted to the target node's perspective.
  * @param child_tt Snapshot of the direct child's entry probe, in that child's perspective; required
  *                 when recording. Descendant cache activity is not attributed to this probe.
@@ -3125,18 +3143,18 @@ static void trace_move(ExplainContext        *context,
  * When recording is enabled and the search has not stopped, marks the current visit complete and
  * its score available, stores the final score, and classifies it against the node's original
  * alpha-beta window, or preserves the cached score's bound kind on a direct cache return. Copies
- * the entire current record into the saved result, replacing any older completed visit. A normal
- * cutoff, cache return or terminal return counts as completion; searching every candidate is not
- * required, and the saved score may be a bound rather than an exact value.
+ * the entire `current` record into the `saved` result, replacing any older completed visit. A
+ * normal cutoff, cache return or terminal return counts as completion; searching every candidate is
+ * not required, and the saved score may be a bound rather than an exact value.
  *
- * If recording is disabled or the search has stopped, leaves both current and saved records
+ * If recording is disabled or the search has stopped, leaves both `current` and `saved` records
  * unchanged. This preserves an earlier completed visit when a later iteration is interrupted. The
  * function does not read the clock or detect completion itself; callers invoke it at node return
  * points after handling interruption. The score is returned unchanged in every case.
  *
  * @param context Explanation context with the current target-node record. Context, its trace, and
- *                the trace's saved-result pointer must be non-null when recording; otherwise
- *                context is unused and may be null.
+ *                the trace's saved-result pointer must be non-`NULL` when recording; otherwise
+ *                `context` is unused and may be `NULL`.
  * @param record  Whether this return belongs to the target node being recorded.
  * @param score   Node's return score from its side-to-move perspective. If the search has stopped,
  *                the caller must treat the return as interrupted rather than as a valid evaluation.
@@ -3164,17 +3182,17 @@ static int trace_finish(ExplainContext *context,
 /**
  * @brief Probes once and snapshots the cache entry used for a node's explanation.
  *
- * tt_probe alone updates probe/hit/cutoff counters and the entry's generation. The subsequent
- * read-only lookup copies depth and the stored score even when the entry cannot return directly. It
- * adds no probe counters and happens before any descendant can overwrite the entry.
+ * `tt_probe()` alone updates probe/hit/cutoff counters and the entry's generation. The subsequent
+ * read-only lookup copies `depth` and the stored score even when the entry cannot return directly.
+ * It adds no probe counters and happens before any descendant can overwrite the entry.
  *
  * @param context Explanation context holding the optional shared transposition table.
  * @param key     Position hash of the node being entered.
  * @param depth   Required normal-search depth; must be positive.
  * @param alpha   Node's incoming lower window bound.
  * @param beta    Node's incoming upper window bound.
- * @param info    Snapshot output; must not be null and is initialized even without a table.
- * @return        True if the cached score can return directly, false otherwise.
+ * @param info    Snapshot output; must not be `NULL` and is initialized even without a table.
+ * @return        `true` if the cached score can return directly, `false` otherwise.
  */
 static bool tt_probe_for_explain(ExplainContext  *context,
                                  uint64_t         key,
@@ -3210,14 +3228,15 @@ static bool tt_probe_for_explain(ExplainContext  *context,
  * does not claim that every iteration or the most recent iteration was blocked by this entry.
  *
  * @param context Explanation context containing the path trace and current root iteration depth;
- *                context and its trace must not be null.
+ *                `context` and its `trace` must not be `NULL`.
  * @param depth   Remaining normal-search depth at the node returning from cache; must be positive.
  * @param ply     Node's distance from the root, also the matched path length; must be nonnegative.
  *                An event is recorded only for a matching strict ancestor of the target.
  * @param alpha   Node's incoming lower search-window bound, before the cache return.
  * @param beta    Node's incoming upper search-window bound, before the cache return.
- * @param info    Actual cache-probe snapshot with status XQ_EXPLAIN_TT_CUTOFF; must not be null.
- *                Its score uses this node's side-to-move perspective. Copied into the event.
+ * @param info    Actual cache-probe snapshot with status `XQ_EXPLAIN_TT_CUTOFF`; must not be
+ *                `NULL`. Its score uses this node's side-to-move perspective. Copied into the
+ *                event.
  */
 static void trace_tt_block(ExplainContext        *context,
                            unsigned               depth,
@@ -3243,32 +3262,34 @@ static void trace_tt_block(ExplainContext        *context,
  * @brief Searches the requested path and observes direct-child cache probes when requested.
  *
  * Uses the same transposition probes, hash/PV ordering, fail-soft scoring, and entry stores as
- * ordinary negamax. A node on the target prefix or with a non-null entry_tt is handled here so its
- * actual entry probe is observed exactly once. Other branches delegate to ordinary negamax using
- * the same table. Depth-zero leaves never probe the table or become explanation targets.
+ * ordinary `negamax()`. A node on the target prefix or with a non-`NULL` `entry_tt` is handled here
+ * so its actual entry probe is observed exactly once. Other branches delegate to ordinary
+ * `negamax()` using the same table. Depth-zero leaves never probe the table or become explanation
+ * targets.
  *
- * Node entry uses the same periodic time check as ordinary negamax. The explanation root driver
+ * Node entry uses the same periodic time check as ordinary `negamax()`. The explanation root driver
  * owns forced checks; tracing adds none. Interrupted child scores are discarded after restoring the
- * board and prefix state, and interrupted nodes are not stored. Quiescence remains unchanged.
+ * board and prefix state, and interrupted nodes are not stored. `quiescence()` remains unchanged.
  *
- * @param engine        Adapter supplying evaluation and ordering callbacks; may be null.
- * @param pos           Position to search; must not be null and is restored before returning.
+ * @param engine        Adapter supplying evaluation and ordering callbacks; may be `NULL`.
+ * @param pos           Position to search; must not be `NULL` and is restored before returning.
  * @param depth         Remaining normal-search depth; only positive-depth targets are recorded.
  * @param ply           Distance from the root, used for path matching.
  * @param alpha         Lower bound of the incoming search window.
  * @param beta          Upper bound of the incoming search window.
  * @param pv_hint       Optional previous-iteration PV ordering hint.
- * @param pv_hint_count Number of available moves in pv_hint.
+ * @param pv_hint_count Number of available moves in `pv_hint`.
  * @param pv_out        Optional output PV; partial output is invalid on timeout.
  * @param context       Initialized explanation context with path and optional shared cache.
  * @param entry_tt      Optional output snapshot captured after probing the current position and
  *                      before recursively searching any child. Describes only this node's probe
  *                      result and matched entry, not the whole table or descendant probes.
- *                      hash_move_used is filled during subsequent move ordering, still before
+ *                      `hash_move_used` is filled during subsequent move ordering, still before
  *                      searching children. Later cache stores do not update this snapshot. When
- *                      non-null, initialized on every call: disabled without a table, or not-probed
- *                      until a lookup occurs (e.g. depth-zero or early terminal returns).
- * @return              Side-to-move score, or zero on interruption. Check
+ *                      non-`NULL`, initialized on every call: disabled without a table, or
+ *                      not-probed until a lookup occurs (e.g. depth-zero or early terminal
+ *                      returns).
+ * @return              Side-to-move score, or `0` on interruption. Check
  *                      `context->search->time_stop_required`.
  */
 static int negamax_for_explain(const XqEngineAdapter *engine,
@@ -3392,14 +3413,14 @@ static int negamax_for_explain(const XqEngineAdapter *engine,
 }
 
 /**
- * @brief Snapshots the root ordering lookup already performed by builtin_search_for_explain.
+ * @brief Snapshots the root ordering lookup already performed by `builtin_search_for_explain()`.
  *
  * This read-only lookup adds no probe/hit counters and cannot return a cached score. It runs before
  * descendants can change the entry. Later iterations use the previous root scores for ordering and
  * do not probe the root again, exactly as in ordinary CLI search.
  *
- * @param context        Explanation context borrowing the driver's table; must not be null.
- * @param key            Root position hash used by the preceding tt_get_hash_move call.
+ * @param context        Explanation context borrowing the driver's table; must not be `NULL`.
+ * @param key            Root position hash used by the preceding `tt_get_hash_move()` call.
  * @param hash_move_used Whether the cached move was matched and promoted in the legal root list.
  */
 static void trace_root_cache(ExplainContext *context,
@@ -3442,7 +3463,7 @@ static void trace_root_finish(ExplainContext *context,
     (void)trace_finish(context, context->trace->count == 0, score);
 }
 
-/* A terminal root is observed before iteration 1; there is no selected move or cache lookup. */
+/* A terminal root is observed before iteration `1`; there is no selected move or cache lookup. */
 static void trace_root_terminal(ExplainContext *context)
 {
     bool record;
@@ -3455,13 +3476,13 @@ static void trace_root_terminal(ExplainContext *context)
  * @brief Copies the final root choice and the candidate snapshot used for selection.
  *
  * Rows come from the last complete iteration, a partial first iteration when none completed, or a
- * partial iteration that found a winning move. Unsearched rows have completed_depth zero and do not
- * supply a valid score. No selection is recomputed here; scores may be bounds within this single
- * iteration.
+ * partial iteration that found a winning move. Unsearched rows have `completed_depth == 0` and do
+ * not supply a valid score. No selection is recomputed here; scores may be bounds within this
+ * single iteration.
  *
- * @param context  Explanation context; must not be null.
- * @param moves    Selected iteration's root candidates; may be null when count is zero.
- * @param count    Number of candidates, between zero and XQ_MAX_MOVES.
+ * @param context  Explanation context; must not be `NULL`.
+ * @param moves    Selected iteration's root candidates; may be `NULL` when `count` is `0`.
+ * @param count    Number of candidates, between `0` and `XQ_MAX_MOVES`.
  * @param selected Actual move selected by the driver, including an unsearched fallback.
  */
 static void trace_root_selection(ExplainContext   *context,
@@ -3493,16 +3514,16 @@ static void trace_root_selection(ExplainContext   *context,
  * only maintains the target prefix and records a completed child. It always restores the board and
  * prefix before returning; interrupted scores never become candidate rows.
  *
- * @param engine     Adapter supplying evaluation/ordering callbacks; may be null.
- * @param pos        Root position, restored before return; must not be null.
+ * @param engine     Adapter supplying evaluation/ordering callbacks; may be `NULL`.
+ * @param pos        Root position, restored before return; must not be `NULL`.
  * @param move       Legal root move being searched, with piece/capture fields populated.
  * @param depth      Current root iteration depth; must be positive.
- * @param alpha      Current root alpha before this move.
- * @param beta       Root beta.
+ * @param alpha      Current root `alpha` before this move.
+ * @param beta       Root `beta`.
  * @param hint       Optional previous-iteration child PV hint.
- * @param hint_count Number of moves in hint.
- * @param pv         Output child PV, invalid on interruption; may be null.
- * @param context    Explanation context borrowing the driver's SearchContext; must not be null.
+ * @param hint_count Number of moves in `hint`.
+ * @param pv         Output child PV, invalid on interruption; may be `NULL`.
+ * @param context    Explanation context borrowing the driver's `SearchContext`; must not be `NULL`.
  * @return           Root-side recursive score; invalid if `context->search->time_stop_required` is
  *                   `true`.
  */
@@ -3532,27 +3553,29 @@ static int search_root_move_for_explain(const XqEngineAdapter *engine,
 }
 
 /**
- * @brief Runs an independent explanation root driver with the same search rules as builtin_search.
+ * @brief Runs an independent explanation root driver with the same search rules as
+ *        `builtin_search()`.
  *
  * Keep root generation, initial hash-move ordering, history filtering, iteration ordering, PV
- * hints, time checks, cache stores and timeout selection aligned with builtin_search. Reuse the
+ * hints, time checks, cache stores and timeout selection aligned with `builtin_search()`. Reuse the
  * same ordinary helpers for those operations; the production driver has no explanation hooks. Only
- * candidate observation and recursion through negamax_for_explain are added here.
+ * candidate observation and recursion through `negamax_for_explain()` are added here.
  *
  * A completed root visit is saved before the final clock check, so a deadline reached just after
  * the last candidate does not discard that visit. Final move selection is captured separately from
  * the retained target visit and may use the last complete iteration, the partial first one, or a
  * partial iteration that found a winning move. An incomplete root visit stays incomplete.
  *
- * @param engine    Adapter supplying evaluation, ordering, optional cache and history; may be null.
- * @param pos       Root position; restored before returning. A null position returns false.
- * @param limits    Search limits; must not be null. Uses builtin_search's depth/time limits and
- *                  fallback to the last complete iteration.
- * @param best_move Selected root move, including an unsearched fallback; must not be null.
+ * @param engine    Adapter supplying evaluation, ordering, optional cache and history; may be
+ *                  `NULL`.
+ * @param pos       Root position; restored before returning. A `NULL` position returns `false`.
+ * @param limits    Search limits; must not be `NULL`. Uses `builtin_search()`'s depth/time limits
+ *                  and fallback to the last complete iteration.
+ * @param best_move Selected root move, including an unsearched fallback; must not be `NULL`.
  * @param stats     Optional, zero-initialized search statistics.
- * @param explain   Initialized explanation context; must not be null. Borrows the local search
- *                  state only during this call; its search pointer must not be used after return.
- * @return          True if a root move is selected, false for an invalid or terminal root.
+ * @param explain   Initialized explanation context; must not be `NULL`. Borrows the local search
+ *                  state only during this call; its `search` pointer must not be used after return.
+ * @return          `true` if a root move is selected, `false` for an invalid or terminal root.
  */
 static bool builtin_search_for_explain(const XqEngineAdapter *engine,
                                        XqPosition            *pos,
@@ -3749,49 +3772,51 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine,
 /**
  * @brief Observes one path using an independent explanation search aligned with CLI search.
  *
- * Search starts from pos and matches the complete from/to sequence in path; an empty path selects
- * the root. The caller validates move legality. Only matching normal nodes with remaining depth at
- * least one are recorded. Pruned, beyond-horizon or interrupted paths are not searched again. The
- * board is restored on every return and limits is unchanged.
+ * Search starts from `pos` and matches the complete from/to sequence in `path`; an empty path
+ * selects the root. The caller validates move legality. Only matching normal nodes with remaining
+ * depth at least `1` are recorded. Pruned, beyond-horizon or interrupted paths are not searched
+ * again. The board is restored on every return and `limits` is unchanged.
  *
- * builtin_search_for_explain mirrors builtin_search without adding hooks to it. Iterations start at
- * one, the initial root cache query supplies only a move-ordering hint, later root ordering uses
- * the previous iteration's scores, and history filtering, PV hints, generations, stores and time
- * checks follow the same rules. Internal nodes still use cached scores when their depth and bound
- * allow it. Tracing neither adds probes nor introduces extra clock checks. Recording costs wall
- * time, so separate timed runs need not stop at the same node or select the same move.
+ * `builtin_search_for_explain()` mirrors `builtin_search()` without adding hooks to it. Iterations
+ * start at `1`, the initial root cache query supplies only a move-ordering hint, later root
+ * ordering uses the previous iteration's scores, and history filtering, PV hints, generations,
+ * stores and time checks follow the same rules. Internal nodes still use cached scores when their
+ * depth and bound allow it. Tracing neither adds probes nor introduces extra clock checks.
+ * Recording costs wall time, so separate timed runs need not stop at the same node or select the
+ * same move.
  *
- * result->root reports the actual final root selection and its candidate snapshot from the last
+ * `result->root` reports the actual final root selection and its candidate snapshot from the last
  * complete iteration, the partial first iteration, or the iteration that found a winning move. This
- * is separate from the retained target visit: result->node.best_index identifies the best candidate
- * of that visit, not the final chosen root move. Keep the latest complete target visit even if a
- * later visit is interrupted; when none completed, return the latest partial visit. Target and
- * child cache snapshots belong to that visit. The initial root ordering lookup is preserved
- * separately in root.ordering_tt; the root target's tt is not-probed after iteration one because
- * the root is not queried again.
+ * is separate from the retained target visit: `result->node.best_index` identifies the best
+ * candidate of that visit, not the final chosen root move. Keep the latest complete target visit
+ * even if a later visit is interrupted; when none completed, return the latest partial visit.
+ * Target and child cache snapshots belong to that visit. The initial root ordering lookup is
+ * preserved separately in `root.ordering_tt`; the root target's `tt` is not-probed after iteration
+ * `1` because the root is not queried again.
  *
- * blocked_tt independently retains the latest strict-ancestor cache cutoff and its iteration. Cache
- * PV reconstruction does not count as visiting the target. A terminal root is recorded with
- * root_depth zero before iterative deepening; no move is selected. A root filtered entirely by
+ * `blocked_tt` independently retains the latest strict-ancestor cache cutoff and its iteration.
+ * Cache PV reconstruction does not count as visiting the target. A terminal root is recorded with
+ * `root_depth == 0` before iterative deepening; no move is selected. A root filtered entirely by
  * history returns the same unsearched fallback as ordinary search.
  *
  * The adapter's evaluation, ordering, table and history are used; its custom search callback is
  * ignored. Tables must match evaluation semantics. Cache statistics are per-call differences,
  * without resetting cumulative counters; loading and saving remain the caller's responsibility.
  *
- * @param engine     Adapter supplying callbacks, optional table and history; may be null.
- * @param pos        Root position, restored before returning; must not be null.
- * @param limits     Required limits with max_depth >= 1. Iterations run from one to max_depth;
- *                   time_limit_ms zero disables the deadline, otherwise all iterations share it.
- *                   time_mode has the same meaning as in ordinary search.
- * @param path       Legal from/to sequence from the root, not validated here; may be null only when
- *                   path_count is zero. No extra search is made to reach this path.
- * @param path_count Number of moves in path; must not exceed INT_MAX.
+ * @param engine     Adapter supplying callbacks, optional table and history; may be `NULL`.
+ * @param pos        Root position, restored before returning; must not be `NULL`.
+ * @param limits     Required limits with `max_depth >= 1`. Iterations run from `1` to `max_depth`;
+ *                   `time_limit_ms == 0` disables the deadline, otherwise all iterations share it.
+ *                   `time_mode` has the same meaning as in ordinary search.
+ * @param path       Legal from/to sequence from the root, not validated here; may be `NULL` only
+ *                   when `path_count` is `0`. No extra search is made to reach this path.
+ * @param path_count Number of moves in `path`; must not exceed `INT_MAX`.
  * @param result     Required output, initialized even on invalid input. Target visit, ancestor
  *                   blockage, final root decision and overall statistics are independent records.
- * @return           False only for null required arguments, max_depth zero, a missing nonempty path
- *                   or path_count above INT_MAX. Timeout, terminal and unvisited paths are valid
- *                   results and return true; inspect root.move_available for move selection.
+ * @return           `false` only for `NULL` required arguments, `max_depth == 0`, a missing
+ *                   nonempty path or `path_count` above `INT_MAX`. Timeout, terminal and unvisited
+ *                   paths are valid results and return `true`; inspect `root.move_available` for
+ *                   move selection.
  */
 bool xq_engine_explain_path(const XqEngineAdapter *engine,
                             XqPosition            *pos,
@@ -3831,7 +3856,7 @@ bool xq_engine_explain_path(const XqEngineAdapter *engine,
     stats.cache_available = context.table != NULL;
     xq_transposition_table_get_stats(context.table, &before);
     (void)builtin_search_for_explain(engine, pos, limits, &selected, &stats, &context);
-    /* The driver's stack-owned SearchContext is no longer live. */
+    /* The driver's stack-owned `SearchContext` is no longer live. */
     context.search = NULL;
     if (!result->complete && trace.current.visited)
         *result = trace.current;
