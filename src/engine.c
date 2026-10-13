@@ -567,21 +567,26 @@ static bool search_check_time(SearchContext *context, bool force)
 }
 
 /**
- * @brief Records entry into a new search node and checks the time limit at node intervals.
+ * @brief Counts a visited search node and checks time control at node intervals.
  *
- * If context is not null, increments the node count and then performs a non-forced time check.
- * Calls that do not use a search context, such as explanatory searches, may pass null; in that
- * case, no nodes are counted and no time check is performed.
+ * If `context` is not `NULL`, increments the node count and then performs a non-forced time check.
+ * Calls that do not use a search context, such as one-ply explanation searches, may pass `NULL`; in
+ * that case, no nodes are counted and no time check is performed.
  *
- * @param context The current search context; may be null.
- * @return        If the search has already stopped or this node check detects a timeout, returns
- *                true; otherwise, returns false.
+ * Detecting a timeout does not necessarily require an immediate stop: `search_check_time()` may
+ * allow the current root iteration to finish, in which case this function still returns `false`.
+ *
+ * @param context The current search context; may be `NULL`.
+ * @return        `true` when time control requires an immediate stop; `false` while search may
+ *                continue, including during a permitted timeout extension.
  */
-static bool search_enter_node(SearchContext *context)
+static bool search_count_node_and_check_time(SearchContext *context)
 {
     if (context == NULL)
         return false;
+
     ++context->nodes;
+
     return search_check_time(context, false);
 }
 
@@ -1768,7 +1773,7 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
     int        stand_pat;
     int        i;
 
-    if (search_enter_node(context))
+    if (search_count_node_and_check_time(context))
         return 0;
 
     if (xq_position_in_check(pos, xq_color_opponent(pos->side_to_move)))
@@ -1868,12 +1873,12 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  * upper bound at that value alone is not proof of a win.
  *
  * Time control is shared across recursive calls, including quiescence search, through `context`. On
- * entry, `search_enter_node()` counts the node and checks for a stop request. With a time limit
- * enabled, it reads the configured clock every 1024 nodes. At the deadline, the shared context
- * either stops the search or permits finishing the current root iteration based on its progress.
- * These periodic checks do not guarantee an exact cutoff at the deadline. A null context disables
- * node counting and time checks; a context with no time limit still counts nodes without reading
- * the clock.
+ * entry, `search_count_node_and_check_time()` counts the node and checks time control. With a time
+ * limit enabled, it reads the configured clock every `1024` nodes. At the deadline, the shared
+ * context either stops the search or permits finishing the current root iteration based on its
+ * progress. These periodic checks do not guarantee an exact cutoff at the deadline. A null context
+ * disables node counting and time checks; a context with no time limit still counts nodes without
+ * reading the clock.
  *
  * After each recursive child search, the move is undone before checking
  * `context->time_stop_required`. If stopped, the function returns zero immediately, without using
@@ -1917,7 +1922,7 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
     if (pv_out != NULL)
         pv_out->count = 0;
 
-    if (search_enter_node(context))
+    if (search_count_node_and_check_time(context))
         return 0;
 
     if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
@@ -3157,7 +3162,7 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
 
     if (pv_out != NULL)
         pv_out->count = 0;
-    if (search_enter_node(search))
+    if (search_count_node_and_check_time(search))
         return 0;
     record = trace_begin(context, ply, depth, alpha, beta);
     if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
