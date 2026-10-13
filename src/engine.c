@@ -29,7 +29,7 @@
  * favoring more valuable captured pieces and less valuable attacking pieces.
  *
  * These values depend only on piece type; they do not account for position or game phase.
- * Unspecified entries are zero.
+ * Unspecified entries are `0`.
  */
 static const int piece_values[XQ_PIECE_TYPE_NB] = {
     [XQ_KING] = 10000, [XQ_ADVISOR] = 120, [XQ_BISHOP] = 120, [XQ_KNIGHT] = 270,
@@ -44,7 +44,7 @@ static const int piece_values[XQ_PIECE_TYPE_NB] = {
  * across files, so both colors share the tables without a file reversal.
  *
  * These tables describe location only; they do not account for attacks, blocked horse legs, cannon
- * screens or game phase. Unspecified rows for palace-bound pieces and bishops are zero.
+ * screens or game phase. Unspecified rows for palace-bound pieces and bishops are `0`.
  */
 static const int piece_square_values[XQ_PIECE_TYPE_NB][XQ_RANKS][XQ_FILES] =
     {
@@ -159,9 +159,9 @@ typedef struct ScoredMove
 /**
  * @brief Shared timing, progress and time-related stop state for one built-in search invocation.
  *
- * The root search driver owns this context and passes it by pointer to recursive negamax and
- * quiescence searches. All nodes and iterative-deepening iterations in that invocation share the
- * same counters and stop decision. Each search invocation owns an independent context.
+ * The root search driver owns this context and passes it by pointer to recursive `negamax()` and
+ * `quiescence()` searches. All nodes and iterative-deepening iterations in that invocation share
+ * the same counters and stop decision. Each search invocation owns an independent context.
  *
  * `nodes` accumulates visited nodes across iterations.
  *
@@ -275,8 +275,8 @@ typedef struct PathTrace
  * disables transposition-table access.
  *
  * This context borrows the objects referenced by `search`, `trace` and `table`; it does not
- * allocate or free them. Ordinary negamax and quiescence remain independent of path-recording
- * state.
+ * allocate or free them. Ordinary `negamax()` and `quiescence()` remain independent of
+ * path-recording state.
  */
 typedef struct ExplainContext
 {
@@ -344,7 +344,7 @@ typedef struct XqTranspositionEntry
  * `XQ_TT_BUCKET_SIZE` slots, currently `4`, allowing different full keys with the same bucket index
  * to coexist. Lookup scans these slots for a nonempty entry whose full key matches.
  *
- * Stores prefer an empty slot or an entry with the same key. When replacement is needed, depth,
+ * Stores prefer an empty slot or an entry with the same key. When replacement is needed, `depth`,
  * generation age and score kind determine retention priority. A full bucket's weakest entry is
  * replaced only when the incoming result has at least the same retention priority.
  */
@@ -380,9 +380,10 @@ struct XqTranspositionTable
 };
 
 /*
- * Bump FORMAT_VERSION when the wire layout changes. Bump ENGINE_VERSION whenever evaluation,
- * score/search semantics, piece encoding, or Zobrist hashing changes. Compatibility is explicitly
- * maintained, not inferred from source edits. Only the built-in engine's cache is supported.
+ * Bump `XQ_TT_FORMAT_VERSION` when the wire layout changes. Bump `XQ_TT_ENGINE_VERSION` whenever
+ * evaluation, score/search semantics, piece encoding, or Zobrist hashing changes. Compatibility is
+ * explicitly maintained, not inferred from source edits. Only the built-in engine's cache is
+ * supported.
  */
 enum
 {
@@ -401,9 +402,9 @@ enum
  * Windows uses a high-resolution performance counter, while other platforms use
  * `clock_gettime(CLOCK_MONOTONIC)`. Any fractional millisecond is discarded during conversion.
  *
- * @return Milliseconds elapsed since a platform-specific fixed reference point, or -1 if the clock
- *         cannot be read. This is not calendar time; use it to measure elapsed time or compare
- *         deadlines based on the same clock.
+ * @return Milliseconds elapsed since a platform-specific fixed reference point, or `-1` if the
+ *         clock cannot be read. This is not calendar time; use it to measure elapsed time or
+ *         compare deadlines based on the same clock.
  */
 static int64_t monotonic_time_ms(void)
 {
@@ -471,12 +472,12 @@ static int64_t search_time_ms(XqSearchTimeMode mode)
  * @brief Initializes the context used by a built-in search according to the search limits.
  *
  * The function resets the node count and stop state, normalizes the timing mode, and calculates the
- * absolute deadline when the time limit is nonzero. A zero time limit disables timeout checks.
+ * absolute deadline when the time limit is nonzero. A `0` time limit disables timeout checks.
  *
  * If the clock cannot be read for a timed search, `time_stop_required` is set to `true`.
  *
- * @param context Search context to initialize; must not be null.
- * @param limits  Depth, time, and timing mode configuration; must not be null.
+ * @param context Search context to initialize; must not be `NULL`.
+ * @param limits  Depth, time, and timing mode configuration; must not be `NULL`.
  */
 static void search_context_init(SearchContext        *context,
                                 const XqSearchLimits *limits)
@@ -597,11 +598,11 @@ static bool search_count_node_and_check_time(SearchContext *context)
 /**
  * @brief Creates and initializes a fixed-capacity transposition table on the heap.
  *
- * Returns null if creation fails. Call `xq_transposition_table_destroy()` to release the table when
- * it is no longer needed.
+ * Returns `NULL` if creation fails. Call `xq_transposition_table_destroy()` to release the table
+ * when it is no longer needed.
  *
- * @return A pointer to the newly created transposition table on success; null if memory allocation
- *         fails.
+ * @return A pointer to the newly created transposition table on success; `NULL` if memory
+ *         allocation fails.
  */
 XqTranspositionTable *xq_transposition_table_create(void)
 {
@@ -628,9 +629,9 @@ XqTranspositionTable *xq_transposition_table_create(void)
 /**
  * @brief Clears all entries in the transposition table and resets its generation and statistics.
  *
- * Does nothing if table is null.
+ * Does nothing if `table` is `NULL`.
  *
- * @param table The transposition table to clear; may be null.
+ * @param table The transposition table to clear; may be `NULL`.
  */
 void xq_transposition_table_clear(XqTranspositionTable *table)
 {
@@ -646,7 +647,7 @@ void xq_transposition_table_clear(XqTranspositionTable *table)
  * @brief Destroys the transposition table and frees the heap memory used by its bucket array and
  *        the table itself.
  *
- * Does nothing if `table` is null.
+ * Does nothing if `table` is `NULL`.
  *
  * @param table The table whose bucket array and the table itself are both to be freed.
  */
@@ -660,11 +661,11 @@ void xq_transposition_table_destroy(XqTranspositionTable *table)
 }
 
 /**
- * @brief Resets all transposition table statistics counters to 0.
+ * @brief Resets all transposition table statistics counters to `0`.
  *
- * Does nothing if `table` is null.
+ * Does nothing if `table` is `NULL`.
  *
- * @param table The transposition table all whose statistics counters are to be reset to 0.
+ * @param table The transposition table all whose statistics counters are to be reset to `0`.
  */
 void xq_transposition_table_reset_stats(XqTranspositionTable *table)
 {
@@ -676,7 +677,7 @@ void xq_transposition_table_reset_stats(XqTranspositionTable *table)
  * @brief Retrieves current statistics from the transposition table `table` and stores them in
  *        `stats`.
  *
- * Does nothing if `stats` is null. Resets `stats` to zero if `table` is null.
+ * Does nothing if `stats` is `NULL`. Resets `stats` to `0` if `table` is `NULL`.
  *
  * @param table The transposition table to retrieve from.
  * @param stats The output parameter used for receiving statistics from `table`.
@@ -722,9 +723,10 @@ static void tt_put_le(unsigned char *out,
  * Does not interpret a sign bit. Signed fields, such as cached scores, are converted separately by
  * the caller after decoding their unsigned representation.
  *
- * @param in    Source buffer containing at least bytes bytes; must not be null and is unchanged.
- * @param bytes Number of bytes to read, from zero through eight.
- * @return      The decoded value, or zero when bytes is zero.
+ * @param in    Source buffer containing at least `bytes` bytes; must not be `NULL` and is
+ *              unchanged.
+ * @param bytes Number of bytes to read, from `0` through `8`.
+ * @return      The decoded value, or `0` when `bytes` is `0`.
  */
 static uint64_t tt_get_le(const unsigned char *in,
                           unsigned             bytes)
