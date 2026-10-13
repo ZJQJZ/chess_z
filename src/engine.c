@@ -1573,26 +1573,27 @@ static int static_evaluate(const XqEngineAdapter *engine,
 /**
  * @brief Computes a move-ordering score using the built-in scoring function.
  *
- * Quiet moves receive a score of `0`. Captures use an MVV-LVA-style formula to place them before
- * quiet moves:
+ * Quiet moves receive a score of `0`. Captures use the following MVV-LVA-style formula:
  *
  * `CAPTURE_ORDER_BASE + captured_piece_value * 16 - moving_piece_value`
  *
- * `CAPTURE_ORDER_BASE` ensures that captures as a group precede quiet moves. Multiplying the
- * captured piece's value by `16` generally prioritizes more valuable victims, while subtracting the
- * moving piece's value favors less valuable attackers when the victim is the same. For example, a
- * pawn capturing a rook is ordered before a rook capturing a pawn, and a pawn capturing a cannon is
- * ordered before a rook capturing a cannon.
+ * With the current piece values, `CAPTURE_ORDER_BASE` makes every capture score positive, so
+ * captures precede quiet moves when sorted by this score. Multiplying the captured piece's value by
+ * `16` generally prioritizes more valuable victims, while subtracting the moving piece's value
+ * favors less valuable attackers when the victim is the same. For example, a pawn capturing a rook
+ * is ordered before a rook capturing a pawn, and a pawn capturing a cannon is ordered before a rook
+ * capturing a cannon. Hints from the transposition table or a previous principal variation may take
+ * precedence over this ordering.
  *
  * The factor `16` is an empirical weight and does not guarantee strict lexicographic MVV-LVA order.
- * This formula is not an evaluation of the resulting position; it only predicts promising moves so
- * that cutoffs occur earlier. It affects search efficiency but not the result of a complete
- * alpha-beta search.
+ * This score is a heuristic intended to search promising moves early and improve pruning. It does
+ * not evaluate the resulting position or change the minimax value of a fixed search tree. Ordering
+ * can affect tie-breaking, the principal variation, and results of interrupted searches.
  *
  * @param pos  Unused position pointer, accepted for compatibility with `XqMoveScoreFn`.
  * @param move Move for which to compute an ordering score.
  * @param user Unused user-data pointer, accepted for compatibility with `XqMoveScoreFn`.
- * @return     Ordering score; higher values receive higher search priority.
+ * @return     Ordering score; higher values indicate higher ordering priority.
  */
 int xq_engine_default_move_order_score(const XqPosition *pos,
                                        XqMove            move,
