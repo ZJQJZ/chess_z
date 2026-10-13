@@ -907,27 +907,37 @@ static FILE *tt_open_temporary(char  *path,
 XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *table,
                                                     const char                 *path)
 {
-    unsigned char           header[XQ_TT_FILE_HEADER_SIZE] = {0};
+    unsigned char           header[XQ_TT_FILE_HEADER_SIZE];
     unsigned char           record[XQ_TT_FILE_RECORD_SIZE];
     unsigned char           trailer[4];
-    uint32_t                count = 0;
-    uint32_t                crc   = UINT32_MAX;
+    uint32_t                count;
+    uint32_t                crc;
     uint32_t                slot;
     size_t                  path_size;
     char                   *temporary;
     FILE                   *file;
     bool                    written;
-    XqTranspositionIoStatus status = XQ_TT_IO_FILE_ERROR;
+    XqTranspositionIoStatus status;
 
+    memset(header, 0, sizeof(header));
+    count  = 0;
+    crc    = UINT32_MAX;
+    status = XQ_TT_IO_FILE_ERROR;
+
+    /* Validate the arguments and allocate the temporary path buffer. */
     if (table == NULL || path == NULL || *path == '\0')
         return XQ_TT_IO_INVALID_ARGUMENT;
+
     path_size = strlen(path);
     if (path_size > SIZE_MAX - sizeof(".tmp.XXXXXX"))
         return XQ_TT_IO_NO_MEMORY;
     path_size += sizeof(".tmp.XXXXXX");
+
     temporary = malloc(path_size);
     if (temporary == NULL)
         return XQ_TT_IO_NO_MEMORY;
+
+    /* Create an exclusive temporary output file beside the destination. */
     snprintf(temporary, path_size, "%s.tmp.XXXXXX", path);
     file = tt_open_temporary(temporary, path_size);
     if (file == NULL)
@@ -936,9 +946,11 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
         return XQ_TT_IO_FILE_ERROR;
     }
 
+    /* Count occupied slots, then encode and write the file header. */
     for (slot = 0; slot < XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE; ++slot)
         if (table->buckets[slot / XQ_TT_BUCKET_SIZE].entries[slot % XQ_TT_BUCKET_SIZE].depth != 0)
             ++count;
+
     memcpy(header, "XQTTBIN", 8);
     tt_put_le(header + 8, XQ_TT_FORMAT_VERSION, 4);
     tt_put_le(header + 12, XQ_TT_ENGINE_VERSION, 4);
@@ -947,12 +959,16 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
     tt_put_le(header + 24, count, 4);
     header[28] = table->generation;
     written    = tt_write_bytes(file, header, sizeof(header), &crc);
+
+    /* Write occupied entries in slot order and update the running CRC32. */
     for (slot = 0; written && slot < XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE; ++slot)
     {
-        const XqTranspositionEntry *entry =
-            &table->buckets[slot / XQ_TT_BUCKET_SIZE].entries[slot % XQ_TT_BUCKET_SIZE];
+        const XqTranspositionEntry *entry;
+
+        entry = &table->buckets[slot / XQ_TT_BUCKET_SIZE].entries[slot % XQ_TT_BUCKET_SIZE];
         if (entry->depth == 0)
             continue;
+
         tt_put_le(record, slot, 4);
         tt_put_le(record + 4, entry->key, 8);
         tt_put_le(record + 12, (uint32_t)entry->score, 4);
@@ -965,13 +981,18 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
         record[23] = entry->best_move.captured == XQ_EMPTY_PIECE
                          ? 255
                          : (unsigned char)entry->best_move.captured;
-        written    = tt_write_bytes(file, record, sizeof(record), &crc);
+
+        written = tt_write_bytes(file, record, sizeof(record), &crc);
     }
+
+    /* Append the checksum and close the stream before committing the file. */
     tt_put_le(trailer, crc ^ UINT32_MAX, 4);
     if (written)
         written = tt_write_bytes(file, trailer, sizeof(trailer), NULL);
     if (fclose(file) != 0)
         written = false;
+
+    /* Replace the destination only after every write and the close succeed. */
     if (written)
     {
 #ifdef _WIN32
@@ -981,9 +1002,12 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
 #endif
             status = XQ_TT_IO_OK;
     }
+
+    /* Remove an uncommitted temporary file and release the path buffer. */
     if (status != XQ_TT_IO_OK)
         remove(temporary);
     free(temporary);
+
     return status;
 }
 
