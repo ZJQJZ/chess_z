@@ -1556,14 +1556,17 @@ static int static_evaluate(const XqEngineAdapter *engine,
                            const XqPosition      *pos,
                            XqColor                perspective)
 {
-    int score = engine != NULL && engine->static_evaluate != NULL
-                    ? engine->static_evaluate(pos, perspective, engine->user)
-                    : xq_engine_default_static_evaluate(pos, perspective, NULL);
+    int score;
+
+    score = engine != NULL && engine->static_evaluate != NULL
+                ? engine->static_evaluate(pos, perspective, engine->user)
+                : xq_engine_default_static_evaluate(pos, perspective, NULL);
 
     if (score > XQ_MAX_STATIC_SCORE)
         return XQ_MAX_STATIC_SCORE;
     if (score < -XQ_MAX_STATIC_SCORE)
         return -XQ_MAX_STATIC_SCORE;
+
     return score;
 }
 
