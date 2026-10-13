@@ -131,7 +131,7 @@ enum
     XQ_FINISH_ITERATION_THRESHOLD_PERCENT = 50,
     XQ_MAX_QUIESCENCE_DEPTH               = 500,
     XQ_MAX_PV_MOVES                       = 64,
-    XQ_MATE_SCORE                         = 30000,
+    XQ_WIN_SCORE                          = 30000,
     XQ_MAX_STATIC_SCORE                   = 28999,
     XQ_TT_BUCKET_SIZE                     = 4,
     XQ_TT_BUCKET_COUNT                    = 1 << 18
@@ -1114,7 +1114,7 @@ XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
         if (slot >= XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE ||
             slot / XQ_TT_BUCKET_SIZE != (key & (XQ_TT_BUCKET_COUNT - 1u)) ||
             tt_get_le(record + 16, 2) == 0 ||
-            (score != XQ_MATE_SCORE && score != -XQ_MATE_SCORE &&
+            (score != XQ_WIN_SCORE && score != -XQ_WIN_SCORE &&
              (score < -XQ_MAX_STATIC_SCORE || score > XQ_MAX_STATIC_SCORE)) ||
             (record[19] != XQ_SEARCH_SCORE_EXACT && record[19] != XQ_SEARCH_SCORE_LOWER_BOUND &&
              record[19] != XQ_SEARCH_SCORE_UPPER_BOUND))
@@ -1247,7 +1247,7 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
  * @brief Checks whether a completed search result proves the maximum possible score.
  *
  * Fixed win/loss scores and bounded static evaluations guarantee that no valid score exceeds
- * `XQ_MATE_SCORE` (`+30000`). Reaching this value proves a win only if the result is exact or a
+ * `XQ_WIN_SCORE` (`+30000`). Reaching this value proves a win only if the result is exact or a
  * lower bound; an upper bound of `+30000` still allows the true score to be lower.
  *
  * For the window used to obtain `score`:
@@ -1256,7 +1256,7 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
  * - `alpha < score < beta` is an exact result.
  * - `score >= beta` is fail-high: it is a lower bound. At `+30000` this also proves an exact win,
  *   because the true score cannot exceed `+30000`.
- * Thus `score == XQ_MATE_SCORE && score > alpha` covers both forms of proof without needing `beta`.
+ * Thus `score == XQ_WIN_SCORE && score > alpha` covers both forms of proof without needing `beta`.
  * For example, `+30000` with `alpha=100` proves a win; with `alpha=30000` it is not sufficient
  * proof.
  *
@@ -1267,12 +1267,12 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
  *
  * @param score Completed search result, in the same perspective as `alpha`.
  * @param alpha Lower bound of the search window that produced `score`, before any score update.
- * @return      `true` when the result proves `+XQ_MATE_SCORE`, `false` otherwise.
+ * @return      `true` when the result proves `+XQ_WIN_SCORE`, `false` otherwise.
  */
 static bool score_proves_win(int score,
                              int alpha)
 {
-    return score == XQ_MATE_SCORE && score > alpha;
+    return score == XQ_WIN_SCORE && score > alpha;
 }
 
 /**
@@ -1926,7 +1926,7 @@ static int quiescence(const XqEngineAdapter *engine,
         return 0;
 
     if (xq_position_in_check(pos, xq_color_opponent(pos->side_to_move)))
-        return XQ_MATE_SCORE;
+        return XQ_WIN_SCORE;
 
     in_check = xq_position_in_check(pos, pos->side_to_move);
     if (in_check)
@@ -1934,7 +1934,7 @@ static int quiescence(const XqEngineAdapter *engine,
     else
         xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
-        return -XQ_MATE_SCORE;
+        return -XQ_WIN_SCORE;
 
     if (depth <= -XQ_MAX_QUIESCENCE_DEPTH)
         return static_evaluate(engine, pos, pos->side_to_move);
@@ -2017,9 +2017,9 @@ static int quiescence(const XqEngineAdapter *engine,
  *
  * The function probes the transposition table before generating moves, orders a valid hash move and
  * the previous iteration's principal-variation move first, and stores the resulting exact score or
- * bound after the node has been searched. A completed candidate proving `+XQ_MATE_SCORE` reaches
- * the maximum possible value: store it as `XQ_SEARCH_SCORE_EXACT` and return immediately,
- * regardless of `beta`. A fail-low upper bound at that value alone is not proof of a win.
+ * bound after the node has been searched. A completed candidate proving `+XQ_WIN_SCORE` reaches the
+ * maximum possible value: store it as `XQ_SEARCH_SCORE_EXACT` and return immediately, regardless of
+ * `beta`. A fail-low upper bound at that value alone is not proof of a win.
  *
  * Time control is shared across recursive calls, including quiescence search, through `context`. On
  * entry, `search_count_node_and_check_time()` counts the node and checks time control. With a time
@@ -2082,7 +2082,7 @@ static int negamax(const XqEngineAdapter *engine,
         return 0;
 
     if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
-        return -XQ_MATE_SCORE;
+        return -XQ_WIN_SCORE;
 
     if (depth == 0)
         return quiescence(engine, pos, 0, alpha, beta, context);
@@ -2098,7 +2098,7 @@ static int negamax(const XqEngineAdapter *engine,
 
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
-        return -XQ_MATE_SCORE;
+        return -XQ_WIN_SCORE;
     order_moves(engine, pos, &list);
 
     /*
@@ -2332,7 +2332,7 @@ static bool filter_root_cycles(const XqHistory *history,
  * The function searches only legal root moves from depth `1` through the requested maximum depth.
  * Scores from all root moves in the previous completed iteration determine their ordering in the
  * next iteration, while the previous principal variation supplies an additional ordering hint. A
- * completed root candidate with `score == XQ_MATE_SCORE` is selected immediately, before the next
+ * completed root candidate with `score == XQ_WIN_SCORE` is selected immediately, before the next
  * time check, without waiting for the remaining candidates or looking for a faster mate.
  *
  * At the first detected deadline, an unfinished iteration strictly above the completed-root
@@ -2489,7 +2489,7 @@ static bool builtin_search(const XqEngineAdapter *engine,
             }
 
             /* Only a completed, non-interrupted candidate can establish a winning move. */
-            if (score == XQ_MATE_SCORE)
+            if (score == XQ_WIN_SCORE)
             {
                 winning_move_found = true;
                 break;
@@ -2866,7 +2866,7 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter     *engine,
     result->in_check = xq_position_in_check(pos, pos->side_to_move);
     if (xq_position_in_check(pos, xq_color_opponent(pos->side_to_move)))
     {
-        result->final_score = XQ_MATE_SCORE;
+        result->final_score = XQ_WIN_SCORE;
         return true;
     }
     if (result->in_check)
@@ -2875,7 +2875,7 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter     *engine,
         xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
     {
-        result->final_score = -XQ_MATE_SCORE;
+        result->final_score = -XQ_WIN_SCORE;
         return true;
     }
 
@@ -2911,7 +2911,7 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter     *engine,
 
         if (list.moves[i].captured != XQ_EMPTY_PIECE &&
             xq_piece_type(list.moves[i].captured) == XQ_KING)
-            score = XQ_MATE_SCORE;
+            score = XQ_WIN_SCORE;
         else
         {
             xq_position_make_move(pos, list.moves[i]);
@@ -3393,7 +3393,7 @@ static int negamax_for_explain(const XqEngineAdapter *engine,
         return 0;
     record = trace_begin(context, ply, depth, alpha, beta);
     if (xq_position_king_square(pos, pos->side_to_move) == XQ_NO_SQUARE)
-        return trace_finish(context, record, -XQ_MATE_SCORE);
+        return trace_finish(context, record, -XQ_WIN_SCORE);
 
     key = xq_position_hash(pos);
     if (tt_probe_for_explain(context, key, depth, alpha, beta, &info))
@@ -3414,7 +3414,7 @@ static int negamax_for_explain(const XqEngineAdapter *engine,
 
     xq_generate_pseudo_legal(pos, &list);
     if (list.count == 0)
-        return trace_finish(context, record, -XQ_MATE_SCORE);
+        return trace_finish(context, record, -XQ_WIN_SCORE);
     trace_order(engine, pos, &list, context, record);
     if (info.status == XQ_EXPLAIN_TT_HIT)
         info.hash_move_used = prioritize_move(&list, info.best_move);
@@ -3530,7 +3530,7 @@ static void trace_root_terminal(ExplainContext *context)
     bool record;
     context->trace->root_depth = 0;
     record                     = trace_begin(context, 0, 1, INT_MIN / 2, INT_MAX / 2);
-    (void)trace_finish(context, record, -XQ_MATE_SCORE);
+    (void)trace_finish(context, record, -XQ_WIN_SCORE);
 }
 
 /**
@@ -3765,7 +3765,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine,
             if (completed_roots == list.count)
                 trace_root_finish(explain, alpha);
             /* Only a completed, non-interrupted candidate can establish a winning move. */
-            if (score == XQ_MATE_SCORE)
+            if (score == XQ_WIN_SCORE)
             {
                 winning_move_found = true;
                 break;
