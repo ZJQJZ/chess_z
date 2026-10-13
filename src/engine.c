@@ -1283,6 +1283,7 @@ static bool tt_probe(XqTranspositionTable *table,
 
     if (has_hash_move != NULL)
         *has_hash_move = false;
+
     if (table == NULL)
         return false;
 
