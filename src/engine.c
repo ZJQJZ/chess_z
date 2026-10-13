@@ -804,14 +804,14 @@ static bool tt_write_bytes(FILE                *file,
  * @brief Reads a complete byte block from a file stream and optionally updates its CRC32 state.
  *
  * A short read leaves the checksum unchanged, but may partially fill the destination and advance
- * the stream. The caller distinguishes premature EOF from an I/O error using ferror(), and is
+ * the stream. The caller distinguishes premature EOF from an I/O error using `ferror()`, and is
  * responsible for validating decoded fields and comparing the final checksum.
  *
- * @param file Open binary input stream; must not be null and remains open on return.
- * @param data Destination buffer with room for at least size bytes; must not be null.
+ * @param file Open binary input stream; must not be `NULL` and remains open on return.
+ * @param data Destination buffer with room for at least `size` bytes; must not be `NULL`.
  * @param size Number of bytes to read at the stream's current position.
- * @param crc  Optional running CRC32 state to update; null excludes this block from the checksum.
- * @return     True if all requested bytes were read; false on premature EOF or a read error.
+ * @param crc  Optional running CRC32 state to update; `NULL` excludes this block from the checksum.
+ * @return     `true` if all requested bytes were read; `false` on premature EOF or a read error.
  */
 static bool tt_read_bytes(FILE          *file,
                           unsigned char *data,
@@ -820,23 +820,25 @@ static bool tt_read_bytes(FILE          *file,
 {
     if (fread(data, 1, size, file) != size)
         return false;
+
     if (crc != NULL)
         *crc = tt_crc32(*crc, data, size);
+
     return true;
 }
 
 /**
  * @brief Exclusively creates a temporary file and wraps its descriptor in a binary output stream.
  *
- * Replaces the template's trailing XXXXXX with a unique suffix. POSIX uses mkstemp(); Windows
+ * Replaces the template's trailing `XXXXXX` with a unique suffix. POSIX uses `mkstemp()`; Windows
  * generates a candidate name and opens it with exclusive creation, failing if it already exists. If
  * stream creation fails after the file is created, closes its descriptor and attempts removal. On
  * success, the caller owns the stream and must close it and rename or remove the file.
  *
- * @param path     Writable, null-terminated path template ending in XXXXXX; must not be null.
+ * @param path     Writable, null-terminated path template ending in `XXXXXX`; must not be `NULL`.
  *                 Receives the actual path on success and may also be modified on failure.
  * @param capacity Capacity of the path buffer, including its terminator; used on Windows.
- * @return         An open file stream on success; null if name generation, creation, or wrapping
+ * @return         An open file stream on success; `NULL` if name generation, creation, or wrapping
  *                 the file descriptor fails.
  */
 static FILE *tt_open_temporary(char  *path,
@@ -844,6 +846,7 @@ static FILE *tt_open_temporary(char  *path,
 {
     int   fd;
     FILE *file;
+
 #ifdef _WIN32
     if (_mktemp_s(path, capacity) != 0)
         return NULL;
@@ -852,13 +855,16 @@ static FILE *tt_open_temporary(char  *path,
     (void)capacity;
     fd = mkstemp(path);
 #endif
+
     if (fd < 0)
         return NULL;
+
 #ifdef _WIN32
     file = _fdopen(fd, "wb");
 #else
     file = fdopen(fd, "wb");
 #endif
+
     if (file == NULL)
     {
 #ifdef _WIN32
@@ -868,6 +874,7 @@ static FILE *tt_open_temporary(char  *path,
 #endif
         remove(path);
     }
+
     return file;
 }
 
