@@ -1353,6 +1353,7 @@ static bool tt_get_hash_move(XqTranspositionTable *table,
     ++table->stats.hits;
     entry->generation = table->generation;
     *hash_move        = entry->best_move;
+
     return true;
 }
 
