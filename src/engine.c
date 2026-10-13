@@ -1383,7 +1383,7 @@ static int tt_retention_score(const XqTranspositionEntry *entry,
 }
 
 /**
- * @brief Stores a search result in the transposition table.
+ * @brief Tries to store a search result in the transposition table.
  *
  * The function prefers an empty slot or an entry with the same key. When the bucket is full and no
  * entry has the same key, it chooses the entry with the lowest retention score based on `depth`,
@@ -1400,12 +1400,12 @@ static int tt_retention_score(const XqTranspositionEntry *entry,
  * @param score_kind Score kind: exact, lower bound, or upper bound.
  * @param best_move  Best move found while searching the current position.
  */
-static void tt_store(XqTranspositionTable *table,
-                     uint64_t              key,
-                     unsigned              depth,
-                     int                   score,
-                     XqSearchScoreKind     score_kind,
-                     XqMove                best_move)
+static void tt_try_store_result(XqTranspositionTable *table,
+                                uint64_t              key,
+                                unsigned              depth,
+                                int                   score,
+                                XqSearchScoreKind     score_kind,
+                                XqMove                best_move)
 {
     XqTranspositionBucket *bucket;
     XqTranspositionEntry   incoming;
@@ -2121,7 +2121,7 @@ static int negamax(const XqEngineAdapter *engine,
         }
         if (score == XQ_WIN_SCORE)
         {
-            tt_store(table, key, depth, best, XQ_SEARCH_SCORE_EXACT, node_best_move);
+            tt_try_store_result(table, key, depth, best, XQ_SEARCH_SCORE_EXACT, node_best_move);
             return best;
         }
         if (score > alpha)
@@ -2140,7 +2140,7 @@ static int negamax(const XqEngineAdapter *engine,
             score_kind = XQ_SEARCH_SCORE_LOWER_BOUND;
         else
             score_kind = XQ_SEARCH_SCORE_EXACT;
-        tt_store(table, key, depth, best, score_kind, node_best_move);
+        tt_try_store_result(table, key, depth, best, score_kind, node_best_move);
     }
 
     return best;
@@ -2516,8 +2516,8 @@ static bool builtin_search(const XqEngineAdapter *engine,
         previous_pv = current_pv;
         /* A history-dependent root result must not enter the position-only cache. */
         if (!filtered_cycles)
-            tt_store(table, root_key, current_depth, root_moves[0].score, XQ_SEARCH_SCORE_EXACT,
-                     root_moves[0].move);
+            tt_try_store_result(table, root_key, current_depth, root_moves[0].score,
+                                XQ_SEARCH_SCORE_EXACT, root_moves[0].move);
 
         if (winning_move_found || context.time_stop_required || context.deadline_reached ||
             current_depth == depth)
@@ -3439,7 +3439,7 @@ static int negamax_for_explain(const XqEngineAdapter *engine,
         }
         if (score == XQ_WIN_SCORE)
         {
-            tt_store(context->table, key, depth, best, XQ_SEARCH_SCORE_EXACT, best_move);
+            tt_try_store_result(context->table, key, depth, best, XQ_SEARCH_SCORE_EXACT, best_move);
             return trace_finish(context, record, best);
         }
         if (score > alpha)
@@ -3448,8 +3448,8 @@ static int negamax_for_explain(const XqEngineAdapter *engine,
             break;
     }
     if (has_best_move)
-        tt_store(context->table, key, depth, best, trace_score_kind(best, alpha_original, beta),
-                 best_move);
+        tt_try_store_result(context->table, key, depth, best,
+                            trace_score_kind(best, alpha_original, beta), best_move);
     return trace_finish(context, record, best);
 }
 
@@ -3786,8 +3786,8 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine,
         previous_pv = current_pv;
         /* A history-dependent root result must not enter the position-only cache. */
         if (!filtered_cycles)
-            tt_store(table, root_key, current_depth, root_moves[0].score, XQ_SEARCH_SCORE_EXACT,
-                     root_moves[0].move);
+            tt_try_store_result(table, root_key, current_depth, root_moves[0].score,
+                                XQ_SEARCH_SCORE_EXACT, root_moves[0].move);
 
         if (winning_move_found || context.time_stop_required || context.deadline_reached ||
             current_depth == depth)
