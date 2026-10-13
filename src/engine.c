@@ -132,7 +132,7 @@ enum
     XQ_MAX_QUIESCENCE_DEPTH               = 500,
     XQ_MAX_PV_MOVES                       = 64,
     XQ_WIN_SCORE                          = 30000,
-    XQ_MAX_STATIC_SCORE                   = 28999,
+    XQ_MAX_STATIC_SCORE                   = 29999,
     XQ_TT_BUCKET_SIZE                     = 4,
     XQ_TT_BUCKET_COUNT                    = 1 << 18
 };
