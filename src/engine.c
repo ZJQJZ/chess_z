@@ -1409,10 +1409,13 @@ static void tt_store(XqTranspositionTable *table,
 {
     XqTranspositionBucket *bucket;
     XqTranspositionEntry   incoming;
-    XqTranspositionEntry  *target        = NULL;
-    int                    weakest_score = INT_MAX;
+    XqTranspositionEntry  *target;
+    int                    weakest_score;
     int                    incoming_score;
     int                    i;
+
+    target        = NULL;
+    weakest_score = INT_MAX;
 
     if (table == NULL || depth == 0)
         return;
@@ -1428,9 +1431,10 @@ static void tt_store(XqTranspositionTable *table,
     bucket = &table->buckets[key & (XQ_TT_BUCKET_COUNT - 1u)];
     for (i = 0; i < XQ_TT_BUCKET_SIZE; ++i)
     {
-        XqTranspositionEntry *entry = &bucket->entries[i];
+        XqTranspositionEntry *entry;
         int                   retention;
 
+        entry = &bucket->entries[i];
         if (entry->depth == 0)
         {
             target = entry;
@@ -1456,6 +1460,7 @@ static void tt_store(XqTranspositionTable *table,
 
     if (target == NULL)
         return;
+
     if (target->depth != 0 && target->key != key)
     {
         if (incoming_score < weakest_score)
