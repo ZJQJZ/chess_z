@@ -1239,6 +1239,7 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
     for (i = 0; i < XQ_TT_BUCKET_SIZE; ++i)
         if (bucket->entries[i].depth != 0 && bucket->entries[i].key == key)
             return &bucket->entries[i];
+
     return NULL;
 }
 
