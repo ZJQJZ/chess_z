@@ -1385,9 +1385,9 @@ static int tt_retention_score(const XqTranspositionEntry *entry,
 /**
  * @brief Stores a search result in the transposition table.
  *
- * The function prefers an empty slot or an entry with the same key. When the bucket is full, it
- * chooses the entry with the lowest retention score based on `depth`, `age`, and score kind, and
- * replaces it only if the incoming entry is not weaker.
+ * The function prefers an empty slot or an entry with the same key. When the bucket is full and no
+ * entry has the same key, it chooses the entry with the lowest retention score based on `depth`,
+ * `age`, and score kind, and replaces it only if the incoming entry is not weaker.
  *
  * Quiescence nodes at `depth == 0` are not cached because `0` is reserved as the empty-entry
  * marker.
