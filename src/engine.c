@@ -601,7 +601,9 @@ static bool search_count_node_and_check_time(SearchContext *context)
  */
 XqTranspositionTable *xq_transposition_table_create(void)
 {
-    XqTranspositionTable *table = (XqTranspositionTable *)malloc(sizeof(*table));
+    XqTranspositionTable *table;
+
+    table = (XqTranspositionTable *)malloc(sizeof(*table));
 
     if (table == NULL)
         return NULL;
@@ -615,6 +617,7 @@ XqTranspositionTable *xq_transposition_table_create(void)
 
     table->generation = 0;
     memset(&table->stats, 0, sizeof(table->stats));
+
     return table;
 }
 
