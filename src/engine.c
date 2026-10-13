@@ -684,6 +684,7 @@ void xq_transposition_table_get_stats(const XqTranspositionTable *table,
 {
     if (stats == NULL)
         return;
+
     if (table == NULL)
         memset(stats, 0, sizeof(*stats));
     else
