@@ -1373,8 +1373,11 @@ static bool tt_get_hash_move(XqTranspositionTable *table,
 static int tt_retention_score(const XqTranspositionEntry *entry,
                               uint8_t                     current_generation)
 {
-    unsigned age        = (uint8_t)(current_generation - entry->generation);
-    int      type_bonus = entry->score_kind == XQ_SEARCH_SCORE_EXACT ? 3 : 0;
+    unsigned age;
+    int      type_bonus;
+
+    age        = (uint8_t)(current_generation - entry->generation);
+    type_bonus = entry->score_kind == XQ_SEARCH_SCORE_EXACT ? 3 : 0;
 
     return (int)entry->depth * 8 - (int)age * 4 + type_bonus;
 }
