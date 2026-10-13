@@ -1050,15 +1050,20 @@ XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
     buckets = NULL;
     status  = XQ_TT_IO_INVALID_FORMAT;
 
+    /* Validate the arguments and open the cache file. */
     if (table == NULL || path == NULL || *path == '\0')
         return XQ_TT_IO_INVALID_ARGUMENT;
+
     file = fopen(path, "rb");
     if (file == NULL)
         return XQ_TT_IO_FILE_ERROR;
+
+    /* Read the header and check the format, engine version and table dimensions. */
     if (!tt_read_bytes(file, header, sizeof(header), &crc))
         goto done;
     if (memcmp(header, "XQTTBIN", 8) != 0)
         goto done;
+
     if (tt_get_le(header + 8, 4) != XQ_TT_FORMAT_VERSION ||
         tt_get_le(header + 12, 4) != XQ_TT_ENGINE_VERSION ||
         tt_get_le(header + 16, 4) != XQ_TT_BUCKET_COUNT ||
@@ -1067,16 +1072,21 @@ XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
         status = XQ_TT_IO_INCOMPATIBLE;
         goto done;
     }
+
     count = (uint32_t)tt_get_le(header + 24, 4);
     if (count > XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE || header[29] != 0 || header[30] != 0 ||
         header[31] != 0)
         goto done;
+
+    /* Load into temporary storage so a rejected file leaves the current table intact. */
     buckets = calloc(XQ_TT_BUCKET_COUNT, sizeof(*buckets));
     if (buckets == NULL)
     {
         status = XQ_TT_IO_NO_MEMORY;
         goto done;
     }
+
+    /* Read, decode and validate each record before restoring its entry. */
     for (i = 0; i < count; ++i)
     {
         uint32_t              slot;
@@ -1087,28 +1097,39 @@ XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
 
         if (!tt_read_bytes(file, record, sizeof(record), &crc))
             goto done;
+
         slot          = (uint32_t)tt_get_le(record, 4);
         key           = tt_get_le(record + 4, 8);
         encoded_score = (uint32_t)tt_get_le(record + 12, 4);
         score         = encoded_score <= INT32_MAX ? (int64_t)encoded_score
                                                    : (int64_t)encoded_score - INT64_C(4294967296);
-        /* Version `2` stores ordinary bounded evaluations or fixed win/loss scores. */
+
+        /*
+         * Validate the slot mapping, search depth, score and bound kind. Version `2` stores
+         * ordinary bounded evaluations or fixed win/loss scores.
+         */
         if (slot >= XQ_TT_BUCKET_COUNT * XQ_TT_BUCKET_SIZE ||
             slot / XQ_TT_BUCKET_SIZE != (key & (XQ_TT_BUCKET_COUNT - 1u)) ||
             tt_get_le(record + 16, 2) == 0 ||
             (score != XQ_MATE_SCORE && score != -XQ_MATE_SCORE &&
              (score < -XQ_MAX_STATIC_SCORE || score > XQ_MAX_STATIC_SCORE)) ||
             (record[19] != XQ_SEARCH_SCORE_EXACT && record[19] != XQ_SEARCH_SCORE_LOWER_BOUND &&
-             record[19] != XQ_SEARCH_SCORE_UPPER_BOUND) ||
-            record[20] >= XQ_SQUARES || record[21] >= XQ_SQUARES || record[20] == record[21] ||
+             record[19] != XQ_SEARCH_SCORE_UPPER_BOUND))
+            goto done;
+
+        /* Validate move squares, piece encodings and the captured piece's color. */
+        if (record[20] >= XQ_SQUARES || record[21] >= XQ_SQUARES || record[20] == record[21] ||
             record[22] >= XQ_COLOR_NB * XQ_PIECE_TYPE_NB ||
             (record[23] != 255 && record[23] >= XQ_COLOR_NB * XQ_PIECE_TYPE_NB))
             goto done;
         if (record[23] != 255 && record[22] / XQ_PIECE_TYPE_NB == record[23] / XQ_PIECE_TYPE_NB)
             goto done;
+
+        /* Reject duplicate slots, then restore the validated entry. */
         entry = &buckets[slot / XQ_TT_BUCKET_SIZE].entries[slot % XQ_TT_BUCKET_SIZE];
         if (entry->depth != 0)
             goto done;
+
         entry->key        = key;
         entry->score      = (int)score;
         entry->depth      = (uint16_t)tt_get_le(record + 16, 2);
@@ -1117,25 +1138,36 @@ XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
         entry->best_move  = (XqMove){record[20], record[21], (int8_t)record[22],
                                      record[23] == 255 ? XQ_EMPTY_PIECE : (int8_t)record[23]};
     }
+
+    /* Verify the checksum and require the file to end immediately after it. */
     if (!tt_read_bytes(file, trailer, sizeof(trailer), NULL) ||
         tt_get_le(trailer, 4) != (crc ^ UINT32_MAX) || fgetc(file) != EOF)
         goto done;
     status = XQ_TT_IO_OK;
 
 done:
+    /* Report stream errors before deciding whether the loaded table can be committed. */
     if (ferror(file))
         status = XQ_TT_IO_FILE_ERROR;
     if (fclose(file) != 0)
         status = XQ_TT_IO_FILE_ERROR;
+
+    /* Commit only fully validated data after the stream has closed successfully. */
     if (status == XQ_TT_IO_OK)
     {
-        XqTranspositionBucket *old = table->buckets;
-        table->buckets             = buckets;
-        table->generation          = header[28];
+        XqTranspositionBucket *old;
+
+        old               = table->buckets;
+        table->buckets    = buckets;
+        table->generation = header[28];
         memset(&table->stats, 0, sizeof(table->stats));
+
         buckets = old;
     }
+
+    /* Free the replaced buckets on success, or the rejected temporary buckets on failure. */
     free(buckets);
+
     return status;
 }
 
@@ -1154,6 +1186,7 @@ XqSearchLimits xq_search_limits_default(void)
     limits.max_depth     = 10;
     limits.time_limit_ms = 3000;
     limits.time_mode     = XQ_SEARCH_TIME_MONOTONIC;
+
     return limits;
 }
 
