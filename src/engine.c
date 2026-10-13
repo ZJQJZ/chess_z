@@ -746,41 +746,45 @@ static uint64_t tt_get_le(const unsigned char *in,
  * @brief Updates an IEEE CRC32 state with a block of bytes using the reflected polynomial.
  *
  * Supports incremental calculation across the header and records. The caller initializes the state
- * to UINT32_MAX, passes each returned state into the next update, and XORs the final state with
- * UINT32_MAX exactly once to obtain the stored checksum. The checksum trailer is excluded.
+ * to `UINT32_MAX`, passes each returned state into the next update, and XORs the final state with
+ * `UINT32_MAX` exactly once to obtain the stored checksum. The checksum trailer is excluded.
  *
  * @param crc  Running state before processing this block, without the final XOR applied.
- * @param data Source bytes; must contain at least size bytes and is left unchanged.
+ * @param data Source bytes; must contain at least `size` bytes and is left unchanged.
  * @param size Number of bytes to process.
- * @return     Updated state without the final XOR, or the original state when size is zero.
+ * @return     Updated state without the final XOR, or the original state when `size` is `0`.
  */
 static uint32_t tt_crc32(uint32_t             crc,
                          const unsigned char *data,
                          size_t               size)
 {
     size_t i;
+
     for (i = 0; i < size; ++i)
     {
         unsigned bit;
+
         crc ^= data[i];
         for (bit = 0; bit < 8; ++bit)
             crc = (crc >> 1) ^ ((crc & 1u) ? UINT32_C(0xedb88320) : 0);
     }
+
     return crc;
 }
 
 /**
  * @brief Writes a complete byte block to a file stream and optionally updates its CRC32 state.
  *
- * Updates the checksum only after the entire block has been accepted by fwrite(). A failed write
+ * Updates the checksum only after the entire block has been accepted by `fwrite()`. A failed write
  * may still write part of the block; it is not rolled back. Success does not imply that buffered
- * output has reached disk, so the caller must also check fclose() before replacing the cache file.
+ * output has reached disk, so the caller must also check `fclose()` before replacing the cache
+ * file.
  *
- * @param file Open binary output stream; must not be null and remains open on return.
- * @param data Source buffer containing at least size bytes; left unchanged.
+ * @param file Open binary output stream; must not be `NULL` and remains open on return.
+ * @param data Source buffer containing at least `size` bytes; left unchanged.
  * @param size Number of bytes to write at the stream's current position.
- * @param crc  Optional running CRC32 state to update; null excludes this block from the checksum.
- * @return     True if all requested bytes were written; false on a short write.
+ * @param crc  Optional running CRC32 state to update; `NULL` excludes this block from the checksum.
+ * @return     `true` if all requested bytes were written; `false` on a short write.
  */
 static bool tt_write_bytes(FILE                *file,
                            const unsigned char *data,
@@ -789,8 +793,10 @@ static bool tt_write_bytes(FILE                *file,
 {
     if (fwrite(data, 1, size, file) != size)
         return false;
+
     if (crc != NULL)
         *crc = tt_crc32(*crc, data, size);
+
     return true;
 }
 
