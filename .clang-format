@@ -4,3 +4,6 @@ ColumnLimit: 100
 ReflowComments: true
 AlignConsecutiveDeclarations: Consecutive
 AlignConsecutiveAssignments: Consecutive
+PackParameters:
+  BinPack: AlwaysOnePerLine
+AllowAllParametersOfDeclarationOnNextLine: false

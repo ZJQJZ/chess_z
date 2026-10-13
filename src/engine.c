@@ -476,7 +476,8 @@ static int64_t search_time_ms(XqSearchTimeMode mode)
  * @param context Search context to initialize; must not be null.
  * @param limits  Depth, time, and timing mode configuration; must not be null.
  */
-static void search_context_init(SearchContext *context, const XqSearchLimits *limits)
+static void search_context_init(SearchContext        *context,
+                                const XqSearchLimits *limits)
 {
     int64_t now;
 
@@ -531,7 +532,8 @@ static void search_context_init(SearchContext *context, const XqSearchLimits *li
  * @return        `true` for an immediate stop; `false` while active or allowed to finish the
  *                iteration.
  */
-static bool search_check_time(SearchContext *context, bool force)
+static bool search_check_time(SearchContext *context,
+                              bool           force)
 {
     int64_t now;
 
@@ -704,7 +706,9 @@ void xq_transposition_table_get_stats(const XqTranspositionTable *table,
  * @param value Integer to encode; passed by value and unchanged in the caller.
  * @param bytes Number of bytes to write, from zero through eight.
  */
-static void tt_put_le(unsigned char *out, uint64_t value, unsigned bytes)
+static void tt_put_le(unsigned char *out,
+                      uint64_t       value,
+                      unsigned       bytes)
 {
     unsigned i;
     for (i = 0; i < bytes; ++i)
@@ -724,7 +728,8 @@ static void tt_put_le(unsigned char *out, uint64_t value, unsigned bytes)
  * @param bytes Number of bytes to read, from zero through eight.
  * @return      The decoded value, or zero when bytes is zero.
  */
-static uint64_t tt_get_le(const unsigned char *in, unsigned bytes)
+static uint64_t tt_get_le(const unsigned char *in,
+                          unsigned             bytes)
 {
     uint64_t value = 0;
     unsigned i;
@@ -745,7 +750,9 @@ static uint64_t tt_get_le(const unsigned char *in, unsigned bytes)
  * @param size Number of bytes to process.
  * @return     Updated state without the final XOR, or the original state when size is zero.
  */
-static uint32_t tt_crc32(uint32_t crc, const unsigned char *data, size_t size)
+static uint32_t tt_crc32(uint32_t             crc,
+                         const unsigned char *data,
+                         size_t               size)
 {
     size_t i;
     for (i = 0; i < size; ++i)
@@ -771,7 +778,10 @@ static uint32_t tt_crc32(uint32_t crc, const unsigned char *data, size_t size)
  * @param crc  Optional running CRC32 state to update; null excludes this block from the checksum.
  * @return     True if all requested bytes were written; false on a short write.
  */
-static bool tt_write_bytes(FILE *file, const unsigned char *data, size_t size, uint32_t *crc)
+static bool tt_write_bytes(FILE                *file,
+                           const unsigned char *data,
+                           size_t               size,
+                           uint32_t            *crc)
 {
     if (fwrite(data, 1, size, file) != size)
         return false;
@@ -793,7 +803,10 @@ static bool tt_write_bytes(FILE *file, const unsigned char *data, size_t size, u
  * @param crc  Optional running CRC32 state to update; null excludes this block from the checksum.
  * @return     True if all requested bytes were read; false on premature EOF or a read error.
  */
-static bool tt_read_bytes(FILE *file, unsigned char *data, size_t size, uint32_t *crc)
+static bool tt_read_bytes(FILE          *file,
+                          unsigned char *data,
+                          size_t         size,
+                          uint32_t      *crc)
 {
     if (fread(data, 1, size, file) != size)
         return false;
@@ -816,7 +829,8 @@ static bool tt_read_bytes(FILE *file, unsigned char *data, size_t size, uint32_t
  * @return         An open file stream on success; null if name generation, creation, or wrapping
  *                 the file descriptor fails.
  */
-static FILE *tt_open_temporary(char *path, size_t capacity)
+static FILE *tt_open_temporary(char  *path,
+                               size_t capacity)
 {
     int   fd;
     FILE *file;
@@ -968,7 +982,8 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
  *              truncated, or checksum-invalid data, XQ_TT_IO_INCOMPATIBLE for version or dimension
  *              mismatches, or XQ_TT_IO_NO_MEMORY if the temporary bucket array cannot be allocated.
  */
-XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table, const char *path)
+XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table,
+                                                    const char           *path)
 {
     unsigned char           header[XQ_TT_FILE_HEADER_SIZE];
     unsigned char           record[XQ_TT_FILE_RECORD_SIZE];
@@ -1124,7 +1139,8 @@ static void tt_new_generation(XqTranspositionTable *table)
  * @param key   The full 64-bit position hash to look up.
  * @return      A pointer to the matching entry, or null if no matching entry exists.
  */
-static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table, uint64_t key)
+static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
+                                           uint64_t              key)
 {
     XqTranspositionBucket *bucket;
     int                    i;
@@ -1163,7 +1179,8 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table, uint64_t
  * @param alpha Lower bound of the search window that produced score, before any score update.
  * @return      True when the result proves +XQ_MATE_SCORE, false otherwise.
  */
-static bool score_proves_win(int score, int alpha)
+static bool score_proves_win(int score,
+                             int alpha)
 {
     return score == XQ_MATE_SCORE && score > alpha;
 }
@@ -1192,9 +1209,15 @@ static bool score_proves_win(int score, int alpha)
  * @return              True if the cached score can be reused or can cut off the search; false
  *                      otherwise.
  */
-static bool tt_probe(XqTranspositionTable *table, uint64_t key, unsigned depth, int alpha, int beta,
-                     int *score, XqMove *hash_move, bool *has_hash_move,
-                     XqSearchScoreKind *score_kind)
+static bool tt_probe(XqTranspositionTable *table,
+                     uint64_t              key,
+                     unsigned              depth,
+                     int                   alpha,
+                     int                   beta,
+                     int                  *score,
+                     XqMove               *hash_move,
+                     bool                 *has_hash_move,
+                     XqSearchScoreKind    *score_kind)
 {
     XqTranspositionEntry *entry;
     int                   cached_score;
@@ -1252,7 +1275,9 @@ static bool tt_probe(XqTranspositionTable *table, uint64_t key, unsigned depth, 
  * @param hash_move Output that receives the cached best move; must not be null.
  * @return          True if a matching entry was found and written to `hash_move`; false otherwise.
  */
-static bool tt_get_hash_move(XqTranspositionTable *table, uint64_t key, XqMove *hash_move)
+static bool tt_get_hash_move(XqTranspositionTable *table,
+                             uint64_t              key,
+                             XqMove               *hash_move)
 {
     XqTranspositionEntry *entry;
 
@@ -1283,7 +1308,8 @@ static bool tt_get_hash_move(XqTranspositionTable *table, uint64_t key, XqMove *
  * @return                   The entry's retention score; a higher value makes the entry more
  *                           desirable to retain.
  */
-static int tt_retention_score(const XqTranspositionEntry *entry, uint8_t current_generation)
+static int tt_retention_score(const XqTranspositionEntry *entry,
+                              uint8_t                     current_generation)
 {
     unsigned age        = (uint8_t)(current_generation - entry->generation);
     int      type_bonus = entry->score_kind == XQ_SEARCH_SCORE_EXACT ? 3 : 0;
@@ -1308,8 +1334,12 @@ static int tt_retention_score(const XqTranspositionEntry *entry, uint8_t current
  * @param score_kind Score kind: exact, lower bound, or upper bound.
  * @param best_move  Best move found while searching the current position.
  */
-static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, int score,
-                     XqSearchScoreKind score_kind, XqMove best_move)
+static void tt_store(XqTranspositionTable *table,
+                     uint64_t              key,
+                     unsigned              depth,
+                     int                   score,
+                     XqSearchScoreKind     score_kind,
+                     XqMove                best_move)
 {
     XqTranspositionBucket *bucket;
     XqTranspositionEntry   incoming;
@@ -1381,7 +1411,8 @@ static void tt_store(XqTranspositionTable *table, uint64_t key, unsigned depth, 
  * @return      Total material value plus piece-square bonuses for the specified side, without
  *              subtracting the opponent's score.
  */
-static int evaluate_side(const XqPosition *pos, XqColor color)
+static int evaluate_side(const XqPosition *pos,
+                         XqColor           color)
 {
     int score = 0;
     int type;
@@ -1418,7 +1449,9 @@ static int evaluate_side(const XqPosition *pos, XqColor color)
  * @param user        Unused user-data pointer, accepted for compatibility with `XqEvaluateFn`.
  * @return            Static position score from `perspective`'s point of view.
  */
-int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective, void *user)
+int xq_engine_default_static_evaluate(const XqPosition *pos,
+                                      XqColor           perspective,
+                                      void             *user)
 {
     XqColor opponent = xq_color_opponent(perspective);
     int     score;
@@ -1442,8 +1475,9 @@ int xq_engine_default_static_evaluate(const XqPosition *pos, XqColor perspective
  * @param perspective Side for which a positive score is favorable.
  * @return            Static position score from `perspective`'s point of view.
  */
-static int static_evaluate(const XqEngineAdapter *engine, const XqPosition *pos,
-                           XqColor perspective)
+static int static_evaluate(const XqEngineAdapter *engine,
+                           const XqPosition      *pos,
+                           XqColor                perspective)
 {
     int score = engine != NULL && engine->static_evaluate != NULL
                     ? engine->static_evaluate(pos, perspective, engine->user)
@@ -1480,7 +1514,9 @@ static int static_evaluate(const XqEngineAdapter *engine, const XqPosition *pos,
  * @param user Unused user-data pointer, accepted for compatibility with `XqMoveScoreFn`.
  * @return     Ordering score; higher values receive higher search priority.
  */
-int xq_engine_default_move_order_score(const XqPosition *pos, XqMove move, void *user)
+int xq_engine_default_move_order_score(const XqPosition *pos,
+                                       XqMove            move,
+                                       void             *user)
 {
     (void)pos;
     (void)user;
@@ -1504,7 +1540,9 @@ int xq_engine_default_move_order_score(const XqPosition *pos, XqMove move, void 
  * @param move   Move for which to compute an ordering score.
  * @return       Ordering score; higher values receive higher search priority.
  */
-static int move_order_score(const XqEngineAdapter *engine, const XqPosition *pos, XqMove move)
+static int move_order_score(const XqEngineAdapter *engine,
+                            const XqPosition      *pos,
+                            XqMove                 move)
 {
     if (engine != NULL && engine->score_move != NULL)
         return engine->score_move(pos, move, engine->user);
@@ -1521,7 +1559,9 @@ static int move_order_score(const XqEngineAdapter *engine, const XqPosition *pos
  * @param pos    Position in which the moves are being ordered; must not be null.
  * @param list   Move list to reorder in place; must not be null.
  */
-static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list)
+static void order_moves(const XqEngineAdapter *engine,
+                        const XqPosition      *pos,
+                        XqMoveList            *list)
 {
     ScoredMove ordered[XQ_MAX_MOVES];
     int        i;
@@ -1553,7 +1593,8 @@ static void order_moves(const XqEngineAdapter *engine, const XqPosition *pos, Xq
  * @param moves Root-move array to reorder in place; must not be null.
  * @param count Number of initialized entries in `moves`.
  */
-static void order_root_moves(ScoredMove *moves, int count)
+static void order_root_moves(ScoredMove *moves,
+                             int         count)
 {
     int i;
 
@@ -1580,7 +1621,8 @@ static void order_root_moves(ScoredMove *moves, int count)
  * @param b Second move to compare.
  * @return  True if both moves have identical source and destination squares; false otherwise.
  */
-static bool moves_equal(XqMove a, XqMove b)
+static bool moves_equal(XqMove a,
+                        XqMove b)
 {
     return a.from == b.from && a.to == b.to;
 }
@@ -1592,7 +1634,8 @@ static bool moves_equal(XqMove a, XqMove b)
  * @param move Move to prioritize, matched by source and destination squares.
  * @return     True if the move was found and moved to the front; false otherwise.
  */
-static bool prioritize_move(XqMoveList *list, XqMove move)
+static bool prioritize_move(XqMoveList *list,
+                            XqMove      move)
 {
     int i;
 
@@ -1623,7 +1666,8 @@ static bool prioritize_move(XqMoveList *list, XqMove move)
  * @param move     Best move at the current node, placed at the start of the variation.
  * @param child_pv Child node's principal variation; may be null.
  */
-static void build_principal_variation(PrincipalVariation *pv, XqMove move,
+static void build_principal_variation(PrincipalVariation       *pv,
+                                      XqMove                    move,
                                       const PrincipalVariation *child_pv)
 {
     int child_count = child_pv != NULL ? child_pv->count : 0;
@@ -1663,8 +1707,10 @@ static void build_principal_variation(PrincipalVariation *pv, XqMove move,
  * @param depth Maximum remaining search depth to reconstruct.
  * @param pv    Output principal variation; must not be null and is cleared before reconstruction.
  */
-static void build_pv_from_tt(XqTranspositionTable *table, XqPosition *pos, unsigned depth,
-                             PrincipalVariation *pv)
+static void build_pv_from_tt(XqTranspositionTable *table,
+                             XqPosition           *pos,
+                             unsigned              depth,
+                             PrincipalVariation   *pv)
 {
     unsigned remaining  = depth;
     int      made_count = 0;
@@ -1710,8 +1756,10 @@ static void build_pv_from_tt(XqTranspositionTable *table, XqPosition *pos, unsig
  * @param scores Output array that receives one ordering score per reordered move; must have room
  *               for at least `list->count` entries.
  */
-static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosition *pos,
-                                    XqMoveList *list, int *scores)
+static void order_moves_for_explain(const XqEngineAdapter *engine,
+                                    const XqPosition      *pos,
+                                    XqMoveList            *list,
+                                    int                   *scores)
 {
     ScoredMove ordered[XQ_MAX_MOVES];
     int        i;
@@ -1768,8 +1816,12 @@ static void order_moves_for_explain(const XqEngineAdapter *engine, const XqPosit
  * @return        Quiescence score from the side-to-move perspective, or zero if the search is
  *                stopped by the time limit.
  */
-static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth, int alpha,
-                      int beta, SearchContext *context)
+static int quiescence(const XqEngineAdapter *engine,
+                      XqPosition            *pos,
+                      int                    depth,
+                      int                    alpha,
+                      int                    beta,
+                      SearchContext         *context)
 {
     XqMoveList list;
     bool       in_check;
@@ -1906,9 +1958,16 @@ static int quiescence(const XqEngineAdapter *engine, XqPosition *pos, int depth,
  * @return              Search score from the side-to-move perspective, or zero if the search is
  *                      stopped by the time limit.
  */
-static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, XqPosition *pos,
-                   unsigned depth, int alpha, int beta, const XqMove *pv_hint, int pv_hint_count,
-                   PrincipalVariation *pv_out, SearchContext *context)
+static int negamax(const XqEngineAdapter *engine,
+                   XqTranspositionTable  *table,
+                   XqPosition            *pos,
+                   unsigned               depth,
+                   int                    alpha,
+                   int                    beta,
+                   const XqMove          *pv_hint,
+                   int                    pv_hint_count,
+                   PrincipalVariation    *pv_out,
+                   SearchContext         *context)
 {
     XqMoveList        list;
     int               best           = INT_MIN / 2;
@@ -2033,7 +2092,9 @@ static int negamax(const XqEngineAdapter *engine, XqTranspositionTable *table, X
  * @param end     Ending position index; must be less than history->count.
  * @return        Hash of the selected move sequence, or zero for an empty path (begin == end).
  */
-static uint64_t history_path_hash(const XqHistory *history, size_t begin, size_t end)
+static uint64_t history_path_hash(const XqHistory *history,
+                                  size_t           begin,
+                                  size_t           end)
 {
     return history->entries[end].prefix -
            history->entries[begin].prefix * history->entries[end - begin].power;
@@ -2063,8 +2124,11 @@ static uint64_t history_path_hash(const XqHistory *history, size_t begin, size_t
  * @return          True if the side playing candidate loses under the cycle rule. The current
  *                  implementation always returns true; future rules may return false to allow it.
  */
-static bool root_cycle_is_loss(const XqHistory *history, size_t start, size_t length,
-                               const XqPosition *root, XqMove candidate)
+static bool root_cycle_is_loss(const XqHistory  *history,
+                               size_t            start,
+                               size_t            length,
+                               const XqPosition *root,
+                               XqMove            candidate)
 {
     (void)history;
     (void)start;
@@ -2104,7 +2168,9 @@ static bool root_cycle_is_loss(const XqHistory *history, size_t start, size_t le
  * @return        True if at least one move was removed; false if no move was removed, including
  *                when history is absent, empty, or does not match the root position.
  */
-static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMoveList *list)
+static bool filter_root_cycles(const XqHistory *history,
+                               XqPosition      *pos,
+                               XqMoveList      *list)
 {
     bool   rejected[XQ_MAX_MOVES] = {false};
     size_t end;
@@ -2198,9 +2264,13 @@ static bool filter_root_cycles(const XqHistory *history, XqPosition *pos, XqMove
  * @return              True if at least one root move exists and a move is selected; false if the
  *                      position is invalid for searching or contains no legal moves.
  */
-static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
-                           const XqSearchLimits *limits, XqMove *best_move, XqSearchStats *stats,
-                           XqSearchProgressFn progress, void *progress_user)
+static bool builtin_search(const XqEngineAdapter *engine,
+                           XqPosition            *pos,
+                           const XqSearchLimits  *limits,
+                           XqMove                *best_move,
+                           XqSearchStats         *stats,
+                           XqSearchProgressFn     progress,
+                           void                  *progress_user)
 {
     XqMoveList            list;
     ScoredMove            root_moves[XQ_MAX_MOVES];
@@ -2409,8 +2479,10 @@ static bool builtin_search(const XqEngineAdapter *engine, XqPosition *pos,
  * @return          True if a best move was found and written; false on invalid input, when no move
  *                  is available, or when the custom search callback fails.
  */
-bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
-                              const XqSearchLimits *limits, XqMove *best_move)
+bool xq_engine_find_best_move(const XqEngineAdapter *engine,
+                              XqPosition            *pos,
+                              const XqSearchLimits  *limits,
+                              XqMove                *best_move)
 {
     return xq_engine_find_best_move_with_stats(engine, pos, limits, best_move, NULL);
 }
@@ -2441,9 +2513,11 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
  * @return          True if a best move was found and written; false on invalid input, when no move
  *                  is available, or when the custom search callback fails.
  */
-bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine, XqPosition *pos,
-                                         const XqSearchLimits *limits, XqMove *best_move,
-                                         XqSearchStats *stats)
+bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine,
+                                         XqPosition            *pos,
+                                         const XqSearchLimits  *limits,
+                                         XqMove                *best_move,
+                                         XqSearchStats         *stats)
 {
     return xq_engine_find_best_move_with_progress(engine, pos, limits, best_move, stats, NULL,
                                                   NULL);
@@ -2485,10 +2559,13 @@ bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine, XqPositi
  * @return              True if a move was selected and written; false if best_move is null,
  *                      built-in search cannot select a move, or the custom search callback fails.
  */
-bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine, XqPosition *pos,
-                                            const XqSearchLimits *limits, XqMove *best_move,
-                                            XqSearchStats *stats, XqSearchProgressFn progress,
-                                            void *progress_user)
+bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine,
+                                            XqPosition            *pos,
+                                            const XqSearchLimits  *limits,
+                                            XqMove                *best_move,
+                                            XqSearchStats         *stats,
+                                            XqSearchProgressFn     progress,
+                                            void                  *progress_user)
 {
     XqSearchLimits        effective_limits;
     XqTranspositionStats  before;
@@ -2559,8 +2636,10 @@ bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine, XqPos
  * @return       True if at least one move was explained; false on invalid input or when no move is
  *               available.
  */
-bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos,
-                                      unsigned depth, XqExplainResult *result)
+bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine,
+                                      XqPosition            *pos,
+                                      unsigned               depth,
+                                      XqExplainResult       *result)
 {
     XqMoveList list;
     int        order_scores[XQ_MAX_MOVES];
@@ -2652,7 +2731,8 @@ bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition 
  * @return       True when an explanation is produced; false if `pos` or `result` is null or the
  *               side to move has no king.
  */
-bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos,
+bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter     *engine,
+                                          XqPosition                *pos,
                                           XqQuiescenceExplainResult *result)
 {
     XqMoveList list;
@@ -2804,7 +2884,9 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
  * @return        The previous prefix-match state for restoration, not the updated child state;
  *                false if the context or its trace is null.
  */
-static bool trace_push(ExplainContext *context, int ply, XqMove move)
+static bool trace_push(ExplainContext *context,
+                       int             ply,
+                       XqMove          move)
 {
     PathTrace *trace    = context != NULL ? context->trace : NULL;
     bool       previous = trace != NULL && trace->matching;
@@ -2825,7 +2907,8 @@ static bool trace_push(ExplainContext *context, int ply, XqMove move)
  * @param context  Explanation context containing the path trace; may be null.
  * @param previous Parent prefix-match state returned by the corresponding `trace_push()` call.
  */
-static void trace_pop(ExplainContext *context, bool previous)
+static void trace_pop(ExplainContext *context,
+                      bool            previous)
 {
     if (context != NULL && context->trace != NULL)
         context->trace->matching = previous;
@@ -2850,7 +2933,11 @@ static void trace_pop(ExplainContext *context, bool previous)
  * @return        True if the target record was initialized; false if tracing is disabled, depth is
  *                zero, or this node is not the target path's endpoint.
  */
-static bool trace_begin(ExplainContext *context, int ply, unsigned depth, int alpha, int beta)
+static bool trace_begin(ExplainContext *context,
+                        int             ply,
+                        unsigned        depth,
+                        int             alpha,
+                        int             beta)
 {
     PathTrace           *trace = context != NULL ? context->trace : NULL;
     XqPathExplainResult *current;
@@ -2888,8 +2975,11 @@ static bool trace_begin(ExplainContext *context, int ply, unsigned depth, int al
  *                and its trace must be non-null when record is true; otherwise context is unused.
  * @param record  Whether to retain the move-to-score mapping for the target node's explanation.
  */
-static void trace_order(const XqEngineAdapter *engine, const XqPosition *pos, XqMoveList *list,
-                        ExplainContext *context, bool record)
+static void trace_order(const XqEngineAdapter *engine,
+                        const XqPosition      *pos,
+                        XqMoveList            *list,
+                        ExplainContext        *context,
+                        bool                   record)
 {
     if (record)
     {
@@ -2914,7 +3004,9 @@ static void trace_order(const XqEngineAdapter *engine, const XqPosition *pos, Xq
  * @param beta  Upper window bound used for the search; must be greater than alpha.
  * @return      Lower-bound, upper-bound, or exact score kind according to the window comparison.
  */
-static XqSearchScoreKind trace_score_kind(int score, int alpha, int beta)
+static XqSearchScoreKind trace_score_kind(int score,
+                                          int alpha,
+                                          int beta)
 {
     if (score_proves_win(score, alpha))
         return XQ_SEARCH_SCORE_EXACT;
@@ -2954,8 +3046,13 @@ static XqSearchScoreKind trace_score_kind(int score, int alpha, int beta)
  * @param child_tt Snapshot of the direct child's entry probe, in that child's perspective; required
  *                 when recording. Descendant cache activity is not attributed to this probe.
  */
-static void trace_move(ExplainContext *context, bool record, XqMove move, int alpha, int beta,
-                       int score, const XqExplainTtInfo *child_tt)
+static void trace_move(ExplainContext        *context,
+                       bool                   record,
+                       XqMove                 move,
+                       int                    alpha,
+                       int                    beta,
+                       int                    score,
+                       const XqExplainTtInfo *child_tt)
 {
     PathTrace           *trace;
     XqPathExplainResult *current;
@@ -3018,7 +3115,9 @@ static void trace_move(ExplainContext *context, bool record, XqMove move, int al
  *                the caller must treat the return as interrupted rather than as a valid evaluation.
  * @return        The supplied score, unchanged, allowing use directly in a search return statement.
  */
-static int trace_finish(ExplainContext *context, bool record, int score)
+static int trace_finish(ExplainContext *context,
+                        bool            record,
+                        int             score)
 {
     if (record && !context->search->time_stop_required)
     {
@@ -3050,8 +3149,12 @@ static int trace_finish(ExplainContext *context, bool record, int score)
  * @param info    Snapshot output; must not be null and is initialized even without a table.
  * @return        True if the cached score can return directly, false otherwise.
  */
-static bool tt_probe_for_explain(ExplainContext *context, uint64_t key, unsigned depth, int alpha,
-                                 int beta, XqExplainTtInfo *info)
+static bool tt_probe_for_explain(ExplainContext  *context,
+                                 uint64_t         key,
+                                 unsigned         depth,
+                                 int              alpha,
+                                 int              beta,
+                                 XqExplainTtInfo *info)
 {
     XqTranspositionEntry *entry;
     bool                  cutoff;
@@ -3089,7 +3192,11 @@ static bool tt_probe_for_explain(ExplainContext *context, uint64_t key, unsigned
  * @param info    Actual cache-probe snapshot with status XQ_EXPLAIN_TT_CUTOFF; must not be null.
  *                Its score uses this node's side-to-move perspective. Copied into the event.
  */
-static void trace_tt_block(ExplainContext *context, unsigned depth, int ply, int alpha, int beta,
+static void trace_tt_block(ExplainContext        *context,
+                           unsigned               depth,
+                           int                    ply,
+                           int                    alpha,
+                           int                    beta,
                            const XqExplainTtInfo *info)
 {
     PathTrace        *trace = context->trace;
@@ -3137,10 +3244,17 @@ static void trace_tt_block(ExplainContext *context, unsigned depth, int ply, int
  * @return              Side-to-move score, or zero on interruption. Check
  *                      `context->search->time_stop_required`.
  */
-static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, unsigned depth,
-                               int ply, int alpha, int beta, const XqMove *pv_hint,
-                               int pv_hint_count, PrincipalVariation *pv_out,
-                               ExplainContext *context, XqExplainTtInfo *entry_tt)
+static int negamax_for_explain(const XqEngineAdapter *engine,
+                               XqPosition            *pos,
+                               unsigned               depth,
+                               int                    ply,
+                               int                    alpha,
+                               int                    beta,
+                               const XqMove          *pv_hint,
+                               int                    pv_hint_count,
+                               PrincipalVariation    *pv_out,
+                               ExplainContext        *context,
+                               XqExplainTtInfo       *entry_tt)
 {
     SearchContext  *search = context->search;
     XqMoveList      list;
@@ -3261,7 +3375,9 @@ static int negamax_for_explain(const XqEngineAdapter *engine, XqPosition *pos, u
  * @param key            Root position hash used by the preceding tt_get_hash_move call.
  * @param hash_move_used Whether the cached move was matched and promoted in the legal root list.
  */
-static void trace_root_cache(ExplainContext *context, uint64_t key, bool hash_move_used)
+static void trace_root_cache(ExplainContext *context,
+                             uint64_t        key,
+                             bool            hash_move_used)
 {
     XqExplainTtInfo      *info = &context->root.ordering_tt;
     XqTranspositionEntry *entry;
@@ -3284,7 +3400,8 @@ static void trace_root_cache(ExplainContext *context, uint64_t key, bool hash_mo
 }
 
 /* Begin a visit without adding time checks or root probes to the explanation driver's iteration. */
-static void trace_root_begin(ExplainContext *context, unsigned depth)
+static void trace_root_begin(ExplainContext *context,
+                             unsigned        depth)
 {
     context->trace->root_depth = depth;
     if (trace_begin(context, 0, depth, INT_MIN / 2, INT_MAX / 2) && depth == 1)
@@ -3292,7 +3409,8 @@ static void trace_root_begin(ExplainContext *context, unsigned depth)
 }
 
 /* Called only after every root child has completed, before the driver's final clock check. */
-static void trace_root_finish(ExplainContext *context, int score)
+static void trace_root_finish(ExplainContext *context,
+                              int             score)
 {
     (void)trace_finish(context, context->trace->count == 0, score);
 }
@@ -3319,8 +3437,10 @@ static void trace_root_terminal(ExplainContext *context)
  * @param count    Number of candidates, between zero and XQ_MAX_MOVES.
  * @param selected Actual move selected by the driver, including an unsearched fallback.
  */
-static void trace_root_selection(ExplainContext *context, const ScoredMove *moves, int count,
-                                 XqMove selected)
+static void trace_root_selection(ExplainContext   *context,
+                                 const ScoredMove *moves,
+                                 int               count,
+                                 XqMove            selected)
 {
     XqRootSearchExplain *root = &context->root;
     int                  i;
@@ -3359,10 +3479,16 @@ static void trace_root_selection(ExplainContext *context, const ScoredMove *move
  * @return           Root-side recursive score; invalid if `context->search->time_stop_required` is
  *                   `true`.
  */
-static int search_root_move_for_explain(const XqEngineAdapter *engine, XqPosition *pos, XqMove move,
-                                        unsigned depth, int alpha, int beta, const XqMove *hint,
-                                        int hint_count, PrincipalVariation *pv,
-                                        ExplainContext *context)
+static int search_root_move_for_explain(const XqEngineAdapter *engine,
+                                        XqPosition            *pos,
+                                        XqMove                 move,
+                                        unsigned               depth,
+                                        int                    alpha,
+                                        int                    beta,
+                                        const XqMove          *hint,
+                                        int                    hint_count,
+                                        PrincipalVariation    *pv,
+                                        ExplainContext        *context)
 {
     XqExplainTtInfo child_tt;
     bool            record   = context->trace->count == 0;
@@ -3401,9 +3527,12 @@ static int search_root_move_for_explain(const XqEngineAdapter *engine, XqPositio
  *                  state only during this call; its search pointer must not be used after return.
  * @return          True if a root move is selected, false for an invalid or terminal root.
  */
-static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition *pos,
-                                       const XqSearchLimits *limits, XqMove *best_move,
-                                       XqSearchStats *stats, ExplainContext *explain)
+static bool builtin_search_for_explain(const XqEngineAdapter *engine,
+                                       XqPosition            *pos,
+                                       const XqSearchLimits  *limits,
+                                       XqMove                *best_move,
+                                       XqSearchStats         *stats,
+                                       ExplainContext        *explain)
 {
     XqMoveList            list;
     ScoredMove            root_moves[XQ_MAX_MOVES];
@@ -3637,9 +3766,12 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine, XqPosition
  *                   or path_count above INT_MAX. Timeout, terminal and unvisited paths are valid
  *                   results and return true; inspect root.move_available for move selection.
  */
-bool xq_engine_explain_path(const XqEngineAdapter *engine, XqPosition *pos,
-                            const XqSearchLimits *limits, const XqMove *path, size_t path_count,
-                            XqPathExplainResult *result)
+bool xq_engine_explain_path(const XqEngineAdapter *engine,
+                            XqPosition            *pos,
+                            const XqSearchLimits  *limits,
+                            const XqMove          *path,
+                            size_t                 path_count,
+                            XqPathExplainResult   *result)
 {
     PathTrace            trace;
     ExplainContext       context  = {0};
