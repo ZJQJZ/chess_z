@@ -691,27 +691,22 @@ void xq_transposition_table_get_stats(const XqTranspositionTable *table,
         *stats = table->stats;
 }
 
-/* Wire layout: 32-byte header, count * 24-byte records, then a 4-byte IEEE CRC32.
- * Header: magic[8], format:u32, engine:u32, buckets:u32, ways:u32, count:u32,
- * generation:u8, reserved[3]. Record: slot:u32, key:u64, score:i32, depth:u16,
- * generation:u8, kind:u8, from:u8, to:u8, piece:u8, captured:u8 (255 means empty).
- * All integers are little endian; CRC covers the header and records, not its own bytes. */
-
 /**
  * @brief Encodes the low bytes of an unsigned integer in little-endian order.
  *
  * Writes directly into the caller's buffer without performing file I/O. Bits above the requested
  * width are discarded, so the caller must choose a width sufficient for the serialized field.
  *
- * @param out   Destination buffer with room for at least bytes bytes; must not be null.
+ * @param out   Destination buffer with room for at least `bytes` bytes; must not be `NULL`.
  * @param value Integer to encode; passed by value and unchanged in the caller.
- * @param bytes Number of bytes to write, from zero through eight.
+ * @param bytes Number of bytes to write, from `0` through `8`.
  */
 static void tt_put_le(unsigned char *out,
                       uint64_t       value,
                       unsigned       bytes)
 {
     unsigned i;
+
     for (i = 0; i < bytes; ++i)
     {
         out[i] = (unsigned char)(value & 255u);
@@ -732,10 +727,14 @@ static void tt_put_le(unsigned char *out,
 static uint64_t tt_get_le(const unsigned char *in,
                           unsigned             bytes)
 {
-    uint64_t value = 0;
+    uint64_t value;
     unsigned i;
+
+    value = 0;
+
     for (i = 0; i < bytes; ++i)
         value |= (uint64_t)in[i] << (8 * i);
+
     return value;
 }
 
@@ -866,8 +865,15 @@ static FILE *tt_open_temporary(char  *path,
  * @brief Saves a built-in engine's transposition table to a versioned binary cache file.
  *
  * Serializes valid entries with their original slots, side-to-move scores, and generations using
- * the little-endian layout above, followed by an IEEE CRC32 checksum. Empty slots and cumulative
- * statistics are omitted. Saving an empty table is supported; the in-memory table is unchanged.
+ * the little-endian layout described below, followed by an IEEE CRC32 checksum. Empty slots and
+ * cumulative statistics are omitted. Saving an empty table is supported; the in-memory table is
+ * unchanged.
+ *
+ * File layout: a `32`-byte header, `count` records of `24` bytes each, then a `4`-byte IEEE CRC32.
+ * Header: `magic[8]`, `format:u32`, `engine:u32`, `buckets:u32`, `ways:u32`, `count:u32`,
+ * `generation:u8`, `reserved[3]`. Record: `slot:u32`, `key:u64`, `score:i32`, `depth:u16`,
+ * `generation:u8`, `kind:u8`, `from:u8`, `to:u8`, `piece:u8`, `captured:u8` (`255` means empty).
+ * All integers are little endian; CRC covers the header and records, not its own bytes.
  *
  * Writes to an exclusively created temporary file beside the destination, then replaces the
  * destination only after all writes and fclose() succeed. Failure preserves the old destination and
@@ -966,6 +972,8 @@ XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *
 
 /**
  * @brief Validates a saved transposition table and replaces the target table's contents on success.
+ *
+ * Uses the binary file layout documented by `xq_transposition_table_save()`.
  *
  * Requires matching format and engine-cache versions and table dimensions. Reads into temporary
  * storage, checking the header, record count, unique slots, hash-bucket mapping, score and move
