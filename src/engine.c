@@ -323,9 +323,9 @@ typedef struct PrincipalVariation
  *
  * `depth` is the remaining normal-search depth in plies used to obtain the result, capped at
  * `UINT16_MAX`. A depth of `0` marks an empty entry, so quiescence results are not stored here.
- * `tt_probe()` reuses a score only when the stored depth is sufficient and the result is exact or
- * its bound allows a cutoff in the current alpha-beta window. `best_move` is the best candidate
- * found in that search and can still guide move ordering when the score cannot be reused.
+ * `tt_try_reuse_score()` reuses a score only when the stored depth is sufficient and the result is
+ * exact or its bound allows a cutoff in the current alpha-beta window. `best_move` is the best
+ * candidate found in that search and can still guide move ordering when the score cannot be reused.
  *
  * `generation` records the table generation when the entry was stored or last refreshed after a key
  * match. Its age helps choose entries to replace; age alone does not invalidate a result.
@@ -1244,7 +1244,7 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
 }
 
 /**
- * @brief Probes the transposition table and refreshes the generation of a matching entry.
+ * @brief Tries to reuse a cached score and refreshes the generation of a matching entry.
  *
  * The function also returns the hash move and score kind when requested. It accepts a cached score
  * only when the stored depth is sufficient and the score is either exact or a bound that directly
@@ -1268,15 +1268,15 @@ static XqTranspositionEntry *tt_find_entry(XqTranspositionTable *table,
  * @return              `true` if the cached score can be reused or can cut off the search; `false`
  *                      otherwise.
  */
-static bool tt_probe(XqTranspositionTable *table,
-                     uint64_t              key,
-                     unsigned              depth,
-                     int                   alpha,
-                     int                   beta,
-                     int                  *score,
-                     XqMove               *hash_move,
-                     bool                 *has_hash_move,
-                     XqSearchScoreKind    *score_kind)
+static bool tt_try_reuse_score(XqTranspositionTable *table,
+                               uint64_t              key,
+                               unsigned              depth,
+                               int                   alpha,
+                               int                   beta,
+                               int                  *score,
+                               XqMove               *hash_move,
+                               bool                 *has_hash_move,
+                               XqSearchScoreKind    *score_kind)
 {
     XqTranspositionEntry *entry;
     int                   cached_score;
@@ -2059,8 +2059,8 @@ static int negamax(const XqEngineAdapter *engine,
         return quiescence(engine, pos, 0, alpha, beta, context);
 
     key = xq_position_hash(pos);
-    if (tt_probe(table, key, depth, alpha, beta, &cached_score, &hash_move, &has_hash_move,
-                 &cached_kind))
+    if (tt_try_reuse_score(table, key, depth, alpha, beta, &cached_score, &hash_move,
+                           &has_hash_move, &cached_kind))
     {
         if (pv_out != NULL && cached_kind == XQ_SEARCH_SCORE_EXACT)
             build_pv_from_tt(table, pos, depth, pv_out);
@@ -3213,11 +3213,11 @@ static int trace_finish(ExplainContext *context,
 }
 
 /**
- * @brief Probes once and snapshots the cache entry used for a node's explanation.
+ * @brief Tries to reuse a cached score and snapshots the entry used for a node's explanation.
  *
- * `tt_probe()` alone updates probe/hit/cutoff counters and the entry's generation. The subsequent
- * read-only lookup copies `depth` and the stored score even when the entry cannot return directly.
- * It adds no probe counters and happens before any descendant can overwrite the entry.
+ * `tt_try_reuse_score()` alone updates probe/hit/cutoff counters and the entry's generation. The
+ * subsequent read-only lookup copies `depth` and the stored score even when the entry cannot return
+ * directly. It adds no probe counters and happens before any descendant can overwrite the entry.
  *
  * @param context Explanation context holding the optional shared transposition table.
  * @param key     Position hash of the node being entered.
@@ -3227,20 +3227,20 @@ static int trace_finish(ExplainContext *context,
  * @param info    Snapshot output; must not be `NULL` and is initialized even without a table.
  * @return        `true` if the cached score can return directly, `false` otherwise.
  */
-static bool tt_probe_for_explain(ExplainContext  *context,
-                                 uint64_t         key,
-                                 unsigned         depth,
-                                 int              alpha,
-                                 int              beta,
-                                 XqExplainTtInfo *info)
+static bool tt_try_reuse_score_for_explain(ExplainContext  *context,
+                                           uint64_t         key,
+                                           unsigned         depth,
+                                           int              alpha,
+                                           int              beta,
+                                           XqExplainTtInfo *info)
 {
     XqTranspositionEntry *entry;
     bool                  cutoff;
     memset(info, 0, sizeof(*info));
     if (context->table == NULL)
         return false;
-    cutoff = tt_probe(context->table, key, depth, alpha, beta, &info->score, &info->best_move, NULL,
-                      &info->score_kind);
+    cutoff = tt_try_reuse_score(context->table, key, depth, alpha, beta, &info->score,
+                                &info->best_move, NULL, &info->score_kind);
     entry  = tt_find_entry(context->table, key);
     if (entry == NULL)
     {
@@ -3368,7 +3368,7 @@ static int negamax_for_explain(const XqEngineAdapter *engine,
         return trace_finish(context, record, -XQ_WIN_SCORE);
 
     key = xq_position_hash(pos);
-    if (tt_probe_for_explain(context, key, depth, alpha, beta, &info))
+    if (tt_try_reuse_score_for_explain(context, key, depth, alpha, beta, &info))
     {
         if (entry_tt != NULL)
             *entry_tt = info;
