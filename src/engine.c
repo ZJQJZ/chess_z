@@ -1520,8 +1520,6 @@ static int evaluate_side(const XqPosition *pos,
  * The evaluator adds a piece-square bonus to each piece's fixed material value, then subtracts the
  * opponent's total from the perspective side's total. Positive scores favor `perspective`.
  *
- * Legal-move mobility support is present but currently disabled.
- *
  * @param pos         Position to evaluate; must not be `NULL`.
  * @param perspective Side for which a positive score is favorable.
  * @param user        Unused user-data pointer, accepted for compatibility with `XqEvaluateFn`.
@@ -1531,13 +1529,14 @@ int xq_engine_default_static_evaluate(const XqPosition *pos,
                                       XqColor           perspective,
                                       void             *user)
 {
-    XqColor opponent = xq_color_opponent(perspective);
+    XqColor opponent;
     int     score;
+
+    opponent = xq_color_opponent(perspective);
 
     (void)user;
     score = evaluate_side(pos, perspective) - evaluate_side(pos, opponent);
-    // score += evaluate_legal_moves(pos, perspective);
-    // score -= evaluate_legal_moves(pos, opponent);
+
     return score;
 }
 
