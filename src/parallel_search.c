@@ -1520,8 +1520,8 @@ static void *worker_main(void *argument)
         atomic_store_explicit(&completion->finished, 1, memory_order_release);
         atomic_store_explicit(&worker->state, WORKER_IDLE, memory_order_release);
         /*
- * Only the captured completion may be used now: worker task fields may already be reused.
- */
+         * Only the captured completion may be used now: worker task fields may already be reused.
+         */
         search_semaphore_post(&completion->notification);
         task_completion_release(completion);
     }
@@ -1798,8 +1798,8 @@ static Interval search_node(Search               *search,
         {
             value = parallel_tt_interval(&cached, node.maximizing);
             /*
- * This node has not been shared. check_node still gives ancestor cancellation priority.
- */
+             * This node has not been shared. check_node still gives ancestor cancellation priority.
+             */
             atomic_store_explicit(&node.value.lower, value.lower, memory_order_relaxed);
             atomic_store_explicit(&node.value.upper, value.upper, memory_order_relaxed);
             if (cached.score_kind == XQ_SEARCH_SCORE_EXACT)
@@ -1851,8 +1851,8 @@ static Interval search_node(Search               *search,
     }
 
     /*
- * This node is now quiescent; acquiring finished makes all helper result submissions visible.
- */
+     * This node is now quiescent; acquiring finished makes all helper result submissions visible.
+     */
     (void)check_node(&node);
     assert(atomic_load_explicit(&node.state, memory_order_relaxed) != NODE_RUNNING);
     value = node_value(&node);
