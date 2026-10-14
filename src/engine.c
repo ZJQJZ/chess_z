@@ -1759,8 +1759,10 @@ static void build_principal_variation(PrincipalVariation       *pv,
                                       XqMove                    move,
                                       const PrincipalVariation *child_pv)
 {
-    int child_count = child_pv != NULL ? child_pv->count : 0;
+    int child_count;
     int i;
+
+    child_count = child_pv != NULL ? child_pv->count : 0;
 
     if (child_count > XQ_MAX_PV_MOVES - 1)
         child_count = XQ_MAX_PV_MOVES - 1;
