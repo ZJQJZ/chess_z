@@ -1670,12 +1670,14 @@ static void order_moves(const XqEngineAdapter *engine,
 }
 
 /**
- * @brief Sorts root moves stably by descending search score.
+ * @brief Sorts root moves in place by descending `score` using stable insertion sort.
  *
- * Moves with equal scores retain their relative order from the previous iteration.
+ * The function uses the search scores already stored in `moves`; it does not evaluate moves or
+ * recompute their scores. Moves with equal scores retain their relative order in the input array.
  *
  * @param moves Root-move array to reorder in place; must not be `NULL`.
- * @param count Number of initialized entries in `moves`.
+ * @param count Number of initialized entries to sort; must be nonnegative and no greater than the
+ *              number of accessible entries in `moves`.
  */
 static void order_root_moves(ScoredMove *moves,
                              int         count)
@@ -1684,8 +1686,11 @@ static void order_root_moves(ScoredMove *moves,
 
     for (i = 1; i < count; ++i)
     {
-        ScoredMove current = moves[i];
-        int        j       = i;
+        ScoredMove current;
+        int        j;
+
+        current = moves[i];
+        j       = i;
 
         while (j > 0 && moves[j - 1].score < current.score)
         {
