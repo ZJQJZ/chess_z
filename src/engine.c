@@ -1651,7 +1651,9 @@ static void order_moves(const XqEngineAdapter *engine,
     for (i = 0; i < list->count; ++i)
     {
         ScoredMove current;
-        int        j = i;
+        int        j;
+
+        j = i;
 
         current.move  = list->moves[i];
         current.score = move_order_score(engine, pos, current.move);
