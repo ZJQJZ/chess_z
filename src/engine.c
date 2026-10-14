@@ -1803,15 +1803,20 @@ static void build_pv_from_tt(XqTranspositionTable *table,
                              unsigned              depth,
                              PrincipalVariation   *pv)
 {
-    unsigned remaining  = depth;
-    int      made_count = 0;
+    unsigned remaining;
+    int      made_count;
+
+    remaining  = depth;
+    made_count = 0;
 
     pv->count = 0;
     while (remaining > 0 && pv->count < XQ_MAX_PV_MOVES)
     {
-        XqTranspositionEntry *entry = tt_find_entry(table, xq_position_hash(pos));
+        XqTranspositionEntry *entry;
         XqMoveList            list;
         int                   i;
+
+        entry = tt_find_entry(table, xq_position_hash(pos));
 
         if (entry == NULL || entry->score_kind != XQ_SEARCH_SCORE_EXACT ||
             (unsigned)entry->depth < remaining)
