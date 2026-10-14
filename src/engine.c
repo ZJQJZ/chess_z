@@ -1891,28 +1891,39 @@ static void order_moves_for_explain(const XqEngineAdapter *engine,
  * tactically unstable part of the game tree. Captures and check evasions are currently treated as
  * the moves most likely to cause large score swings, so those are the continuations searched here.
  *
- * `depth` is the internal quiescence depth. It decreases by one at each recursive call, and the
- * function falls back to static evaluation after `XQ_MAX_QUIESCENCE_DEPTH` plies. Win and loss
- * scores are fixed and do not depend on the node's distance from the root.
+ * `depth` is the internal quiescence depth and decreases by one at each recursive call. The
+ * opponent king and generated move list are checked before the depth limit. If those checks do not
+ * end the search, `depth <= -XQ_MAX_QUIESCENCE_DEPTH` returns static evaluation even when the side
+ * to move is in check. Win and loss scores are fixed and do not depend on the node's distance from
+ * the root.
  *
  * Before generating moves, an attacked opponent king is scored as a win by king capture on the next
  * ply. This rejects a preceding pseudo-legal move that left its own king attacked, even when both
  * kings are attacked, before legal check-evasion generation or stand pat can hide that fact.
  *
- * When the side to move is not in check, the static evaluation is used as the stand-pat score and
- * only captures are searched. When the side to move is in check, stand pat is not allowed and every
- * legal evasion is searched; no legal evasion means checkmate. The function uses fail-soft
- * alpha-beta semantics: it returns the best searched score, which may lie outside the original
- * window and represent an upper or lower bound rather than an exact value.
+ * Before reaching the depth limit, a side not in check uses static evaluation as its stand-pat
+ * score and searches only captures. A side in check does not use stand pat; all legal evasions,
+ * including non-captures, are search candidates. No legal evasion means checkmate. Move search
+ * stops early on a beta cutoff, a proven win, or an immediate stop request.
+ *
+ * The function uses fail-soft alpha-beta semantics: completed results return the best score found,
+ * including stand pat when allowed. Stand pat can itself cause a beta cutoff before any move is
+ * searched. The returned score may lie outside the original window and represent an upper or lower
+ * bound rather than an exact value.
+ *
+ * An immediate stop request through `context`, caused by a timeout or clock read failure, returns
+ * `0` as an interruption placeholder. When `context` is provided, callers must check
+ * `context->time_stop_required` before treating the return as a valid score. A detected deadline
+ * may instead allow the current iteration to finish, in which case search continues.
  *
  * @param engine  Engine adapter used for static evaluation and move ordering; may be `NULL`.
  * @param pos     Current position; must not be `NULL` and is restored before the function returns.
  * @param depth   Internal quiescence depth, decreasing from `0` into negative values.
  * @param alpha   Lower bound of the current alpha-beta search window.
  * @param beta    Upper bound of the current alpha-beta search window.
- * @param context Search context used for node counting and time control; may be `NULL`.
- * @return        Quiescence score from the side-to-move perspective, or `0` if the search is
- *                stopped by the time limit.
+ * @param context Search context used for node counting and time control; `NULL` disables both.
+ * @return        Quiescence score from the side-to-move perspective, or `0` as an interruption
+ *                placeholder when `context->time_stop_required` is set.
  */
 static int quiescence(const XqEngineAdapter *engine,
                       XqPosition            *pos,
@@ -1923,9 +1934,11 @@ static int quiescence(const XqEngineAdapter *engine,
 {
     XqMoveList list;
     bool       in_check;
-    int        best = INT_MIN / 2;
+    int        best;
     int        stand_pat;
     int        i;
+
+    best = INT_MIN / 2;
 
     if (search_count_node_and_check_time(context))
         return 0;
