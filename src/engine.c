@@ -1627,6 +1627,7 @@ static int move_order_score(const XqEngineAdapter *engine,
 {
     if (engine != NULL && engine->score_move != NULL)
         return engine->score_move(pos, move, engine->user);
+
     return xq_engine_default_move_order_score(pos, move, NULL);
 }
 
