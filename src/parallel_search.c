@@ -1055,18 +1055,18 @@ typedef struct Worker
 
 typedef struct Search
 {
-    Worker           *workers;
-    unsigned          worker_count;
-    unsigned          initialized_worker_count; /* Workers with their task semaphore initialized. */
-    atomic_int        shutdown;
-    XqParallelOptions options;
-    XqColor           root_color;
-    XqSearchProgressFn progress;
-    void              *progress_user;
-    XqEvaluateFn       evaluate;
-    void              *evaluate_user;
-    XqMoveList         root_moves; /* Caller-only ordering retained between completed iterations. */
-    XqTranspositionStats cache_stats; /* Caller-local during search; merged after worker joins. */
+    Worker              *workers;
+    unsigned             worker_count;
+    unsigned             initialized_worker_count;
+    atomic_int           shutdown;
+    XqParallelOptions    options;
+    XqColor              root_color;
+    XqSearchProgressFn   progress;
+    void                *progress_user;
+    XqEvaluateFn         evaluate;
+    void                *evaluate_user;
+    XqMoveList           root_moves;
+    XqTranspositionStats cache_stats;
 } Search;
 
 /**
