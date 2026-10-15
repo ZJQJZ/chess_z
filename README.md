@@ -5,7 +5,7 @@
 - 90 格棋盘使用双 `uint64_t` 位棋盘表示，每方每类棋子都有独立 bitboard。
 - 同步维护 `board[90]` 邮箱数组，便于规则生成和调试。
 - 支持初始局面、FEN 读写、走子、合法着法生成、将军检测和 perft。
-- 提供 `XqEngineAdapter`，后续可以接入外部象棋 AI 搜索/评估函数。
+- 提供 `XqEngineAdapter`，可为内置搜索接入自定义估值和走法排序函数。
 - 内置子力与位置估值、迭代加深 negamax 搜索，以及可选的固定视角并行 Minimax。
 
 ## 目录
@@ -74,7 +74,7 @@ search depth 5/10  [############--------] 60%  roots 24/40  elapsed 2.3s / 5.0s
 库使用者可通过 `xq_engine_find_best_move_with_progress()` 或
 `xq_engine_parallel_search_with_progress()` 传入可选 `XqSearchProgressFn`。
 旧入口、配置和结果结构保持不变。事件仅覆盖根迭代开始、有效根走法完成和迭代结束，
-终局根及自定义搜索回调不产生事件；迭代结束不保证完成全部根走法。
+在进入逐层加深前返回的根局面不产生事件；迭代结束不保证完成全部根走法。
 并行根走法回调可能并发、乱序到达，应同步访问并合并同轮的最大完成数。
 回调内不能修改或重入当前搜索；快照只在回调期间有效，全部回调在搜索返回前结束。
 CLI 的显示线程和同步由独立模块负责，不改变递归搜索、缓存和剪枝规则。
@@ -85,20 +85,30 @@ CLI 的显示线程和同步由独立模块负责，不改变递归搜索、缓�
 
 ```sh
 ./build/xiangqi_cli --search parallel --depth 3 --threads 4 --split-percent 50 --engine red --search-detail
+./build/xiangqi_cli --search parallel --split-strategy interleaved --threads 4 --depth 3
 ```
 
-并行模式默认迭代加深最大深度 **3**、总线程数 **2**（包括调用线程）、分配比例 **50%**。
+并行模式默认迭代加深最大深度 **3**、总线程数 **2**（包括调用线程）、连续分块策略 **contiguous**、分配比例 **50%**。
 `--depth` 必须为正整数；从深度 1 逐层搜索到该上限，没有截止时间。遇到终局或找到必胜走法时提前结束。
 所有轮次复用同一个线程池，每轮等待辅助任务结束后才开始下一轮，并返回最后一轮的结果。
 缓存关闭时，评分对应最后一轮深度的精确求值；
 缓存开启时与原引擎一致，允许复用更深搜索的结果，因此不保证与严格固定深度的无缓存分数相同。
-`--threads 1` 或 `--split-percent 0` 可用于同一算法的串行对照。
-比例范围为 0..100；每个节点至多向一个空闲线程分配一次，从着法列表尾部
-取 `ceil(孩子数量 × 比例 / 100)` 个，并至少留一个给当前线程。辅助线程内部仍可继续分裂。
-没有空闲线程时串行继续；不创建积压队列，也不进行任务窃取。
+`--split-strategy contiguous|interleaved` 选择拆分策略，仅用于 `--search parallel`。
+每个节点在完成所有着法排序后，至多向一个空闲线程分配一次：
+
+- `contiguous`：从着法列表尾部取 `ceil(孩子数量 × 比例 / 100)` 个，并至少留一个给当前线程。
+  比例范围为 0..100，`--split-percent 0` 关闭拆分。
+- `interleaved`：按从 0 开始的排序下标，雇主搜索 `0、2、4…`，辅助线程搜索 `1、3、5…`。
+  完全忽略 `--split-percent`，包括 `0`；该参数仍须在 0..100 范围内。
+
+两种策略都可以用 `--threads 1` 进行串行对照。辅助线程内部仍可继续分裂，根节点和内部节点
+使用相同策略。没有空闲线程、孩子少于两个或无法创建任务完成通知时，当前线程搜索全部孩子；
+不创建积压队列，也不进行任务窃取。
 
 实现位于 `src/parallel_search.c`，接口为 `include/xiangqi/parallel_search.h` 中的
-`xq_engine_parallel_search`。所有分数固定站在本次根方的视角：根方是 MAX，对方是 MIN。
+`xq_engine_parallel_search`。库调用通过 `XqParallelOptions.split_strategy` 选择
+`XQ_PARALLEL_SPLIT_CONTIGUOUS`（默认）或 `XQ_PARALLEL_SPLIT_INTERLEAVED`。
+所有分数固定站在本次根方的视角：根方是 MAX，对方是 MIN。
 根节点生成合法着法，内部节点使用伪合法着法并在下一层排除暴露己方将帅的分支；
 首轮根节点及内部节点复用原引擎的基础着法评分，稳定降序排列：普通着法为 0，吃子着法为
 `100000 + 被吃棋子价值 × 16 − 行棋棋子价值`，同分保持原顺序。MAX、MIN 节点都优先搜索
@@ -161,7 +171,9 @@ MIN 节点的分数、窗口和上下界会转换视角；缓存边界仍作为�
 交互拒绝发生在提交走法之前。普通走棋、指定电脑应手、悔棋、翻转照常使用。
 原模式默认深度 10 和限时行为保持不变。Windows 可以编译、使用原引擎，新模式返回不支持。
 
-`--search-detail` 记录并行搜索的局面、状态、最佳走法、根分数、深度、线程数和分配比例。
+`--search-detail` 记录并行搜索的局面、状态、最佳走法、根分数、深度、线程数、拆分策略和分配比例。
+`split_strategy` 为 `contiguous` 或 `interleaved`；交替模式仍记录原始 `split_percent` 配置值，
+并通过 `split_percent_note` 标明比例被忽略。帮助及启动信息也说明交替模式的比例不生效。
 并行搜索不再收集节点数、分裂次数、边界更新次数、取消次数和耗时；已移除
 `--parallel-trace`、旧的逐节点跟踪回调及其公开类型。新的 `--progress` 只观测根迭代进度。普通引擎的统计和详细日志保持原有行为。
 
@@ -293,7 +305,7 @@ save-tt "build/my cache.tt"
 修改评估、搜索分数语义、棋子编码或 Zobrist 哈希时必须升级引擎缓存版本，旧版本文件将被拒绝。
 当前引擎缓存版本为 2，文件布局版本仍为 1。杀棋分已改为固定胜负分，版本 1 的旧缓存
 会按不兼容文件拒绝加载，不能直接复用或自动迁移；请不加载旧缓存重新搜索，再保存新缓存。
-版本检查不会自动识别未升级版本号的代码修改；该格式仅用于内置引擎，不应混用自定义评估或搜索的缓存。
+版本检查不会自动识别未升级版本号的代码修改；该格式仅用于内置引擎，不应混用不同评估或搜索实现的缓存。
 
 开启每次引擎走棋的搜索摘要：
 
@@ -358,7 +370,7 @@ save-tt "build/my cache.tt"
 
 库调用方可使用 `xq_engine_find_best_move_with_stats(..., XqSearchStats *stats)` 获取相同统计；
 `stats` 可以为 `NULL`，原有 `xq_engine_find_best_move` 接口保持兼容。
-自定义搜索回调仅提供调用耗时，其内部深度、节点和缓存统计标记不可用。
+普通找最佳走法接口统一使用内置搜索，可获取其内部深度、节点和可用缓存的统计。
 安装 Python 3 时，CMake 会额外注册 CLI 日志集成测试；也可直接运行
 `python3 tests/test_cli.py ./build/xiangqi_cli`。
 
@@ -448,7 +460,7 @@ quit   退出
 
 库接口 `xq_engine_explain_path()` 使用独立的 `builtin_search_for_explain()` 根驱动，
 按 `builtin_search()` 的规则执行搜索，复用相同的排序、计时、置换表及超时选棋辅助函数。
-它接受适配器提供的评估、排序、置换表和历史信息，不调用自定义搜索回调。解释状态和
+它接受适配器提供的评估、排序、置换表和历史信息。解释状态和
 记录逻辑集中在独立上下文、`builtin_search_for_explain()`、`negamax_for_explain()` 中；
 普通 `builtin_search()`、`negamax()`、`quiescence()` 和 `SearchContext` 不依赖解释记录。
 两条命令从同一 FEN 启动时没有过去对局的历史；如要重现进行中的 CLI 对局，
@@ -532,25 +544,32 @@ for (int i = 0; i < legal.count; ++i) {
 }
 ```
 
-也可以通过 `XqEngineAdapter` 接入自定义搜索：
+普通找最佳走法接口统一使用内置搜索；可以通过 `XqEngineAdapter` 接入自定义估值和
+走法排序回调。以下示例在默认估值基础上，额外提高己方兵卒的价值：
 
 ```c
-static bool my_search(const XqPosition *pos, unsigned depth, XqMove *best, void *user) {
-    (void)user;
-    /* 使用 xq_generate_legal / xq_position_make_move 实现自己的搜索 */
-    return false;
+static int my_evaluate(const XqPosition *pos, XqColor perspective, void *user) {
+    int pawn_bonus = *(const int *)user;
+    int pawn_balance = xq_position_piece_count(pos, perspective, XQ_PAWN) -
+                       xq_position_piece_count(pos, xq_color_opponent(perspective), XQ_PAWN);
+    return xq_engine_default_static_evaluate(pos, perspective, NULL) + pawn_bonus * pawn_balance;
 }
 
+int pawn_bonus = 20;
 XqEngineAdapter engine = {
-    .evaluate = NULL,
-    .search = my_search,
-    .user = NULL,
+    .static_evaluate = my_evaluate,
+    .user = &pawn_bonus,
+    .score_move = NULL,
 };
 
 XqMove best;
 XqSearchLimits limits = xq_search_limits_default();
 xq_engine_find_best_move(&engine, &pos, &limits, &best);
 ```
+
+估值分数以 `perspective` 一方为视角，分数越高表示越有利；`user` 原样传给回调。
+`score_move` 可设置为走法排序评分回调，为 `NULL` 时使用默认排序评分。
+若需实现完整的外部搜索，应直接复用上述规则层接口。
 
 ## 坐标约定
 

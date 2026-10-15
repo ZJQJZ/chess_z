@@ -26,12 +26,19 @@ void xq_parallel_transposition_table_reset_stats(XqParallelTranspositionTable *t
 void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTable *table,
                                              XqTranspositionStats *stats);
 
+typedef enum XqParallelSplitStrategy
+{
+    XQ_PARALLEL_SPLIT_CONTIGUOUS = 0, /* Helper takes a tail batch sized by split_percent. */
+    XQ_PARALLEL_SPLIT_INTERLEAVED    /* After ordering: owner even indices, helper odd (zero-based). */
+} XqParallelSplitStrategy;
+
 typedef struct XqParallelOptions
 {
     unsigned depth;          /* Maximum iterative-deepening depth >= 1; default 3. No deadline or quiescence. */
     unsigned thread_count;   /* >= 1, includes calling thread; default 2. */
-    unsigned split_percent;  /* 0..100; zero disables splitting; default 50. */
+    unsigned split_percent;  /* 0..100, default 50; contiguous only (0 disables); ignored by interleaved. */
     XqParallelTranspositionTable *transposition_table; /* Borrowed; NULL disables caching (default). */
+    XqParallelSplitStrategy split_strategy; /* Default CONTIGUOUS; applied after all move ordering. */
 } XqParallelOptions;
 
 typedef struct XqParallelResult
@@ -62,7 +69,11 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * a PV prefix; terminal positions, cache bounds/misses/contention or invalid moves can shorten it.
  * PV hints affect ordering only and are not exposed in the result. No custom move scorer is used.
  * TT statistics accumulate on the table, excluding PV reconstruction lookups; no trace or other
- * search statistics are collected.
+ * search statistics are collected. Each node may split once with one idle helper, after all move
+ * ordering. CONTIGUOUS assigns a tail batch according to split_percent; INTERLEAVED assigns odd
+ * zero-based indices to the helper and even indices to the owner, ignoring split_percent even
+ * when zero. With fewer than two moves, no available helper or failed task-completion allocation,
+ * the owner searches all moves serially. thread_count == 1 disables splitting for either strategy.
  * Results are initialized even on failure.
  * Equal-score choices may depend on scheduling. POSIX pthread implementation requiring
  * always-lock-free atomic int; Windows returns UNSUPPORTED. */

@@ -33,6 +33,11 @@ static const char *color_name(XqColor color)
     return color == XQ_RED ? "red" : "black";
 }
 
+static const char *split_strategy_name(XqParallelSplitStrategy strategy)
+{
+    return strategy == XQ_PARALLEL_SPLIT_INTERLEAVED ? "interleaved" : "contiguous";
+}
+
 /**
  * 打印命令行程序的用法、可用选项以及 FEN 参数的输入提示。
  *
@@ -45,7 +50,9 @@ static void print_usage(const char *program)
     printf("options:\n");
     printf("  --search builtin|parallel  search implementation (default builtin)\n");
     printf("  --threads N                parallel threads including caller (default 2)\n");
-    printf("  --split-percent P          parallel batch percentage, 0..100 (default 50)\n");
+    printf("  --split-strategy contiguous|interleaved  parallel split strategy (default contiguous)\n");
+    printf("  --split-percent P          contiguous batch percentage, 0..100 (default 50; 0 disables splitting)\n");
+    printf("  interleaved: sorted indices 0,2,4,... stay with caller; 1,3,5,... go to helper; split-percent is ignored\n");
     printf("  parallel: iterative deepening (default max depth 3), in-memory cache, no time limit or TT files\n");
     printf("  %-21s  %s\n", "-f, --fen FEN", "initialize the position from FEN");
     printf("  %-21s  %s\n", "-e, --engine COLOR", "choose the engine side: red or black");
@@ -454,10 +461,13 @@ static void write_parallel_detail(FILE **log, const XqPosition *pos,
         strcpy(fen, "unavailable");
     fprintf(*log, "\n--- parallel engine search ---\nsearch_mode: parallel\n"
             "fen_before: %s\nstatus: %s\nselected_move: %s\nscore: %d\n"
-            "depth: %u\nthreads: %u\nsplit_percent: %u\n",
+            "depth: %u\nthreads: %u\nsplit_strategy: %s\nsplit_percent: %u\n",
             fen, xq_parallel_status_text(status),
             result->move_available ? xq_move_to_string(result->best_move, move, sizeof(move)) : "none",
-            result->score, options->depth, options->thread_count, options->split_percent);
+            result->score, options->depth, options->thread_count,
+            split_strategy_name(options->split_strategy), options->split_percent);
+    if (options->split_strategy == XQ_PARALLEL_SPLIT_INTERLEAVED)
+        fprintf(*log, "split_percent_note: ignored for interleaved\n");
     flush_search_detail(log);
 }
 
@@ -500,6 +510,19 @@ int main(int argc, char **argv)
                 return EXIT_FAILURE;
             }
             parallel = strcmp(argv[i], "parallel") == 0;
+            continue;
+        }
+        if (strcmp(argv[i], "--split-strategy") == 0)
+        {
+            if (++i >= argc ||
+                (strcmp(argv[i], "contiguous") != 0 && strcmp(argv[i], "interleaved") != 0))
+            {
+                fprintf(stderr, "error: --split-strategy requires contiguous or interleaved\n");
+                return EXIT_FAILURE;
+            }
+            parallel_options.split_strategy = strcmp(argv[i], "interleaved") == 0 ?
+                XQ_PARALLEL_SPLIT_INTERLEAVED : XQ_PARALLEL_SPLIT_CONTIGUOUS;
+            parallel_options_set = true;
             continue;
         }
         if (strcmp(argv[i], "--threads") == 0 || strcmp(argv[i], "--split-percent") == 0)
@@ -662,7 +685,6 @@ int main(int argc, char **argv)
             fprintf(stderr, "warning: parallel transposition table allocation failed; continuing without cache\n");
     }
     engine.static_evaluate = NULL;
-    engine.search = NULL;
     engine.user = NULL;
     engine.score_move = NULL;
     engine.transposition_table = table;
@@ -674,8 +696,11 @@ int main(int argc, char **argv)
     if (search_detail)
         search_log = open_search_detail(&pos, engine_color);
     if (parallel)
-        printf("Search mode: parallel, iterative deepening to max depth %u, threads %u, split %u%%; no time limit; in-memory cache %s.\n",
-               parallel_options.depth, parallel_options.thread_count, parallel_options.split_percent,
+        printf("Search mode: parallel, iterative deepening to max depth %u, threads %u, split strategy %s, split %u%%%s; no time limit; in-memory cache %s.\n",
+               parallel_options.depth, parallel_options.thread_count,
+               split_strategy_name(parallel_options.split_strategy), parallel_options.split_percent,
+               parallel_options.split_strategy == XQ_PARALLEL_SPLIT_INTERLEAVED ?
+                   " (ignored for interleaved)" : "",
                parallel_options.transposition_table != NULL ? "enabled" : "disabled");
 
     printf("Xiangqi demo: human %s vs %s %s engine\n",

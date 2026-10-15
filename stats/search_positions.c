@@ -105,7 +105,6 @@ int main(int argc, char **argv)
     if (table == NULL)
         fprintf(stderr, "warning: transposition table allocation failed; continuing without cache\n");
     engine.static_evaluate = NULL;
-    engine.search = NULL;
     engine.user = NULL;
     engine.score_move = NULL;
     engine.transposition_table = table;

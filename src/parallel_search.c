@@ -13,14 +13,15 @@
  * @brief Creates a default configuration for the parallel minimax search.
  *
  * The default configuration iteratively deepens to at most 3 plies, uses 2 threads including the
- * calling thread, and assigns 50 percent of a node's children to an available helper thread when
- * splitting is possible. The search has no time limit and no transposition table by default.
+ * calling thread, and uses contiguous splitting to assign a tail batch of 50 percent of a node's
+ * children to an available helper. The search has no time limit and no transposition table by
+ * default.
  *
  * @return The default parallel-search configuration.
  */
 XqParallelOptions xq_parallel_options_default(void)
 {
-    XqParallelOptions options = {3, 2, 50, NULL};
+    XqParallelOptions options = {3, 2, 50, NULL, XQ_PARALLEL_SPLIT_CONTIGUOUS};
     return options;
 }
 
@@ -1030,6 +1031,12 @@ typedef enum WorkerState
     WORKER_READY
 } WorkerState;
 
+/* Indices refer to the final ordered move list; end is exclusive and step is positive. */
+typedef struct SearchRange
+{
+    int begin, end, step;
+} SearchRange;
+
 typedef struct Worker
 {
     struct Search  *search;
@@ -1042,7 +1049,7 @@ typedef struct Worker
      */
     TaskCompletion      *completion;
     Node                *node;
-    int                  begin, end;
+    SearchRange          range;
     XqTranspositionStats cache_stats; /* Written only by this physical worker thread. */
 } Worker;
 
@@ -1425,20 +1432,19 @@ static Interval search_node(Search *,
  *
  * @param search Shared search state; must not be null.
  * @param node   Parent with generated moves and positive depth; keep it and its parent chain alive.
- * @param begin  Inclusive start index of this thread's batch.
- * @param end    Exclusive end index, with 0 <= begin <= end <= node->moves.count.
+ * @param range  Batch indices, with 0 <= begin <= end <= node->moves.count and step > 0. Original
+ *               move indices are retained for child results and PV hints.
  * @param batch  Exclusively owned PV output, initialized with best_index == -1 before dispatch.
  * @param stats  Cache counters owned by the executing thread, not by the node's owner.
  */
 static void search_range(Search               *search,
                          Node                 *node,
-                         int                   begin,
-                         int                   end,
+                         SearchRange           range,
                          BatchPv              *batch,
                          XqTranspositionStats *stats)
 {
     int i;
-    for (i = begin; i < end; ++i)
+    for (i = range.begin; i < range.end; i += range.step)
     {
         XqPosition    child_position;
         ParallelPv    child_pv         = {0};
@@ -1512,11 +1518,11 @@ static void *worker_main(void *argument)
         if (atomic_load_explicit(&worker->state, memory_order_acquire) != WORKER_READY)
             abort();
         completion = worker->completion;
-        search_range(search, worker->node, worker->begin, worker->end, &worker->node->helper_pv,
+        search_range(search, worker->node, worker->range, &worker->node->helper_pv,
                      &worker->cache_stats);
-        worker->node  = NULL;
-        worker->begin = worker->end = 0;
-        worker->completion          = NULL;
+        worker->node       = NULL;
+        worker->range      = (SearchRange){0, 0, 1};
+        worker->completion = NULL;
         atomic_store_explicit(&completion->finished, 1, memory_order_release);
         atomic_store_explicit(&worker->state, WORKER_IDLE, memory_order_release);
         /*
@@ -1529,16 +1535,17 @@ static void *worker_main(void *argument)
 }
 
 /**
- * @brief Assigns a node's tail batch to one idle helper and returns the owner's batch end.
+ * @brief Assigns a node's helper batch and returns the owner's range in the ordered move list.
  *
- * Called once for a node after generating moves and before searching any child. If there are fewer
- * than two moves, `split_percent` is `0`, or no helper is idle, returns `node->moves.count` without
+ * Called once after all move ordering and before searching any child. With fewer than two moves, no
+ * idle helper, or a zero split percentage under CONTIGUOUS, returns {0, count, 1} without
  * dispatching a task, leaving all moves for the current thread to search serially.
  *
- * Otherwise, reserves the first idle worker and assigns the last `ceil(count * split_percent /
- * 100)` moves, limited to `1..count-1`. The helper processes `[worker->begin, worker->end)`, while
- * the current thread retains `[0, worker->begin)`, ensuring that both batches are non-empty and
- * disjoint. Dispatch does not wait for a first child result.
+ * Otherwise, reserves the first idle worker. CONTIGUOUS assigns the last `ceil(count *
+ * split_percent / 100)` moves, limited to `1..count-1`, with step 1 for both batches. INTERLEAVED
+ * ignores the percentage (including zero): the owner searches {0, count, 2} and the helper searches
+ * {1, count, 2}. Both strategies produce non-empty, disjoint batches covering all original indices.
+ * Dispatch does not wait for a first child result.
  *
  * Acquires IDLE with a CAS to RESERVED, ensuring exclusive ownership of task fields and acquiring
  * the previous worker release. Creates a per-task completion, stores the borrowed node and batch
@@ -1560,18 +1567,19 @@ static void *worker_main(void *argument)
  *                be null.
  * @param pending Required owner-local output; receives this task's completion, or NULL if not
  *                split.
- * @return        Exclusive end index of the current thread's batch. Equals `node->moves.count` if
- *                no split occurs; otherwise also equals the helper's inclusive start index.
+ * @return        The owner's batch range, or {0, count, 1} if no split occurs.
  */
-static int split_node(Search          *search,
-                      Node            *node,
-                      TaskCompletion **pending)
+static SearchRange split_node(Search          *search,
+                              Node            *node,
+                              TaskCompletion **pending)
 {
-    unsigned i;
-    int      count = node->moves.count;
-    *pending       = NULL;
-    if (count < 2 || search->options.split_percent == 0)
-        return count;
+    unsigned    i;
+    int         count = node->moves.count;
+    SearchRange owner = {0, count, 1};
+    *pending          = NULL;
+    if (count < 2 || (search->options.split_strategy == XQ_PARALLEL_SPLIT_CONTIGUOUS &&
+                      search->options.split_percent == 0))
+        return owner;
     for (i = 0; i < search->worker_count; ++i)
     {
         Worker *worker   = &search->workers[i];
@@ -1580,28 +1588,36 @@ static int split_node(Search          *search,
                                                     memory_order_acquire, memory_order_relaxed))
         {
             TaskCompletion *completion = task_completion_create();
-            int             assigned   = (count * (int)search->options.split_percent + 99) / 100;
-            int             begin;
+            SearchRange     helper;
             if (completion == NULL)
             {
                 atomic_store_explicit(&worker->state, WORKER_IDLE, memory_order_release);
-                return count;
+                return owner;
             }
-            if (assigned >= count)
-                assigned = count - 1;
-            begin              = count - assigned;
+            if (search->options.split_strategy == XQ_PARALLEL_SPLIT_INTERLEAVED)
+            {
+                owner.step = 2;
+                helper     = (SearchRange){1, count, 2};
+            }
+            else
+            {
+                int assigned = (count * (int)search->options.split_percent + 99) / 100;
+                if (assigned >= count)
+                    assigned = count - 1;
+                owner.end = count - assigned;
+                helper    = (SearchRange){owner.end, count, 1};
+            }
             worker->node       = node;
-            worker->begin      = begin;
-            worker->end        = count;
+            worker->range      = helper;
             worker->completion = completion;
             *pending           = completion;
             atomic_store_explicit(&worker->state, WORKER_READY, memory_order_release);
             search_semaphore_post(&worker->task_available);
             /* The worker may already have cleared its task fields; return the local copy. */
-            return begin;
+            return owner;
         }
     }
-    return count;
+    return owner;
 }
 
 /**
@@ -1638,11 +1654,12 @@ static int split_node(Search          *search,
  * finalized before splitting. Leaf and cache-cutoff paths skip this sorting work.
  *
  * For a continuing internal node, initializes all child intervals as unknown and calls
- * `split_node()` once to assign a tail batch if a helper is available. Searches the retained front
- * batch using `search_range()`, which submits child results and checks updated bounds. After its
- * own batch ends, consumes the task's completion notification and acquires its finished flag,
- * releases its reference, and checks the node again. The helper may already have another task. Even
- * a finished or cancelled node must wait for this handshake to protect its stack lifetime.
+ * `split_node()` once to assign a batch using the configured strategy if a helper is available.
+ * Searches its retained range using `search_range()`, which submits results and checks bounds.
+ * After its own batch ends, consumes the task's completion notification and acquires its finished
+ * flag, releases its reference, and checks the node again. The helper may already have another
+ * task. Even a finished or cancelled node must wait for this handshake to protect its stack
+ * lifetime.
  *
  * A valid cutoff result retains the node's proven interval rather than substituting an ancestor
  * threshold. If ancestor completion causes cancellation before a normal completion is published,
@@ -1685,10 +1702,11 @@ static Interval search_node(Search               *search,
 {
     Node            node = {0};
     TaskCompletion *pending;
+    SearchRange     owner_range;
     Interval        value;
     XqMove          hash_move = {0};
     uint64_t        key       = 0;
-    int             score     = 0, end, i;
+    int             score     = 0, i;
     bool            leaf = false, has_hash_move = false;
     pv_out->count            = 0;
     node.parent              = parent;
@@ -1834,9 +1852,9 @@ static Interval search_node(Search               *search,
                                    (unsigned)node.moves.count};
         search->progress(&update, search->progress_user);
     }
-    end = split_node(search, &node, &pending);
+    owner_range = split_node(search, &node, &pending);
 
-    search_range(search, &node, 0, end, &node.owner_pv, stats);
+    search_range(search, &node, owner_range, &node.owner_pv, stats);
 
     /*
      * Node completion does not release the borrowed node: always consume the helper's notification.
@@ -1953,18 +1971,21 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * @brief Searches a position with iterative deepening using a per-call pool of helper threads.
  *
  * Copies the supplied options, or uses `xq_parallel_options_default()` when `options` is null.
- * Depth and total thread count must be at least one, and the split percentage must be in 0..100.
- * The calling thread searches the root; on POSIX platforms, creates `thread_count - 1` helpers
- * before starting the search and reuses them across iterations from depth 1 through options.depth.
- * Completed root scores order the next iteration even without a table. Internal nodes and the first
- * root iteration use the built-in capture ordering, with cache and then previous-PV moves promoted
- * to the front. PV hints are retained for up to 64 moves and passed only along matching paths; they
- * may end early at terminal positions or cache bounds/misses/contention. This does not limit search
- * depth or alter score-bound semantics. An enabled table retains entries and advances its
- * generation each iteration. Stops at the maximum depth, a terminal root, or a proven winning move,
- * as in the built-in search. Each iteration waits for all its helper work before the next begins. A
- * split percentage of zero disables task splitting, not helper creation. The search is synchronous,
- * has no deadline or quiescence search, and does not use the engine adapter's cache or history.
+ * Depth and total thread count must be at least one, the split percentage must be in 0..100, and
+ * split_strategy must be CONTIGUOUS or INTERLEAVED. The calling thread searches the root; on POSIX
+ * platforms, creates `thread_count - 1` helpers before starting the search and reuses them across
+ * iterations from depth 1 through options.depth. Completed root scores order the next iteration
+ * even without a table. Internal nodes and the first root iteration use the built-in capture
+ * ordering, with cache and then previous-PV moves promoted to the front. PV hints are retained for
+ * up to 64 moves and passed only along matching paths; they may end early at terminal positions or
+ * cache bounds/misses/contention. This does not limit search depth or alter score-bound semantics.
+ * An enabled table retains entries and advances its generation each iteration. Stops at the maximum
+ * depth, a terminal root, or a proven winning move, as in the built-in search. Each iteration waits
+ * for all its helper work before the next begins. CONTIGUOUS assigns a tail batch by percentage;
+ * zero disables splitting, not helper creation. INTERLEAVED assigns sorted indices 0,2,... to the
+ * owner and 1,3,... to its helper, ignoring the percentage even when zero. Both strategies split
+ * only when a helper is idle and keep all moves serial otherwise. The search is synchronous, has no
+ * deadline or quiescence search, and does not use the engine adapter's cache or history.
  *
  * All scores use the root side-to-move's perspective. A null evaluator selects
  * `xq_engine_default_static_evaluate`; ordinary leaf scores are clamped to [-STATIC_LIMIT,
@@ -2049,7 +2070,9 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition        *pos,
  *                                      call; its side to move must be XQ_RED or XQ_BLACK.
  * @param options                       Optional configuration copied on entry; null selects
  *                                      defaults. Depth and thread count must be positive, and
- *                                      split_percent must be in 0..100.
+ *                                      split_percent must be in 0..100 even for INTERLEAVED, which
+ *                                      ignores it. split_strategy must be CONTIGUOUS or
+ *                                      INTERLEAVED.
  * @param evaluate                      Optional static evaluator; null selects the built-in
  *                                      evaluator. Must support concurrent calls and must not modify
  *                                      positions. Cached evaluations must be deterministic for a
@@ -2087,6 +2110,8 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqPosition       
         memset(result, 0, sizeof(*result));
     if (pos == NULL || result == NULL || effective.depth == 0 || effective.thread_count == 0 ||
         effective.split_percent > 100 ||
+        (effective.split_strategy != XQ_PARALLEL_SPLIT_CONTIGUOUS &&
+         effective.split_strategy != XQ_PARALLEL_SPLIT_INTERLEAVED) ||
         (pos->side_to_move != XQ_RED && pos->side_to_move != XQ_BLACK))
         return XQ_PARALLEL_INVALID_ARGUMENT;
 #ifdef _WIN32
@@ -2100,7 +2125,7 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqPosition       
         Search     search      = {0};
         ParallelPv previous_pv = {0};
         Interval   value;
-        XqMove     best = {0};
+        XqMove     best        = {0};
         unsigned   i, current_depth;
         atomic_init(&search.shutdown, 0);
         search.options       = effective;

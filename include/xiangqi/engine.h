@@ -10,7 +10,6 @@
 /* Built-in search clamps static evaluations to [-28999, 28999]. Proven wins/losses
  * use fixed +30000/-30000 scores with no mate distance. Direct evaluator calls are unchanged. */
 typedef int (*XqEvaluateFn)(const XqPosition *pos, XqColor perspective, void *user);
-typedef bool (*XqSearchFn)(const XqPosition *pos, unsigned depth, XqMove *best_move, void *user);
 typedef int (*XqMoveScoreFn)(const XqPosition *pos, XqMove move, void *user);
 
 typedef struct XqTranspositionTable XqTranspositionTable;
@@ -49,7 +48,7 @@ typedef struct XqTranspositionStats
 /* Per-call statistics; depth is in plies and excludes quiescence extensions. */
 typedef struct XqSearchStats
 {
-    bool available;               /* Internal counters are available only for built-in search. */
+    bool available;               /* Whether internal search counters are available. */
     unsigned max_started_depth;   /* Deepest iteration in which a root move was searched. */
     unsigned iteration_completed_moves; /* Completed root candidates at max_started_depth. */
     unsigned iteration_total_moves;     /* Root candidates after history filtering, even if unstarted. */
@@ -67,7 +66,6 @@ typedef struct XqSearchStats
 typedef struct XqEngineAdapter
 {
     XqEvaluateFn static_evaluate;
-    XqSearchFn search;
     void *user;
     XqMoveScoreFn score_move;
     XqTranspositionTable *transposition_table;
@@ -243,23 +241,23 @@ typedef enum XqTranspositionIoStatus
  * Load validates into temporary storage, preserving the table on any failure. On success it
  * restores slots and generations, resets statistics, and preserves the table object's address.
  * Neither operation creates parent directories or saves/restores a game position or history.
- * Files require matching format and engine-cache versions; custom evaluation/search semantics
- * must not be mixed with this built-in cache format. Null/empty arguments are rejected. */
+ * Files require matching format and engine-cache versions; custom evaluation semantics must not
+ * be mixed with this built-in cache format. Null/empty arguments are rejected. */
 XqTranspositionIoStatus xq_transposition_table_save(const XqTranspositionTable *table,
                                                     const char *path);
 XqTranspositionIoStatus xq_transposition_table_load(XqTranspositionTable *table, const char *path);
 XqSearchLimits xq_search_limits_default(void);
 /* limits 为 NULL 时使用默认限制；搜索深度由 limits->max_depth 指定。 */
-/* 时间限制仅适用于内置搜索；自定义 search 回调仍自行管理时间。 */
+/* 使用内置搜索；limits->time_limit_ms 为 0 时不限时。 */
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
                               const XqSearchLimits *limits, XqMove *best_move);
 /* stats may be NULL; otherwise initialized on every return, including failure.
- * Custom callbacks provide wall time only; internal/cache statistics are unavailable. */
+ * Elapsed time uses the monotonic clock independently of the search timing mode. */
 bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine, XqPosition *pos,
                                          const XqSearchLimits *limits, XqMove *best_move,
                                          XqSearchStats *stats);
-/* Same behavior as with_stats, with optional root progress. Custom search callbacks and
- * roots requiring no search emit no events. NULL progress is equivalent to with_stats. */
+/* Same behavior as with_stats, with optional root progress. Roots returning before iterative
+ * deepening emit no events. NULL progress is equivalent to with_stats. */
 bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine, XqPosition *pos,
                                             const XqSearchLimits *limits, XqMove *best_move,
                                             XqSearchStats *stats, XqSearchProgressFn progress,
@@ -277,8 +275,8 @@ bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosit
  * A completed root candidate with a winning mate score is selected immediately, even mid-iteration.
  * Production builtin_search, negamax and quiescence carry no explanation hooks.
  * Iterations always start at 1; limits is required with max_depth >= 1, and time_limit_ms=0
- * disables the deadline. Evaluation/ordering callbacks, table and history are used;
- * custom search callbacks are ignored. pos is restored on return.
+ * disables the deadline. Evaluation/ordering callbacks, table and history are used.
+ * pos is restored on return.
  * The root cache is queried once for ordering, never for a direct score return. Internal
  * nodes can return cached scores. Memory updates and per-call cache deltas follow ordinary
  * search; the table is neither saved nor cleared and must match evaluation semantics.

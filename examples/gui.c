@@ -144,7 +144,6 @@ int main(void)
     XqTranspositionTable *table = xq_transposition_table_create();
     XqEngineAdapter engine = {
         .static_evaluate = NULL,
-        .search = NULL,
         .user = NULL,
         .score_move = NULL,
         .transposition_table = table,

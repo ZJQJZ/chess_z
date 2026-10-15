@@ -2484,21 +2484,20 @@ static bool builtin_search(const XqEngineAdapter *engine,
 }
 
 /**
- * @brief Finds the best move using a custom search callback or the built-in search.
+ * @brief Finds the best move using the built-in search.
  *
  * Default search limits are created only when `limits` is `NULL`. Otherwise, the supplied limits
- * are used. A maximum depth of `0` is normalized to `1`. If `engine` provides a custom search
- * callback, it receives the normalized maximum depth and manages its own time limit.
+ * are used. A maximum depth of `0` is normalized to `1`. The adapter supplies optional evaluation
+ * and move-ordering callbacks, a transposition table, and real-game history.
  *
- * Otherwise, `builtin_search()` is used.
+ * A `NULL` adapter selects the default evaluation and move ordering without a cache or history.
  *
- * @param engine    Engine adapter that may provide a custom search callback; may be `NULL`.
- * @param pos       Position to search. The built-in search requires a non-`NULL` position and
- *                  restores it before returning.
+ * @param engine    Engine adapter providing callbacks, optional cache and history; may be `NULL`.
+ * @param pos       Position to search; must not be `NULL` and is restored before returning.
  * @param limits    Optional search limits; `NULL` selects the default configuration.
  * @param best_move Output that receives the selected move; must not be `NULL`.
- * @return          `true` if a best move was found and written; `false` on invalid input, when no
- *                  move is available, or when the custom search callback fails.
+ * @return          `true` if a best move was found and written; `false` on invalid input or when no
+ *                  move is available.
  */
 bool xq_engine_find_best_move(const XqEngineAdapter *engine,
                               XqPosition            *pos,
@@ -2512,26 +2511,24 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine,
  * @brief Finds the best move and optionally collects per-call search statistics.
  *
  * Default search limits are used when `limits` is `NULL`, and a maximum depth of `0` is normalized
- * to `1`. If `engine` provides a custom search callback, it receives the normalized maximum depth
- * and manages its own time limit. Otherwise, `builtin_search()` is used; a `NULL` engine selects
- * the default evaluation and move ordering without a transposition table or game history.
+ * to `1`. The built-in search uses the adapter's evaluation, move ordering, transposition table and
+ * history; a `NULL` engine selects the default evaluation and move ordering without a transposition
+ * table or game history.
  *
- * When supplied, `stats` is initialized even if the search fails. Internal search counters are
- * available only for the built-in search. Cache statistics are per-call counter differences when
- * the built-in search uses a transposition table; collecting them does not reset the cache or its
- * cumulative counters. Elapsed time is measured with the monotonic clock for either search path
- * when clock readings succeed, independently of the configured search time mode.
+ * When supplied, `stats` is initialized even if the search fails. Cache statistics are per-call
+ * counter differences when the search uses a transposition table; collecting them does not reset
+ * the cache or its cumulative counters. Elapsed time is measured with the monotonic clock when
+ * clock readings succeed, independently of the configured search time mode.
  *
  * @param engine    Engine adapter that may provide custom callbacks, a cache, and history; may be
  *                  `NULL` to use the built-in defaults.
- * @param pos       Position to search. The built-in search requires a non-`NULL` position and
- *                  restores it before returning.
+ * @param pos       Position to search; must not be `NULL` and is restored before returning.
  * @param limits    Optional search limits; `NULL` selects the default configuration.
  * @param best_move Output that receives the selected move; must not be `NULL`.
- * @param stats     Optional output statistics; `NULL` disables diagnostics collection. Check the
- *                  availability flags before using internal counters, elapsed time, or cache data.
- * @return          `true` if a best move was found and written; `false` on invalid input, when no
- *                  move is available, or when the custom search callback fails.
+ * @param stats     Optional statistics output; `NULL` skips reporting. Check availability flags
+ *                  before reading internal counters, elapsed time, or cache data.
+ * @return          `true` if a best move was found and written; `false` on invalid input or when no
+ *                  move is available.
  */
 bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine,
                                          XqPosition            *pos,
@@ -2546,11 +2543,9 @@ bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine,
 /**
  * @brief Finds the best move with optional per-call statistics and root progress notifications.
  *
- * Uses default limits when `limits` is `NULL` and normalizes a maximum depth of `0` to `1`. A
- * custom engine search callback receives that depth, manages its own timing, and emits no progress
- * notifications through this function. Otherwise, the built-in iterative-deepening search uses the
- * adapter's evaluator, move ordering, transposition table and history; a `NULL` adapter selects the
- * built-in defaults without a cache or history.
+ * Uses default limits when `limits` is `NULL` and normalizes a maximum depth of `0` to `1`. The
+ * built-in iterative-deepening search uses the adapter's evaluator, move ordering, transposition
+ * table and history; a `NULL` adapter selects the built-in defaults without a cache or history.
  *
  * Built-in progress callbacks run synchronously on the calling thread at iteration start, after
  * each completed root candidate, and at iteration end, including partial iterations. Roots that
@@ -2558,15 +2553,14 @@ bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine,
  * iteration, not total search work. Callbacks finish before this function returns; their execution
  * time contributes to elapsed time and can affect a time-limited search.
  *
- * Initializes supplied statistics on every return, including failure. Internal counters and cache
- * deltas are available only for built-in search; cache counters are not reset. Both search paths
- * can report monotonic wall time when clock readings succeed, independently of the configured
- * search time mode. Statistics and progress can be enabled independently.
+ * Initializes supplied statistics on every return, including failure. Cache statistics are per-call
+ * counter differences; cumulative counters are not reset. Elapsed time uses the monotonic clock
+ * when readings succeed, independently of the configured search time mode. Statistics and progress
+ * can be enabled independently.
  *
  * @param engine        Optional adapter providing callbacks, a cache and real-game history; `NULL`
  *                      selects the built-in defaults.
- * @param pos           Position to search. Built-in search requires a non-`NULL` position and
- *                      restores it before returning; custom search receives it unchanged.
+ * @param pos           Position to search; must not be `NULL` and is restored before returning.
  * @param limits        Optional depth and time limits; `NULL` selects the default configuration.
  * @param best_move     Required output for the selected move; valid only when `true` is returned.
  * @param stats         Optional statistics output. Check availability flags before reading internal
@@ -2575,10 +2569,9 @@ bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine,
  *                      Snapshots are borrowed only for the callback's duration. Keep callbacks
  *                      short and do not mutate or reenter the current search or its state.
  * @param progress_user Borrowed pointer passed unchanged to `progress`; may be `NULL`. Keep
- *                      referenced data valid until return. Ignored when `progress` is `NULL` or
- *                      search is custom.
- * @return              `true` if a move was selected and written; `false` if `best_move` is `NULL`,
- *                      built-in search cannot select a move, or the custom search callback fails.
+ *                      referenced data valid until return. Ignored when `progress` is `NULL`.
+ * @return              `true` if a move was selected and written; `false` if `best_move` is `NULL`
+ *                      or the search cannot select a move.
  */
 bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine,
                                             XqPosition            *pos,
@@ -2588,15 +2581,14 @@ bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine,
                                             XqSearchProgressFn     progress,
                                             void                  *progress_user)
 {
-    bool                  custom = engine != NULL && engine->search != NULL;
     XqTranspositionTable *table =
-        stats != NULL && !custom && engine != NULL ? engine->transposition_table : NULL;
+        stats != NULL && engine != NULL ? engine->transposition_table : NULL;
 
     if (stats != NULL)
     {
         memset(stats, 0, sizeof(*stats));
-        stats->available       = !custom;
-        stats->cache_available = !custom && table != NULL;
+        stats->available       = true;
+        stats->cache_available = table != NULL;
     }
 
     if (best_move == NULL)
@@ -2611,12 +2603,8 @@ bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine,
         start = monotonic_time_ms();
         xq_transposition_table_get_stats(table, &before);
     }
-    bool found;
-    if (custom)
-        found = engine->search(pos, effective_limits.max_depth, best_move, engine->user);
-    else
-        found = builtin_search(engine, pos, &effective_limits, best_move, stats, progress,
-                               progress_user);
+    bool found =
+        builtin_search(engine, pos, &effective_limits, best_move, stats, progress, progress_user);
     if (stats != NULL)
     {
         int64_t end = monotonic_time_ms();
@@ -2646,8 +2634,7 @@ bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine,
  * before the move, `beta`, recursive score, ordering score, bound kind, and whether the move became
  * best or caused a cutoff. The recursive searches do not use a transposition table or time limit.
  *
- * The adapter's custom search callback is not invoked; only its evaluation and move-ordering
- * callbacks are relevant.
+ * Only the adapter's evaluation and move-ordering callbacks are used.
  *
  * @param engine Engine adapter used for evaluation and move ordering; may be `NULL`.
  * @param pos    Position to explain; must not be `NULL` and is restored before the function
@@ -3751,9 +3738,9 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine,
  * `root_depth == 0` before iterative deepening; no move is selected. A root filtered entirely by
  * history returns the same unsearched fallback as ordinary search.
  *
- * The adapter's evaluation, ordering, table and history are used; its custom search callback is
- * ignored. Tables must match evaluation semantics. Cache statistics are per-call differences,
- * without resetting cumulative counters; loading and saving remain the caller's responsibility.
+ * The adapter's evaluation, ordering, table and history are used. Tables must match evaluation
+ * semantics. Cache statistics are per-call differences without resetting cumulative counters;
+ * loading and saving remain the caller's responsibility.
  *
  * @param engine     Adapter supplying callbacks, optional table and history; may be `NULL`.
  * @param pos        Root position, restored before returning; must not be `NULL`.

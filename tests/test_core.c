@@ -145,6 +145,108 @@ static void test_engine_adapter(void) {
     assert(best.to < XQ_SQUARES);
 }
 
+typedef struct SearchProgressCheck {
+    unsigned started;
+    unsigned finished;
+    unsigned completed;
+    unsigned total;
+} SearchProgressCheck;
+
+static void check_search_progress(const XqSearchProgress *progress, void *user) {
+    SearchProgressCheck *check = user;
+
+    assert(progress->total_moves == check->total);
+    if (progress->event == XQ_SEARCH_ITERATION_STARTED) {
+        assert(check->started == check->finished);
+        assert(progress->depth == ++check->started);
+        assert(progress->completed_moves == 0);
+        check->completed = 0;
+    } else {
+        assert(progress->depth == check->started);
+        assert(check->started == check->finished + 1);
+        if (progress->event == XQ_SEARCH_ROOT_MOVE_COMPLETED)
+            assert(progress->completed_moves == ++check->completed);
+        else {
+            assert(progress->event == XQ_SEARCH_ITERATION_FINISHED);
+            assert(progress->completed_moves == check->completed);
+            assert(check->completed == check->total);
+            ++check->finished;
+        }
+    }
+}
+
+static void test_search_statistics_and_progress(void) {
+    XqPosition pos;
+    XqMove best;
+    XqMove without_stats;
+    XqMoveList legal;
+    XqSearchStats stats;
+    XqSearchLimits limits = {.max_depth = 0, .time_limit_ms = 0};
+
+    xq_position_startpos(&pos);
+    XqPosition before = pos;
+    xq_generate_legal(&pos, &legal);
+    SearchProgressCheck progress = {.total = (unsigned)legal.count};
+    assert(xq_engine_find_best_move_with_progress(NULL, &pos, &limits, &best, &stats,
+                                                 check_search_progress, &progress));
+    assert(stats.available && !stats.cache_available);
+    assert(stats.max_started_depth == 1 && stats.completed_depth == 1);
+    assert(stats.selected_move_depth == 1 && stats.nodes > 0);
+    assert(stats.iteration_completed_moves == (unsigned)legal.count);
+    assert(stats.iteration_total_moves == (unsigned)legal.count);
+    assert(!stats.stopped && !stats.winning_move_found);
+    assert(progress.started == 1 && progress.finished == 1);
+    assert(memcmp(&pos, &before, sizeof(pos)) == 0);
+
+    /* Progress does not depend on requesting statistics. */
+    progress = (SearchProgressCheck){.total = (unsigned)legal.count};
+    limits.max_depth = 1;
+    assert(xq_engine_find_best_move_with_progress(NULL, &pos, &limits, &without_stats, NULL,
+                                                 check_search_progress, &progress));
+    assert(progress.started == 1 && progress.finished == 1);
+    assert(best.from == without_stats.from && best.to == without_stats.to);
+    assert(memcmp(&pos, &before, sizeof(pos)) == 0);
+
+    /* Reusing a table preserves cumulative counters and reports only each call's deltas. */
+    XqTranspositionTable *table = xq_transposition_table_create();
+    assert(table != NULL);
+    XqEngineAdapter engine = {.transposition_table = table};
+    limits.max_depth = 2;
+    for (int run = 0; run < 2; ++run) {
+        XqTranspositionStats cache_before;
+        XqTranspositionStats cache_after;
+        xq_transposition_table_get_stats(table, &cache_before);
+        assert(xq_engine_find_best_move_with_stats(&engine, &pos, &limits, &best, &stats));
+        xq_transposition_table_get_stats(table, &cache_after);
+        assert(stats.available && stats.cache_available);
+        assert(stats.completed_depth == 2 && stats.selected_move_depth == 2);
+        assert(stats.cache.probes == cache_after.probes - cache_before.probes);
+        assert(stats.cache.hits == cache_after.hits - cache_before.hits);
+        assert(stats.cache.cutoffs == cache_after.cutoffs - cache_before.cutoffs);
+        assert(stats.cache.stores == cache_after.stores - cache_before.stores);
+        assert(stats.cache.replacements == cache_after.replacements - cache_before.replacements);
+        assert(stats.cache.probes > 0 && stats.cache.stores > 0);
+        if (run > 0) {
+            assert(cache_before.probes > 0 && cache_before.stores > 0);
+            assert(stats.cache.hits > 0);
+        }
+        assert(memcmp(&pos, &before, sizeof(pos)) == 0);
+    }
+
+    /* Failure still initializes statistics, with or without a cache. */
+    memset(&stats, 0xa5, sizeof(stats));
+    assert(!xq_engine_find_best_move_with_stats(NULL, &pos, &limits, NULL, &stats));
+    assert(stats.available && !stats.cache_available && !stats.elapsed_available);
+    assert(stats.nodes == 0 && stats.completed_depth == 0 && stats.cache.probes == 0);
+    assert(memcmp(&pos, &before, sizeof(pos)) == 0);
+    memset(&stats, 0xa5, sizeof(stats));
+    assert(!xq_engine_find_best_move_with_stats(&engine, NULL, &limits, &best, &stats));
+    assert(stats.available && stats.cache_available);
+    assert(stats.nodes == 0 && stats.completed_depth == 0 && stats.selected_move_depth == 0);
+    assert(stats.cache.probes == 0 && stats.cache.hits == 0 && stats.cache.stores == 0);
+    xq_transposition_table_destroy(table);
+}
+
 static void test_default_static_evaluate(void) {
     XqPosition pos;
     XqPosition before;
@@ -183,7 +285,6 @@ static void test_default_move_ordering(void) {
     XqMove best;
     XqEngineAdapter engine = {
         .static_evaluate = constant_evaluate,
-        .search = NULL,
         .user = NULL,
         .score_move = NULL,
     };
@@ -209,7 +310,6 @@ static void test_custom_move_ordering(void) {
     int score_calls = 0;
     XqEngineAdapter engine = {
         .static_evaluate = constant_evaluate,
-        .search = NULL,
         .user = &score_calls,
         .score_move = prefer_a0a1,
     };
@@ -251,7 +351,6 @@ static void test_explain_custom_move_ordering(void) {
     int score_calls = 0;
     XqEngineAdapter engine = {
         .static_evaluate = constant_evaluate,
-        .search = NULL,
         .user = &score_calls,
         .score_move = prefer_a0a1,
     };
@@ -385,6 +484,7 @@ int main(void) {
     test_direct_attack_matches_pseudo_generation();
     test_unmake_move_restores_position();
     test_engine_adapter();
+    test_search_statistics_and_progress();
     test_default_static_evaluate();
     test_default_move_ordering();
     test_quiescence_avoids_bad_capture();

@@ -30,11 +30,51 @@ class ParallelCliTests(unittest.TestCase):
         self.assertIn("search_mode: parallel", summary)
         self.assertIn("depth: 2", summary)
         self.assertIn("threads: 4", summary)
+        self.assertIn("split strategy contiguous", result.stdout)
+        self.assertIn("split_strategy: contiguous", summary)
+        self.assertIn("split_percent: 50", summary)
+        self.assertNotIn("split_percent_note:", summary)
         self.assertNotIn("bound_updates:", summary)
         self.assertNotIn("nodes:", summary)
         self.assertNotIn("elapsed_ms:", summary)
         self.assertNotIn("iteration_progress", summary)
         self.assertNotIn("cache_hits", summary)
+
+    def test_explicit_contiguous_strategy(self):
+        result = self.run_cli("--split-strategy", "contiguous", "--search", "parallel",
+                              "--threads", "2", "--depth", "1", "--split-percent", "0",
+                              "--fen", FEN, "--engine", "red", "--search-detail")
+        self.assertIn("red engine plays: e0f0", result.stdout)
+        self.assertIn("split strategy contiguous, split 0%", result.stdout)
+        summary = (self.cwd / "build/search_detail.txt").read_text()
+        self.assertIn("split_strategy: contiguous", summary)
+        self.assertIn("split_percent: 0", summary)
+        self.assertNotIn("split_percent_note:", summary)
+
+    def test_interleaved_strategy_preserves_ignored_percentage(self):
+        for percentage in (0, 1, 50, 100):
+            with self.subTest(percentage=percentage):
+                result = self.run_cli("--search", "parallel", "--split-strategy", "interleaved",
+                                      "--threads", "2", "--depth", "1",
+                                      "--split-percent", str(percentage), "--fen", FEN,
+                                      "--engine", "red", "--search-detail")
+                self.assertIn("red engine plays: e0f0", result.stdout)
+                self.assertIn(f"split strategy interleaved, split {percentage}% (ignored for interleaved)",
+                              result.stdout)
+                summary = (self.cwd / "build/search_detail.txt").read_text().split(
+                    "--- parallel engine search ---")[-1]
+                self.assertIn("split_strategy: interleaved", summary)
+                self.assertIn(f"split_percent: {percentage}\n", summary)
+                self.assertIn("split_percent_note: ignored for interleaved", summary)
+
+    def test_split_strategy_help(self):
+        result = self.run_cli("--help")
+        self.assertIn("--split-strategy contiguous|interleaved", result.stdout)
+        self.assertIn("default contiguous", result.stdout)
+        self.assertIn("0 disables splitting", result.stdout)
+        self.assertIn("sorted indices 0,2,4,... stay with caller", result.stdout)
+        self.assertIn("1,3,5,... go to helper", result.stdout)
+        self.assertIn("split-percent is ignored", result.stdout)
 
     def test_conflicting_and_invalid_arguments(self):
         for args in (("--time-ms", "10"), ("--tt-file", "missing"),
@@ -45,6 +85,21 @@ class ParallelCliTests(unittest.TestCase):
         self.run_cli("--threads", "2", success=False)
         self.run_cli("--parallel-trace", "trace.txt", success=False)
         self.run_cli("--search", "unknown", success=False)
+
+    def test_invalid_split_strategy_arguments(self):
+        for args in (("--split-strategy",), ("--split-strategy", "unknown"),
+                     ("--split-strategy", ""), ("--split-strategy", "--threads", "2")):
+            with self.subTest(args=args):
+                result = self.run_cli("--search", "parallel", *args, success=False)
+                self.assertIn("--split-strategy requires contiguous or interleaved", result.stderr)
+        for strategy in ("contiguous", "interleaved"):
+            with self.subTest(strategy=strategy):
+                self.run_cli("--split-strategy", strategy, success=False)
+                self.run_cli("--search", "builtin", "--split-strategy", strategy, success=False)
+        for percentage in ("-1", "101", "x"):
+            with self.subTest(percentage=percentage):
+                self.run_cli("--search", "parallel", "--split-strategy", "interleaved",
+                              "--split-percent", percentage, success=False)
 
     def test_time_rejection_does_not_play_move(self):
         result = self.run_cli("--search", "parallel", "--fen", FEN,
