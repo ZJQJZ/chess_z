@@ -2076,17 +2076,44 @@ static int negamax(const XqEngineAdapter *engine,
 /**
  * @brief Computes the rolling hash of the move sequence between two recorded positions.
  *
- * Position indices are used as boundaries: the path includes moves in entries `begin + 1` through
- * `end`. For example, `begin=2` and `end=5` selects the three moves in entries `3`, `4`, and `5`.
+ * Entry `0` is the initial position; entry `i >= 1` records the move reaching position `i`. Each
+ * move is represented by a numeric token:
  *
- * Let `H[i]` be the prefix hash through entry `i` and `B` the hash base. Subtracting `H[begin] *
- * B^(end - begin)` from `H[end]` removes the earlier moves and leaves the requested path hash. Each
- * entry's `power` stores `B` raised to its index, so the calculation takes constant time without
- * traversing moves. Unsigned arithmetic intentionally wraps modulo `2^64`.
+ *     t[i] = entries[i].move.from * XQ_SQUARES + entries[i].move.to + 1
  *
- * Equal-length identical paths have equal hashes regardless of their offsets in history. Hash
- * equality alone does not prove path equality; callers must compare the moves to exclude hash
- * collisions and check position hashes separately when detecting a closed cycle.
+ * Square indices are in `[0, XQ_SQUARES)`, so this uniquely encodes the source/destination pair.
+ * Adding `1` makes every token nonzero. Piece and captured-piece fields are not encoded.
+ *
+ * `xq_history_push()` precomputes the prefix hash `H[i]` in `entries[i].prefix`, using the fixed
+ * base `B = HISTORY_HASH_BASE`:
+ *
+ *     H[0] = 0
+ *     H[i] = H[i - 1] * B + t[i]
+ *
+ * Multiplying by `B` increases every earlier token's exponent by one before appending `t[i]`.
+ *
+ * Position indices are interval boundaries: this function selects moves `begin + 1` through `end`.
+ * Let `L = end - begin`. For a nonempty interval, the prefix through `end` can be split as:
+ *
+ *     H[end] = H[begin] * B^L
+ *            + t[begin + 1] * B^(L - 1) + ... + t[end]
+ *
+ * The first term is the contribution of all moves before the selected interval, with their
+ * exponents increased by `L` to match their weights in `H[end]`. Subtracting that term cancels
+ * those earlier moves and leaves only the selected tokens, weighted from `B^(L - 1)` down to `1`.
+ * Thus the returned hash is:
+ *
+ *     H[end] - H[begin] * B^L = t[begin + 1] * B^(L - 1) + ... + t[end]
+ *
+ * For example, `begin=2`, `end=5` yields `t[3] * B^2 + t[4] * B + t[5]`.
+ *
+ * `entries[L].power` supplies the precomputed `B^L`, so extraction takes constant time without
+ * traversing moves. All hash and power arithmetic intentionally wraps modulo `2^64`. When `L=0`,
+ * `entries[0].power` is `1`, so the subtraction returns `0` for the empty path.
+ *
+ * Equal-length paths with identical source/destination sequences have equal hashes regardless of
+ * their offsets in history. Hash equality alone does not prove path equality; callers must compare
+ * the actual moves to exclude hash collisions and check position hashes separately for a cycle.
  *
  * @param history Recorded game history; must not be `NULL` and is left unchanged.
  * @param begin   Starting position index; must satisfy `begin <= end`.
