@@ -34,7 +34,7 @@ typedef enum XqParallelSplitStrategy
 
 typedef struct XqParallelOptions
 {
-    unsigned depth;          /* Maximum iterative-deepening depth >= 1; default 3. No quiescence. */
+    unsigned depth;          /* Maximum normal-search depth >= 1; default 3. Excludes quiescence. */
     unsigned thread_count;   /* >= 1, includes calling thread; default 2. */
     unsigned split_percent;  /* 0..100, default 50; contiguous only (0 disables); ignored by interleaved. */
     XqParallelTranspositionTable *transposition_table; /* Borrowed; NULL disables caching (default). */
@@ -80,6 +80,17 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * iteration; a partial first iteration supplies a lower bound. An unsearched legal fallback has
  * score_available == false and selected_move_depth == 0. Table generations advance per iteration
  * and entries survive between them.
+ * Depth-zero leaves run quiescence in the executing thread: stand pat plus captures when not in
+ * check, all legal evasions without stand pat when in check. As in built-in quiescence, an empty
+ * generated list is a loss; outside check the list is pseudo-legal with no extra legal-move scan.
+ * King checks and the empty-list check precede the 500-ply extension cap; at the cap other
+ * positions use static evaluation even in check. The evaluator still receives the root color;
+ * its result is clamped to +/-28999 and converted to the side-to-move perspective for negamax.
+ * Quiescence flips child scores and windows, then ordinary search converts its result back to
+ * the root perspective. Wins/losses remain +/-30000. Quiescence shares time and ancestor cancellation checks,
+ * preserves cutoff bounds and never splits tasks, accesses the table or extends PV hints.
+ * Node counts include normal and quiescence entries (the shared leaf counts once for each);
+ * reported depths exclude extensions and progress still counts only root candidates.
  * The first root iteration and internal nodes use the built-in stable capture ordering, then
  * promote cache and previous-iteration PV moves (PV takes precedence). Later root iterations
  * retain the previous root ordering. PV suffixes follow only matching moves; up to 64 moves are
@@ -87,9 +98,10 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * a PV prefix; terminal positions, cache bounds/misses/contention or invalid moves can shorten it.
  * PV hints affect ordering only and are not exposed in the result. No custom move scorer is used.
  * TT statistics accumulate on the table, excluding PV reconstruction lookups; stats contains
- * per-call counters without resetting the table. Each node may split once with one idle helper,
- * after all move ordering. CONTIGUOUS assigns a tail batch according to split_percent; INTERLEAVED assigns odd
- * zero-based indices to the helper and even indices to the owner, ignoring split_percent even
+ * per-call counters without resetting the table. Each normal-search node may split once with one
+ * idle helper after all move ordering. CONTIGUOUS assigns a tail batch according to split_percent;
+ * INTERLEAVED assigns odd zero-based indices to the helper and even indices to the owner,
+ * ignoring split_percent even
  * when zero. With fewer than two moves, no available helper or failed task-completion allocation,
  * the owner searches all moves serially. thread_count == 1 disables splitting for either strategy.
  * The budget covers preparation, pool creation and all iterations. At the first detected deadline,

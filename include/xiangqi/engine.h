@@ -54,7 +54,7 @@ typedef struct XqSearchStats
     unsigned iteration_total_moves;     /* Root candidates, after any history filtering, even if unstarted. */
     unsigned completed_depth;     /* All root moves completed at this depth. */
     unsigned selected_move_depth; /* Selected result depth; zero for an unsearched fallback. */
-    uint64_t nodes; /* Builtin: negamax/quiescence entries including their shared leaf; parallel: search-node entries. */
+    uint64_t nodes; /* Both searches: normal/quiescence entries, including one of each at their shared leaf. */
     bool stopped;   /* Time limit reached (including an extended iteration) or search clock failed. */
     bool winning_move_found; /* Selected the first completed root candidate with a winning mate score. */
     bool elapsed_available;

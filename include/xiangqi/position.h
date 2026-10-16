@@ -17,7 +17,7 @@ typedef struct XqPosition
     int8_t board[XQ_SQUARES];
     XqColor side_to_move;
     uint16_t halfmove_clock;
-    uint16_t fullmove_number;
+    uint64_t fullmove_number; /* Starts at 1; incremented after Black moves. */
 } XqPosition;
 
 void xq_position_clear(XqPosition *pos);

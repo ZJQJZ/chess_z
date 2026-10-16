@@ -381,9 +381,9 @@ static void write_search_detail(FILE **log, const XqPosition *pos,
 
     if (!xq_position_to_fen(pos, fen, sizeof(fen)))
         strcpy(fen, "unavailable");
-    fprintf(out, "\n--- engine search ---\nfullmove_number: %u\nside_to_move: %s\n"
+    fprintf(out, "\n--- engine search ---\nfullmove_number: %" PRIu64 "\nside_to_move: %s\n"
                  "fen_before: %s\nsuccess: %s\nselected_move: %s\n",
-            (unsigned)pos->fullmove_number, color_name(pos->side_to_move), fen,
+            pos->fullmove_number, color_name(pos->side_to_move), fen,
             found ? "yes" : "no", found ? xq_move_to_string(best, move, sizeof(move)) : "none");
     fprintf(out, "depth_limit: %u\ntime_limit_ms: %" PRIu64 "\ntime_mode: %s\n",
             limits->max_depth, limits->time_limit_ms,
@@ -428,9 +428,9 @@ static void write_manual_engine_move(FILE **log, const XqPosition *before,
         strcpy(fen_before, "unavailable");
     if (!xq_position_to_fen(after, fen_after, sizeof(fen_after)))
         strcpy(fen_after, "unavailable");
-    fprintf(*log, "\n--- manual engine move ---\nfullmove_number: %u\nengine_color: %s\n"
+    fprintf(*log, "\n--- manual engine move ---\nfullmove_number: %" PRIu64 "\nengine_color: %s\n"
                   "selected_move: %s\nfen_before: %s\nfen_after: %s\n",
-            (unsigned)before->fullmove_number, color_name(before->side_to_move),
+            before->fullmove_number, color_name(before->side_to_move),
             xq_move_to_string(move, text, sizeof(text)), fen_before, fen_after);
     flush_search_detail(log);
 }

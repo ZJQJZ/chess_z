@@ -267,3 +267,15 @@ so 和 therefore
 Non-mate scores do not depend on ply, so they remain unchanged.
 Non-mate scores do not depend on ply and therefore remain unchanged.
 ```
+
+```
+./build/xiangqi_cli \
+--search parallel \
+--depth 100 \
+--threads 16 \
+--split-strategy interleaved \
+--progress \
+--fen "3akarr1/1NC2P2C/9/9/R8/9/6p2/4B4/2n1p4/5K3 r - -" \
+--engine r  
+
+```

@@ -245,6 +245,7 @@ enum
     WIN                                         = 30000,
     STATIC_LIMIT                                = 28999,
     INFINITY_SCORE                              = 30001,
+    PARALLEL_MAX_QUIESCENCE_DEPTH               = 500,
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
     PARALLEL_TT_BUCKET_COUNT                    = 1 << 18,
@@ -767,9 +768,10 @@ static bool parallel_prioritize_move(XqMoveList *list,
  *
  * Call for the first root iteration and continuing internal nodes, before promoting cache/PV hints
  * and before assigning batches to helpers. Later root iterations retain their previous
- * search-result ordering instead. Terminal, depth-zero and cache-cutoff nodes skip this work. This
- * function provides no synchronization: the caller must exclusively own the move list. It neither
- * checks move legality nor searches children, and does not invoke a custom scorer.
+ * search-result ordering instead. Quiescence also uses this sorter for captures/check evasions,
+ * without cache/PV promotion. Terminal and cache-cutoff nodes skip this work. This function
+ * provides no synchronization: the caller must exclusively own the move list. It neither checks
+ * move legality nor searches children, and does not invoke a custom scorer.
  *
  * Empty and single-move lists require no shifts. Worst-case time is `O(count squared)`, with
  * `O(XQ_MAX_MOVES)` stack storage and no heap allocation.
@@ -1460,6 +1462,170 @@ static bool check_node(Search *search,
     return true;
 }
 
+typedef struct QuiescenceResult
+{
+    int  score;   /* Fail-soft score from the current side-to-move perspective. */
+    bool stopped; /* Discard score and use the owning leaf's state instead. */
+} QuiescenceResult;
+
+/**
+ * @brief Checks time and the ordinary leaf's ancestors during thread-local quiescence.
+ *
+ * First updates the shared time state, then lets `check_node()` decide whether the owning leaf must
+ * stop. Reaching the deadline does not always cancel work: `TIME_FINISH_ITERATION` allows the
+ * current iteration to continue, whereas `TIME_STOP` requests cancellation. Even with timing
+ * disabled, ancestor completion or cancellation can still stop this subtree.
+ *
+ * The leaf and its parent chain stay alive until quiescence returns. Its window may tighten here,
+ * but quiescence keeps its original window snapshot and local recursive windows. No quiescence
+ * result has been published yet; a stopped leaf supplies either cancellation or an already valid
+ * interval cutoff through `node_value()`. An existing terminal state is preserved, so a later time
+ * stop cannot turn an already finished leaf into a cancelled one.
+ *
+ * This is a cooperative checkpoint, not an asynchronous interrupt or a wait for other threads. It
+ * does not modify the position, publish a quiescence score, update counters or invoke progress
+ * callbacks. A false result only means no stop was observed at this checkpoint; callers must keep
+ * checking as recursion proceeds and after potentially expensive evaluation calls.
+ *
+ * @param search Initialized, non-null shared search state whose time state may be updated here.
+ * @param leaf   Non-null ordinary depth-zero node owning the entire quiescence subtree, passed
+ *               unchanged through its recursion. Its atomic fields must be initialized, and its
+ *               parent chain must remain valid. This function may update its window and state.
+ * @return       True when the leaf is finished or cancelled; false while it remains running. On
+ *               true, quiescence must restore all made moves and propagate a stopped result without
+ *               using its partial score. The ordinary caller reads `node_value(leaf)` to
+ *               distinguish a valid cutoff interval from cancellation.
+ */
+static bool quiescence_should_stop(Search *search,
+                                   Node   *leaf)
+{
+    /* Check time before node state so newly requested cancellation is visible to check_node(). */
+    (void)search_check_time(search);
+    /* Use the leaf's state, not just the time result: ancestors may have stopped independently. */
+    return check_node(search, leaf);
+}
+
+/**
+ * @brief Searches captures and legal check evasions without allocating helper tasks.
+ *
+ * Uses side-to-move negamax scores: each child receives [-beta, -alpha], and its score is negated
+ * on return. The evaluator still receives the root color; its clamped result is converted to the
+ * side-to-move perspective here, preserving custom evaluators that are not antisymmetric. Outside
+ * check, static evaluation is a stand-pat candidate and only captures are searched. In check, all
+ * legal evasions are searched without stand pat. The ordinary caller handles missing kings before
+ * entry; here an attacked opponent king is scored as a win before any king-capture move is played.
+ * That check and an empty generated move list are resolved before the extension limit. As in the built-in
+ * quiescence search, outside check the list is pseudo-legal; no separate test for a legal
+ * continuation is performed before stand pat. At the extension limit, remaining positions are
+ * evaluated even in check.
+ *
+ * `position` is a private mutable copy owned by the ordinary leaf. Every made move is unmade before
+ * inspecting cancellation or returning. Recursion uses only local windows and move lists, not the
+ * larger shared `Node` structure. The ordinary leaf is used solely for time/ancestor stop checks.
+ * No table, PV or progress updates occur here; each entry contributes to the executing thread's
+ * node count.
+ *
+ * A stopped result has no usable score. Otherwise the score is fail-soft and must be classified
+ * against the caller's original window before being published as a proven interval. A score <= the
+ * original alpha is an upper bound, a score >= the original beta is a lower bound, and a score
+ * strictly inside that window is exact. Local alpha/beta updates guide pruning only; they never
+ * replace the best score returned to the caller. Every node maximizes its own side's score and
+ * raises alpha. The ordinary caller converts the returned score back to the root perspective before
+ * classifying it against the original root-perspective window.
+ *
+ * @param search   Initialized shared search state, providing the root color, evaluator and time
+ *                 control. The evaluator and its user data must support concurrent calls.
+ * @param leaf     Ordinary depth-zero node owning this entire quiescence subtree, not its immediate
+ *                 recursive parent. Passed unchanged at every ply; it and its ancestors must remain
+ *                 alive. Stop checks may tighten its window or publish its terminal state.
+ * @param position Thread-private mutable position; restored before every return. The evaluator
+ *                 borrows it read-only. No other thread may access it during this call.
+ * @param ply      Number of quiescence plies already played, starting at zero. Incremented on each
+ *                 recursive move; the extension cap applies independently of normal-search depth.
+ * @param alpha    Lower edge of the local side-to-move window. The initial window is converted from
+ *                 the ordinary leaf's snapshot.
+ * @param beta     Upper edge of that window; recursion uses -beta as alpha and -alpha as beta.
+ * @param stats    Counters owned by the executing physical thread. Every call increments nodes,
+ *                 even when stopped at entry; cache counters are not changed.
+ * @return         Side-to-move fail-soft score with stopped == false, or {0, true} when the owning
+ *                 leaf stops. That zero is a placeholder, not a draw. On stop, unwind all moves and
+ *                 let the ordinary caller read node_value(leaf) to distinguish ancestor/ time
+ *                 cancellation from a valid interval cutoff already published on the leaf.
+ */
+static QuiescenceResult parallel_quiescence(Search            *search,
+                                            Node              *leaf,
+                                            XqPosition        *position,
+                                            unsigned           ply,
+                                            int                alpha,
+                                            int                beta,
+                                            SearchThreadStats *stats)
+{
+    ++stats->nodes;
+    if (quiescence_should_stop(search, leaf))
+        return (QuiescenceResult){0, true};
+
+    if (xq_position_in_check(position, xq_color_opponent(position->side_to_move)))
+        return (QuiescenceResult){WIN, false};
+
+    bool       in_check = xq_position_in_check(position, position->side_to_move);
+    XqMoveList moves;
+    if (in_check)
+        xq_generate_legal(position, &moves);
+    else
+        xq_generate_pseudo_legal(position, &moves);
+
+    if (quiescence_should_stop(search, leaf))
+        return (QuiescenceResult){0, true};
+    if (moves.count == 0)
+        return (QuiescenceResult){-WIN, false};
+
+    int best = -INFINITY_SCORE;
+    if (!in_check || ply >= PARALLEL_MAX_QUIESCENCE_DEPTH)
+    {
+        int stand_pat = search->evaluate(position, search->root_color, search->evaluate_user);
+        if (stand_pat > STATIC_LIMIT)
+            stand_pat = STATIC_LIMIT;
+        if (stand_pat < -STATIC_LIMIT)
+            stand_pat = -STATIC_LIMIT;
+        if (position->side_to_move != search->root_color)
+            stand_pat = -stand_pat;
+        if (quiescence_should_stop(search, leaf))
+            return (QuiescenceResult){0, true};
+        best = stand_pat;
+        if (ply >= PARALLEL_MAX_QUIESCENCE_DEPTH || best >= beta)
+            return (QuiescenceResult){best, false};
+        if (best > alpha)
+            alpha = best;
+    }
+
+    parallel_order_moves(position, &moves);
+
+    for (int i = 0; i < moves.count; ++i)
+    {
+        if (!in_check && moves.moves[i].captured == XQ_EMPTY_PIECE)
+            continue;
+        if (quiescence_should_stop(search, leaf))
+            return (QuiescenceResult){0, true};
+        if (!xq_position_make_move(position, moves.moves[i]))
+            continue;
+        QuiescenceResult child =
+            parallel_quiescence(search, leaf, position, ply + 1, -beta, -alpha, stats);
+        xq_position_unmake_move(position, moves.moves[i]);
+        if (child.stopped || quiescence_should_stop(search, leaf))
+            return (QuiescenceResult){0, true};
+
+        int score = -child.score;
+        if (score > best)
+            best = score;
+        if (best == WIN || best >= beta)
+            return (QuiescenceResult){best, false};
+        if (best > alpha)
+            alpha = best;
+    }
+
+    return (QuiescenceResult){best, false};
+}
+
 /**
  * @brief Publishes one child result and aggregates its interval without acquiring a lock.
  *
@@ -1801,9 +1967,10 @@ static SearchRange split_node(Search          *search,
  *
  * Creates a local `Node` with a copy of `position`, an initially unknown interval `[-WIN, WIN]`,
  * and a link to `parent`. A node is MAX when its side to move equals `search->root_color` and MIN
- * otherwise; all scores retain the root side's perspective without negation or window flipping.
- * Uses lock-free `check_node()` to refresh inherited bounds and publish completion or cancellation
- * at search checkpoints. Scheduling uses atomic worker states and retained semaphore notifications.
+ * otherwise; its intervals retain the root side's perspective. Quiescence converts to and from the
+ * side-to-move perspective at the depth-zero boundary. Uses lock-free `check_node()` to refresh
+ * inherited bounds and publish completion or cancellation at search checkpoints. Scheduling uses
+ * atomic worker states and retained semaphore notifications.
  *
  * The root uses the legal, history-filtered list prepared before the helper pool was created.
  * Descendants search pseudo-legal moves: if the previous mover's king is attacked, that move loses
@@ -1812,12 +1979,14 @@ static SearchRange split_node(Search          *search,
  * quiescence.
  *
  * Checks terminal positions before the depth limit. A missing king loses for its side. At depth
- * zero, tests pseudo-legal moves only until the first legal continuation is found, preserving mate
- * and stalemate detection without constructing a full legal list. A non-terminal leaf is evaluated
- * using `search->evaluate` and clamped to `[-STATIC_LIMIT, STATIC_LIMIT]`. At positive depth, a
- * node with no legal continuation loses because every pseudo-legal child loses (or its move list is
- * empty). Terminal scores are `-WIN` or `WIN` from the root perspective; accepted terminal and leaf
- * scores produce exact intervals `[score, score]`.
+ * zero, enters thread-local quiescence with the inherited window snapshot converted to the
+ * side-to-move perspective. Quiescence searches captures or all legal check evasions, using the
+ * built-in quiescence move-list rules. Static evaluations are clamped to `[-STATIC_LIMIT,
+ * STATIC_LIMIT]`. Its fail-soft result is converted back to the root perspective and classified
+ * against that snapshot before publishing an exact or bounded interval; later ancestor updates only
+ * tighten the window. At positive depth, a node with no legal continuation loses because every
+ * pseudo-legal child loses (or its move list is empty). Terminal scores are `-WIN` or `WIN` from
+ * the root perspective and produce exact intervals `[score, score]`.
  *
  * After terminal and depth-zero checks, an optional table supplies a hash move and may resolve a
  * non-root node with a sufficiently deep exact value or cutoff bound. Bounds remain intervals; the
@@ -1828,7 +1997,8 @@ static SearchRange split_node(Search          *search,
  * Continuing descendants apply stable capture ordering, then promote the cache move. The root keeps
  * its prepared or retained ordering. Both promote the matched previous-iteration PV move. Hints are
  * matched by `from`/`to` and only the matching child inherits their suffix. All ordering and hint
- * metadata is finalized before splitting. Leaf and cache-cutoff paths skip this sorting work.
+ * metadata is finalized before splitting. Quiescence uses only its own basic capture ordering;
+ * terminal and cache-cutoff paths skip this sorting work.
  *
  * For a continuing internal node, initializes all child intervals as unknown and calls
  * `split_node()` once to assign a batch using the configured strategy if a helper is available.
@@ -1857,7 +2027,7 @@ static SearchRange split_node(Search          *search,
  * @param position      Position to search; must not be null and must remain unchanged during the
  *                      call.
  * @param parent        Parent node, or `NULL` for the root.
- * @param depth         Remaining search depth; `0` evaluates a non-terminal leaf.
+ * @param depth         Remaining normal-search depth; `0` enters quiescence at a non-terminal leaf.
  * @param best_move     Optional root candidate output, valid when `iteration.move_available` is
  *                      `true`, even if the root was cancelled. Pass `NULL` for recursive child
  *                      searches.
@@ -1929,6 +2099,29 @@ static Interval search_node(Search            *search,
         score = node.maximizing ? WIN : -WIN;
         leaf  = true;
     }
+    else if (depth == 0)
+    {
+        /* Classify using this snapshot, not the window tightened by quiescence stop checks. */
+        int alpha = atomic_load_explicit(&node.alpha, memory_order_relaxed);
+        int beta  = atomic_load_explicit(&node.beta, memory_order_relaxed);
+        /* Ordinary nodes use root-side intervals; quiescence uses the side-to-move window. */
+        QuiescenceResult quiet =
+            parallel_quiescence(search, &node, &node.position, 0, node.maximizing ? alpha : -beta,
+                                node.maximizing ? beta : -alpha, stats);
+        if (quiet.stopped || quiescence_should_stop(search, &node))
+            return node_value(&node);
+
+        int      root_score = node.maximizing ? quiet.score : -quiet.score;
+        Interval value      = {root_score, root_score, false};
+        if (root_score <= alpha)
+            value.lower = -WIN;
+        else if (root_score >= beta)
+            value.upper = WIN;
+        atomic_store_explicit(&node.value.lower, value.lower, memory_order_relaxed);
+        atomic_store_explicit(&node.value.upper, value.upper, memory_order_relaxed);
+        (void)check_node(search, &node);
+        return node_value(&node);
+    }
     else
     {
         if (parent == NULL)
@@ -1939,29 +2132,6 @@ static Interval search_node(Search            *search,
         {
             score = node.maximizing ? -WIN : WIN;
             leaf  = true;
-        }
-        else if (depth == 0)
-        {
-            /*
-             * A non-empty pseudo-legal list can still be mate or stalemate. Only existence of a
-             * legal move matters here, so stop at the first one rather than filtering the list.
-             */
-            score = node.maximizing ? -WIN : WIN;
-            for (int i = 0; i < node.moves.count; ++i)
-            {
-                XqPosition next = *position;
-                if (xq_position_make_move(&next, node.moves.moves[i]) &&
-                    !xq_position_in_check(&next, position->side_to_move))
-                {
-                    score = search->evaluate(position, search->root_color, search->evaluate_user);
-                    if (score > STATIC_LIMIT)
-                        score = STATIC_LIMIT;
-                    if (score < -STATIC_LIMIT)
-                        score = -STATIC_LIMIT;
-                    break;
-                }
-            }
-            leaf = true;
         }
     }
 
@@ -2185,24 +2355,29 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * `CONTIGUOUS` assigns a tail batch by percentage; zero disables splitting, not helper creation.
  * `INTERLEAVED` assigns sorted indices `0,2,...` to the owner and `1,3,...` to its helper, ignoring
  * the percentage even when zero. Both strategies split only when a helper is idle and keep all
- * moves serial otherwise. The search is synchronous and has no quiescence search. Real-game history
- * removes root candidates that close a third identical cycle before any helper tasks are
- * dispatched. No search-tree history is kept. A nonzero time budget uses a monotonic deadline
- * shared across preparation and all iterations; an unfinished iteration above
- * `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
- * returning.
+ * moves serial otherwise. The search is synchronous; depth-zero leaves run thread-local quiescence
+ * for captures and legal check evasions, with at most 500 extension plies. Quiescence shares the
+ * time budget and ancestor cancellation, but neither splits tasks nor accesses the table or PV.
+ * Node counts include both normal and quiescence entries, including their shared leaf; reported
+ * depths exclude extensions. Real-game history removes root candidates that close a third identical
+ * cycle before any helper tasks are dispatched. No search-tree history is kept. A nonzero time
+ * budget uses a monotonic deadline shared across preparation and all iterations; an unfinished
+ * iteration above `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may
+ * finish before returning.
  *
  * Only the adapter's `static_evaluate`, `user` and `history` are used; its `score_move` and serial
  * table are ignored. The parallel table remains in `options`. A null adapter or static evaluator
- * selects `xq_engine_default_static_evaluate` with null user data. All scores use the root side's
- * perspective; ordinary leaf scores are clamped to `[-STATIC_LIMIT, STATIC_LIMIT]`, while terminal
- * wins and losses receive `WIN` and `-WIN`. Terminal positions are checked before the depth limit,
- * and having no legal moves is a loss even without check. On success, returns the last complete
- * iteration, a proven win, or completed first-iteration candidates. A partial first iteration
- * supplies a lower-bound score; with no completed candidates, returns a legal unsearched fallback
- * with `score_available == false`. An enabled table may reuse results from greater depths. Terminal
- * roots also succeed but have `move_available == false`; callers must check that flag before using
- * `best_move`. Equal-score move selection may depend on thread scheduling.
+ * selects `xq_engine_default_static_evaluate` with null user data. Ordinary node intervals and
+ * returned scores use the root side's perspective; quiescence uses side-to-move scores internally.
+ * Static scores are clamped to `[-STATIC_LIMIT, STATIC_LIMIT]`, while terminal wins and losses
+ * receive `WIN` and `-WIN`. Terminal positions are checked before the depth limit, and ordinary
+ * search treats no legal moves as a loss even without check. Quiescence checks only whether its
+ * generated list is empty, using pseudo-legal moves outside check. On success, returns the last
+ * complete iteration, a proven win, or completed first-iteration candidates. A partial first
+ * iteration supplies a lower-bound score; with no completed candidates, returns a legal unsearched
+ * fallback with `score_available == false`. An enabled table may reuse results from greater depths.
+ * Terminal roots also succeed but have `move_available == false`; callers must check that flag
+ * before using `best_move`. Equal-score move selection may depend on thread scheduling.
  *
  * Evaluators may be called concurrently; the callback and its user data must support this and must
  * not modify positions. Scheduling uses atomic states and semaphores, without explicit mutexes.
@@ -2248,9 +2423,10 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
  *
  * Uses the same search semantics as `xq_engine_parallel_search()`: copies `options` or selects the
  * defaults, creates a helper pool once, and searches depths 1 through the configured maximum. Stops
- * early for a terminal root, proven winning move, or time stop. There is no quiescence extension.
- * Root ordering, PV hints and an optional borrowed transposition table are retained across
- * iterations; cached results may come from greater search depths.
+ * early for a terminal root, proven winning move, or time stop. Depth-zero leaves run thread-local
+ * quiescence; extensions contribute to node counts but not reported depths or root progress. Root
+ * ordering, PV hints and an optional borrowed transposition table are retained across iterations;
+ * cached results may come from greater search depths.
  *
  * For each searched root iteration, the calling thread emits `STARTED` before dispatching work and
  * `FINISHED` after all root callbacks and helper work have completed. `FINISHED` may describe a
