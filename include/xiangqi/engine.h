@@ -69,7 +69,7 @@ typedef struct XqEngineAdapter
     void *user;
     XqMoveScoreFn score_move;
     XqTranspositionTable *transposition_table;
-    /* Optional real-game history, borrowed for built-in root search only.
+    /* Optional real-game history, borrowed for built-in and parallel root searches only.
      * NULL, empty or mismatched history disables cycle detection. */
     const XqHistory *history;
 } XqEngineAdapter;

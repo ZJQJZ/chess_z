@@ -55,12 +55,24 @@ typedef struct XqParallelResult
 XqParallelOptions xq_parallel_options_default(void);
 const char *xq_parallel_status_text(XqParallelStatus status);
 
-/* pos is never modified. NULL options selects defaults; NULL evaluate uses the
- * built-in evaluator. The evaluator and its user data must support concurrent
- * calls and must not modify positions. Cached evaluation must be deterministic for a position
- * and perspective. Changing the effective evaluator or user pointer clears the borrowed table;
- * changing root color also clears it for custom evaluators. Clear it explicitly after mutating
- * evaluation parameters behind the same user pointer. No adapter cache/history/search is used.
+/* pos is never modified. NULL options selects defaults. Only engine->static_evaluate, user and
+ * history are used; score_move and the built-in transposition_table are ignored. The parallel
+ * table remains in options. NULL engine or static_evaluate selects the built-in evaluator with
+ * NULL evaluator user data; NULL engine also disables history filtering. The evaluator and its
+ * user data must support concurrent calls and must not modify positions. Cached evaluation must
+ * be deterministic for a position and perspective. Changing the effective evaluator or user pointer
+ * clears the borrowed table; changing root color also clears it for custom evaluators. Clear it
+ * explicitly after mutating evaluation parameters behind the same user pointer. Keep the adapter,
+ * history, evaluator data and table alive until return; callers must not mutate the adapter,
+ * history, evaluator parameters or table while the search is running.
+ * Before iterative deepening, real-game history filters legal root moves that close the third of
+ * three consecutive identical even-length move sequences with four matching boundary position
+ * hashes, using the same rule as built-in search. NULL, empty or mismatched history disables this
+ * filtering. Search-tree repetitions are not checked and search moves are never appended to real
+ * history. Progress totals include only surviving root moves. When all candidates are filtered,
+ * return the original legal fallback without a score, at selected_move_depth == 0 and with no
+ * iteration events. A root result with any filtered candidates is never stored in the position-only
+ * table; history-independent descendant results remain cacheable.
  * Internal TT scores use the side-to-move perspective and may come from greater search depths;
  * the root probes only for move ordering in the first iteration. Searches depths 1..options.depth,
  * reusing the helper pool and previous root scores for ordering, even without a table. Stops early
@@ -81,7 +93,7 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * when zero. With fewer than two moves, no available helper or failed task-completion allocation,
  * the owner searches all moves serially. thread_count == 1 disables splitting for either strategy.
  * The budget covers preparation, pool creation and all iterations. At the first detected deadline,
- * an unfinished iteration with strictly more than half its root candidates completed may finish;
+ * an unfinished iteration with strictly more than 30% of its root candidates completed may finish;
  * otherwise running nodes are cancelled. No new iteration starts after the deadline. Clock failure
  * stops even an extended iteration. A cancelled iteration preserves the last complete result;
  * without one, select the best completed first-iteration candidate or a legal fallback. Timeout is
@@ -90,14 +102,13 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Results are initialized even on failure.
  * Equal-score choices may depend on scheduling. POSIX pthread implementation requiring
  * always-lock-free atomic int; Windows returns UNSUPPORTED. */
-XqParallelStatus xq_engine_parallel_search(const XqPosition *pos,
-    const XqParallelOptions *options, XqEvaluateFn evaluate, void *evaluate_user,
-    XqParallelResult *result);
+XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter *engine,
+    const XqPosition *pos, const XqParallelOptions *options, XqParallelResult *result);
 
 /* Same search with optional root progress (see XqSearchProgressFn concurrency contract).
- * Terminal roots and argument/resource failures emit no iteration events. */
-XqParallelStatus xq_engine_parallel_search_with_progress(const XqPosition *pos,
-    const XqParallelOptions *options, XqEvaluateFn evaluate, void *evaluate_user,
-    XqParallelResult *result, XqSearchProgressFn progress, void *progress_user);
+ * Terminal roots, fully filtered roots and argument/resource failures emit no iteration events. */
+XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter *engine,
+    const XqPosition *pos, const XqParallelOptions *options, XqParallelResult *result,
+    XqSearchProgressFn progress, void *progress_user);
 
 #endif

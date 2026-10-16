@@ -777,7 +777,7 @@ int main(int argc, char **argv)
                 XqParallelStatus status;
                 parallel_options.time_limit_ms = limits.time_limit_ms;
                 status = xq_engine_parallel_search_with_progress(
-                    &pos, &parallel_options, NULL, NULL, &result, on_progress, progress);
+                    &engine, &pos, &parallel_options, &result, on_progress, progress);
                 found = status == XQ_PARALLEL_OK && result.move_available;
                 best = result.best_move;
                 cli_search_progress_finish(progress,

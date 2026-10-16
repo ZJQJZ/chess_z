@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "xiangqi/parallel_search.h"
+#include "history_internal.h"
 #include "xiangqi/movegen.h"
 
 #include <assert.h>
@@ -1056,11 +1057,10 @@ typedef enum SearchTimeState
 /* Written by the root owner only after all helper submissions are visible. */
 typedef struct RootIteration
 {
-    bool   move_available;
-    bool   complete;
-    bool   winning;
-    XqMove best_move;
-    int    score;
+    bool move_available;
+    bool complete;
+    bool winning;
+    int  score;
 } RootIteration;
 
 typedef struct Worker
@@ -1092,6 +1092,7 @@ typedef struct Search
     XqEvaluateFn       evaluate;
     void              *evaluate_user;
     XqMoveList         root_moves;
+    bool               filtered_cycles; /* Actual root removals make its score history-dependent. */
     SearchThreadStats  stats;
     uint64_t           start_ms, deadline_ms;
     bool               start_available;
@@ -1179,6 +1180,67 @@ static bool search_check_time(Search *search)
 }
 
 /**
+ * @brief Prepares the root's ordered, history-filtered candidates and an unsearched fallback.
+ *
+ * Initializes the first cache generation and probes the root once for ordering before filtering.
+ * Survivors retain their order. If every candidate closes a losing cycle, keeps the original legal
+ * fallback, leaves its score unavailable and avoids starting a search. Otherwise the first survivor
+ * becomes the fallback, including when preparation has already exhausted the time budget.
+ *
+ * @param search   Initialized search with no dispatched tasks; receives the prepared root list.
+ * @param position Read-only root position.
+ * @param history  Optional real-game history; never modified.
+ * @param result   Initialized output receiving terminal scores or a legal fallback.
+ * @return         True if candidates remain and timing permits searching; false for a terminal
+ *                 root, an entirely filtered list or a time stop.
+ */
+static bool prepare_root_moves(Search           *search,
+                               const XqPosition *position,
+                               const XqHistory  *history,
+                               XqParallelResult *result)
+{
+    XqMoveList *moves = &search->root_moves;
+    if (xq_position_king_square(position, search->root_color) == XQ_NO_SQUARE ||
+        xq_position_king_square(position, xq_color_opponent(search->root_color)) == XQ_NO_SQUARE)
+    {
+        result->score =
+            xq_position_king_square(position, search->root_color) == XQ_NO_SQUARE ? -WIN : WIN;
+        result->score_available = true;
+        return false;
+    }
+    xq_generate_legal(position, moves);
+    if (moves->count == 0)
+    {
+        result->score           = -WIN;
+        result->score_available = true;
+        return false;
+    }
+    parallel_order_moves(position, moves);
+    parallel_tt_new_iteration(search->options.transposition_table, search->evaluate,
+                              search->evaluate_user, search->root_color);
+    if (search->options.transposition_table != NULL)
+    {
+        ParallelTtEntry cached;
+        bool            hit;
+        (void)parallel_tt_probe(search->options.transposition_table, xq_position_hash(position), 1,
+                                -INFINITY_SCORE, INFINITY_SCORE, true, &cached, &hit,
+                                &search->stats.cache);
+        if (hit)
+            (void)parallel_prioritize_move(moves, cached.best_move);
+    }
+    result->move_available              = true;
+    result->best_move                   = moves->moves[0];
+    search->filtered_cycles             = xq_history_filter_root_cycles(history, position, moves);
+    search->root_total                  = (unsigned)moves->count;
+    result->stats.iteration_total_moves = search->root_total;
+    if (moves->count > 0)
+        result->best_move = moves->moves[0];
+    (void)search_check_time(search);
+    return moves->count > 0 &&
+           atomic_load_explicit(&search->time_state, memory_order_relaxed) != TIME_STOP;
+}
+
+/**
  * @brief Copies a completed node's result after all of its helper work has exited.
  *
  * Completion alone does not freeze the bounds: an in-flight helper may still submit a valid child
@@ -1241,10 +1303,11 @@ static Interval parallel_tt_interval(const ParallelTtEntry *entry,
 /**
  * @brief Classifies a completed node's proven interval and attempts to cache its result.
  *
- * Skips cancelled results and disabled caching. In root perspective, equal endpoints produce an
- * exact score; otherwise upper <= alpha produces an upper-bound entry using value.upper, and lower
- * >= beta produces a lower-bound entry using value.lower. An interval satisfying neither cutoff
- * condition is not stored. Exact classification takes precedence over cutoffs.
+ * Skips cancelled results, disabled caching and history-filtered roots. In root perspective, equal
+ * endpoints produce an exact score; otherwise upper <= alpha produces an upper-bound entry using
+ * value.upper, and lower >= beta produces a lower-bound entry using value.lower. An interval
+ * satisfying neither cutoff condition is not stored. Exact classification takes precedence over
+ * cutoffs.
  *
  * Parallel search inherits a window that can tighten during execution, so classification uses the
  * proven interval rather than a scalar score compared with an original window. The stored score is
@@ -1275,7 +1338,8 @@ static void parallel_tt_store_node(Search               *search,
 {
     XqSearchScoreKind kind;
     int               score;
-    if (value.cancelled || search->options.transposition_table == NULL)
+    if (value.cancelled || search->options.transposition_table == NULL ||
+        (node->parent == NULL && search->filtered_cycles))
         return;
     if (value.lower == value.upper)
     {
@@ -1748,10 +1812,11 @@ static SearchRange split_node(Search          *search,
  * Uses lock-free `check_node()` to refresh inherited bounds and publish completion or cancellation
  * at search checkpoints. Scheduling uses atomic worker states and retained semaphore notifications.
  *
- * The root generates legal moves so even a forced loss returns a legal choice. Descendants search
- * pseudo-legal moves: if the previous mover's king is attacked, that move loses immediately,
- * including at depth zero and when both kings are attacked. This is checked before evaluation or
- * move generation, following the king-capture rule used by the built-in engine's quiescence.
+ * The root uses the legal, history-filtered list prepared before the helper pool was created.
+ * Descendants search pseudo-legal moves: if the previous mover's king is attacked, that move loses
+ * immediately, including at depth zero and when both kings are attacked. This is checked before
+ * evaluation or move generation, following the king-capture rule used by the built-in engine's
+ * quiescence.
  *
  * Checks terminal positions before the depth limit. A missing king loses for its side. At depth
  * zero, tests pseudo-legal moves only until the first legal continuation is found, preserving mate
@@ -1763,14 +1828,14 @@ static SearchRange split_node(Search          *search,
  *
  * After terminal and depth-zero checks, an optional table supplies a hash move and may resolve a
  * non-root node with a sufficiently deep exact value or cutoff bound. Bounds remain intervals; the
- * root uses only the move hint in its first iteration; later iterations reuse the previous root
- * ordering. Cached deeper results may change fixed-depth scores. Exact cache cutoffs reconstruct a
- * PV prefix from guarded snapshots; bound-only cutoffs return an empty PV.
+ * root already used its ordering-only lookup during preparation; subsequent iterations reuse the
+ * previous root ordering. Cached deeper results may change fixed-depth scores. Exact cache cutoffs
+ * reconstruct a PV prefix from guarded snapshots; bound-only cutoffs return an empty PV.
  *
- * Continuing nodes apply stable capture ordering (except a root reusing its prior ordering), then
- * promote the cache move and finally the matched previous-iteration PV move. Hints are matched by
- * from/to and only the matching child inherits their suffix. All ordering and hint metadata is
- * finalized before splitting. Leaf and cache-cutoff paths skip this sorting work.
+ * Continuing descendants apply stable capture ordering, then promote the cache move. The root keeps
+ * its prepared or retained ordering. Both promote the matched previous-iteration PV move. Hints are
+ * matched by from/to and only the matching child inherits their suffix. All ordering and hint
+ * metadata is finalized before splitting. Leaf and cache-cutoff paths skip this sorting work.
  *
  * For a continuing internal node, initializes all child intervals as unknown and calls
  * `split_node()` once to assign a batch using the configured strategy if a helper is available.
@@ -1783,11 +1848,12 @@ static SearchRange split_node(Search          *search,
  * A valid cutoff result retains the node's proven interval rather than substituting an ancestor
  * threshold. If ancestor completion causes cancellation before a normal completion is published,
  * returns an interval marked `cancelled`, which callers must exclude from score aggregation. The
- * root has no ancestor thresholds and returns a collapsed interval. For a searched root with a
- * selected child, retains root ordering and writes `best_move` if requested; the child's proven
- * lower bound witnesses the root score. Early returns leave that output unchanged. Builds pv_out
- * from the final best_index's batch only after helper synchronization. No PV is retained for a
- * cancelled result; all PVs are ordering hints and never replace proven score intervals.
+ * root has no ancestor thresholds. After helper synchronization, a root with a submitted child
+ * writes `best_move` if requested, including when cancelled; iteration metadata tells the driver
+ * whether to select it. With no submitted child, leaves that output unchanged. Completed roots
+ * return a collapsed interval and retain root ordering. Builds pv_out from the final best_index's
+ * batch only after helper synchronization. No PV is retained for a cancelled result; all PVs are
+ * ordering hints and never replace proven score intervals.
  *
  * No explicit scheduling mutex is used. Running operations are not interrupted asynchronously, so
  * ancestor changes are observed at later checkpoints. The input position is read-only, and its
@@ -1799,7 +1865,8 @@ static SearchRange split_node(Search          *search,
  *                      call.
  * @param parent        Parent node, or `NULL` for the root.
  * @param depth         Remaining search depth; `0` evaluates a non-terminal leaf.
- * @param best_move     Optional root move output; pass `NULL` for recursive child searches.
+ * @param best_move     Optional root candidate output, valid when iteration.move_available is true,
+ *                      even if the root was cancelled. Pass `NULL` for recursive child searches.
  * @param pv_hint       Read-only previous-iteration PV, or NULL for an unmatched path. Its storage
  *                      must outlive this call and all helpers and must not overlap pv_out.
  * @param pv_hint_count Number of available hint moves, in 0..PARALLEL_MAX_PV_MOVES.
@@ -1875,12 +1942,7 @@ static Interval search_node(Search            *search,
     else
     {
         if (parent == NULL)
-        {
-            if (search->root_moves.count > 0)
-                node.moves = search->root_moves;
-            else
-                xq_generate_legal(position, &node.moves);
-        }
+            node.moves = search->root_moves;
         else
             xq_generate_pseudo_legal(position, &node.moves);
         if (node.moves.count == 0)
@@ -1931,10 +1993,10 @@ static Interval search_node(Search            *search,
         int             alpha = atomic_load_explicit(&node.alpha, memory_order_relaxed);
         int             beta  = atomic_load_explicit(&node.beta, memory_order_relaxed);
         key                   = xq_position_hash(position);
-        if ((parent != NULL || search->root_moves.count == 0) &&
+        if (parent != NULL &&
             parallel_tt_probe(search->options.transposition_table, key, depth,
                               node.maximizing ? alpha : -beta, node.maximizing ? beta : -alpha,
-                              parent == NULL, &cached, &hit, &stats->cache))
+                              false, &cached, &hit, &stats->cache))
         {
             value = parallel_tt_interval(&cached, node.maximizing);
             /*
@@ -1957,7 +2019,7 @@ static Interval search_node(Search            *search,
             has_hash_move = true;
         }
     }
-    if (parent != NULL || search->root_moves.count == 0)
+    if (parent != NULL)
         parallel_order_moves(position, &node.moves);
     if (has_hash_move)
         (void)parallel_prioritize_move(&node.moves, hash_move);
@@ -2005,9 +2067,11 @@ static Interval search_node(Search            *search,
         if (best >= 0)
         {
             search->iteration.move_available = true;
-            search->iteration.best_move      = node.moves.moves[best];
             search->iteration.score          = node.children[best].lower;
             search->iteration.winning        = node.children[best].lower == WIN;
+            assert(node.children[best].lower == value.lower);
+            if (best_move != NULL)
+                *best_move = node.moves.moves[best];
         }
         /*
          * A last time check may cancel a root whose children already prove its complete value. Keep
@@ -2036,11 +2100,6 @@ static Interval search_node(Search            *search,
             parallel_build_pv(pv_out, node.moves.moves[best], &batch->child_pv);
             if (parent == NULL)
                 retain_root_order(search, &node, best);
-            if (best_move != NULL)
-            {
-                assert(node.children[best].lower == value.lower);
-                *best_move = node.moves.moves[best];
-            }
             parallel_tt_store_node(search, &node, key, value, node.moves.moves[best],
                                    &stats->cache);
         }
@@ -2131,20 +2190,23 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * by percentage; zero disables splitting, not helper creation. INTERLEAVED assigns sorted indices
  * 0,2,... to the owner and 1,3,... to its helper, ignoring the percentage even when zero. Both
  * strategies split only when a helper is idle and keep all moves serial otherwise. The search is
- * synchronous and has no quiescence search or engine-adapter history. A nonzero time budget uses a
- * monotonic deadline shared across preparation and all iterations; an unfinished iteration strictly
- * over half complete at the first deadline check may finish before returning.
+ * synchronous and has no quiescence search. Real-game history removes root candidates that close a
+ * third identical cycle before any helper tasks are dispatched. No search-tree history is kept. A
+ * nonzero time budget uses a monotonic deadline shared across preparation and all iterations; an
+ * unfinished iteration above PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT at the first deadline
+ * check may finish before returning.
  *
- * All scores use the root side-to-move's perspective. A null evaluator selects
- * `xq_engine_default_static_evaluate`; ordinary leaf scores are clamped to [-STATIC_LIMIT,
- * STATIC_LIMIT], while terminal wins and losses receive WIN and -WIN. Terminal positions are
- * checked before the depth limit, and having no legal moves is a loss even without check. On
- * success, returns the last complete iteration, a proven win, or completed first-iteration
- * candidates. A partial first iteration supplies a lower-bound score; with no completed candidates,
- * returns a legal unsearched fallback with score_available == false. An enabled table may reuse
- * results from greater depths. Terminal roots also succeed but have `move_available == false`;
- * callers must check that flag before using `best_move`. Equal-score move selection may depend on
- * thread scheduling.
+ * Only the adapter's static_evaluate, user and history are used; its score_move and serial table
+ * are ignored. The parallel table remains in options. A null adapter or static evaluator selects
+ * `xq_engine_default_static_evaluate` with null user data. All scores use the root side's
+ * perspective; ordinary leaf scores are clamped to [-STATIC_LIMIT, STATIC_LIMIT], while terminal
+ * wins and losses receive WIN and -WIN. Terminal positions are checked before the depth limit, and
+ * having no legal moves is a loss even without check. On success, returns the last complete
+ * iteration, a proven win, or completed first-iteration candidates. A partial first iteration
+ * supplies a lower-bound score; with no completed candidates, returns a legal unsearched fallback
+ * with score_available == false. An enabled table may reuse results from greater depths. Terminal
+ * roots also succeed but have `move_available == false`; callers must check that flag before using
+ * `best_move`. Equal-score move selection may depend on thread scheduling.
  *
  * Evaluators may be called concurrently; the callback and its user data must support this and must
  * not modify positions. Scheduling uses atomic states and semaphores, without explicit mutexes.
@@ -2157,17 +2219,17 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * reconstruction does not contribute to them. Per-call node/cache counters, depth progress and
  * monotonic elapsed time are returned in stats. Joins all created helpers and releases resources,
  * including after partial thread-creation failure. The input position is never modified, and no
- * helper remains running after the call.
+ * helper remains running after the call. A filtered root is not cached; descendants remain
+ * history-independent. Fully filtered roots return the original legal fallback with no score.
  *
+ * @param engine                        Optional adapter providing evaluation, user data and
+ *                                      real-game history; keep borrowed state unchanged until
+ *                                      return.
  * @param pos                           Root position; must not be null and must remain valid and
  *                                      unchanged during the call. Its side to move must be XQ_RED
  *                                      or XQ_BLACK.
  * @param options                       Optional search configuration, copied on entry; null selects
  *                                      defaults.
- * @param evaluate                      Optional static evaluator; null selects the built-in
- *                                      evaluator.
- * @param evaluate_user                 Opaque user data passed unchanged to the evaluator; must
- *                                      remain valid for the duration of any callback using it.
  * @param result                        Required output record, initialized even when the search
  *                                      fails.
  * @retval XQ_PARALLEL_OK               Search completed, including terminal root positions.
@@ -2177,14 +2239,12 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  *                                      creation failed on a supported platform.
  * @retval XQ_PARALLEL_UNSUPPORTED      Arguments are valid, but the build targets Windows.
  */
-XqParallelStatus xq_engine_parallel_search(const XqPosition        *pos,
+XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
+                                           const XqPosition        *pos,
                                            const XqParallelOptions *options,
-                                           XqEvaluateFn             evaluate,
-                                           void                    *evaluate_user,
                                            XqParallelResult        *result)
 {
-    return xq_engine_parallel_search_with_progress(pos, options, evaluate, evaluate_user, result,
-                                                   NULL, NULL);
+    return xq_engine_parallel_search_with_progress(engine, pos, options, result, NULL, NULL);
 }
 
 /**
@@ -2199,8 +2259,8 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition        *pos,
  * For each searched root iteration, the calling thread emits STARTED before dispatching work and
  * FINISHED after all root callbacks and helper work have completed. FINISHED may describe a partial
  * iteration when timing or a winning move permits an early exit. ROOT_MOVE_COMPLETED events report
- * valid submitted child results; cancelled children are excluded. Terminal roots and argument,
- * platform or initial resource failures emit no iteration events.
+ * valid submitted child results; cancelled children are excluded. Terminal or fully filtered roots
+ * and argument, platform or initial resource failures emit no iteration events.
  *
  * Root-move callbacks execute synchronously on the thread submitting the result, which may be a
  * helper. They can overlap and arrive out of count order; observers must synchronize shared state
@@ -2215,6 +2275,10 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition        *pos,
  * retains ownership of evaluator data, observer data and the optional table; the table must not be
  * accessed externally until this call returns.
  *
+ * @param engine                        Optional adapter providing static_evaluate, user and
+ *                                      history. The evaluator must support concurrent calls and
+ *                                      deterministic cached scores. Keep borrowed data unchanged
+ *                                      until return.
  * @param pos                           Required root position, valid and unchanged throughout the
  *                                      call; its side to move must be XQ_RED or XQ_BLACK.
  * @param options                       Optional configuration copied on entry; null selects
@@ -2222,13 +2286,6 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition        *pos,
  *                                      split_percent must be in 0..100 even for INTERLEAVED, which
  *                                      ignores it. split_strategy must be CONTIGUOUS or
  *                                      INTERLEAVED.
- * @param evaluate                      Optional static evaluator; null selects the built-in
- *                                      evaluator. Must support concurrent calls and must not modify
- *                                      positions. Cached evaluations must be deterministic for a
- *                                      given position and perspective.
- * @param evaluate_user                 Borrowed data passed unchanged to evaluate; may be null.
- *                                      Referenced data must remain valid and support concurrent
- *                                      evaluator access until return.
  * @param result                        Required output record; initialized even when the search
  *                                      fails. Terminal roots return success with move_available set
  *                                      to false.
@@ -2246,10 +2303,9 @@ XqParallelStatus xq_engine_parallel_search(const XqPosition        *pos,
  *                                      thread creation failed on a supported platform.
  * @retval XQ_PARALLEL_UNSUPPORTED      Arguments are valid, but the build targets Windows.
  */
-XqParallelStatus xq_engine_parallel_search_with_progress(const XqPosition        *pos,
+XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter   *engine,
+                                                         const XqPosition        *pos,
                                                          const XqParallelOptions *options,
-                                                         XqEvaluateFn             evaluate,
-                                                         void                    *evaluate_user,
                                                          XqParallelResult        *result,
                                                          XqSearchProgressFn       progress,
                                                          void                    *progress_user)
@@ -2264,8 +2320,7 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqPosition       
         (pos->side_to_move != XQ_RED && pos->side_to_move != XQ_BLACK))
         return XQ_PARALLEL_INVALID_ARGUMENT;
 #ifdef _WIN32
-    (void)evaluate;
-    (void)evaluate_user;
+    (void)engine;
     (void)progress;
     (void)progress_user;
     return XQ_PARALLEL_UNSUPPORTED;
@@ -2274,20 +2329,22 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqPosition       
         Search           search      = {0};
         ParallelPv       previous_pv = {0};
         XqParallelStatus status      = XQ_PARALLEL_OK;
-        XqMoveList       legal;
         uint64_t         end_ms;
         unsigned         i, current_depth;
         atomic_init(&search.shutdown, 0);
         atomic_init(&search.time_state, TIME_ACTIVE);
         atomic_init(&search.root_completed, 0);
         atomic_init(&search.root_started, 0);
-        search.options          = effective;
-        search.progress         = progress;
-        search.progress_user    = progress_user;
-        search.root_color       = pos->side_to_move;
-        search.evaluate         = evaluate != NULL ? evaluate : xq_engine_default_static_evaluate;
-        search.evaluate_user    = evaluate_user;
-        result->stats.available = true;
+        search.options       = effective;
+        search.progress      = progress;
+        search.progress_user = progress_user;
+        search.root_color    = pos->side_to_move;
+        search.evaluate      = engine != NULL && engine->static_evaluate != NULL
+                                   ? engine->static_evaluate
+                                   : xq_engine_default_static_evaluate;
+        search.evaluate_user =
+            engine != NULL && engine->static_evaluate != NULL ? engine->user : NULL;
+        result->stats.available       = true;
         result->stats.cache_available = effective.transposition_table != NULL;
         search.start_available        = parallel_clock_ms(&search.start_ms);
         if (effective.time_limit_ms != 0)
@@ -2299,30 +2356,7 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqPosition       
                                          ? UINT64_MAX
                                          : search.start_ms + effective.time_limit_ms;
         }
-        /*
-         * Prepare a legal fallback without populating root_moves: iteration one must still perform
-         * its original capture ordering and ordering-only cache probe.
-         */
-        if (xq_position_king_square(pos, search.root_color) == XQ_NO_SQUARE ||
-            xq_position_king_square(pos, xq_color_opponent(search.root_color)) == XQ_NO_SQUARE)
-        {
-            result->score =
-                xq_position_king_square(pos, search.root_color) == XQ_NO_SQUARE ? -WIN : WIN;
-            result->score_available = true;
-            goto finished;
-        }
-        xq_generate_legal(pos, &legal);
-        search.root_total                   = (unsigned)legal.count;
-        result->stats.iteration_total_moves = search.root_total;
-        if (legal.count == 0)
-        {
-            result->score           = -WIN;
-            result->score_available = true;
-            goto finished;
-        }
-        result->move_available = true;
-        result->best_move      = legal.moves[0];
-        if (search_check_time(&search))
+        if (!prepare_root_moves(&search, pos, engine != NULL ? engine->history : NULL, result))
             goto finished;
         if (effective.thread_count > 1)
         {
@@ -2369,8 +2403,9 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqPosition       
             (void)search_check_time(&search);
             if (atomic_load_explicit(&search.time_state, memory_order_relaxed) != TIME_ACTIVE)
                 break;
-            parallel_tt_new_iteration(effective.transposition_table, search.evaluate,
-                                      search.evaluate_user, search.root_color);
+            if (current_depth > 1)
+                parallel_tt_new_iteration(effective.transposition_table, search.evaluate,
+                                          search.evaluate_user, search.root_color);
             (void)search_node(&search, pos, NULL, current_depth, &best, previous_pv.moves,
                               previous_pv.count, &current_pv, &search.stats);
             (void)search_check_time(&search);
@@ -2385,7 +2420,7 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqPosition       
             if (search.iteration.move_available &&
                 (search.iteration.complete || search.iteration.winning || current_depth == 1))
             {
-                result->best_move       = search.iteration.best_move;
+                result->best_move       = best;
                 result->score           = search.iteration.score;
                 result->score_available = true;
                 result->score_kind      = search.iteration.complete || search.iteration.winning

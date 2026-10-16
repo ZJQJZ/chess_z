@@ -1,4 +1,4 @@
-#include "xiangqi/history.h"
+#include "history_internal.h"
 
 #include <stdlib.h>
 
@@ -137,4 +137,202 @@ void xq_history_destroy(XqHistory *history)
 {
     free(history->entries);
     *history = (XqHistory){0};
+}
+
+/**
+ * @brief Tests whether two recorded moves have the same source and destination squares.
+ *
+ * Piece and captured-piece fields do not participate in cycle-path comparison.
+ *
+ * @param a First move to compare.
+ * @param b Second move to compare.
+ * @return  `true` if both moves have identical source and destination squares; `false` otherwise.
+ */
+static bool moves_equal(XqMove a,
+                        XqMove b)
+{
+    return a.from == b.from && a.to == b.to;
+}
+
+/**
+ * @brief Computes the rolling hash of the move sequence between two recorded positions.
+ *
+ * Entry `0` is the initial position; entry `i >= 1` records the move reaching position `i`. Each
+ * move is represented by a numeric token:
+ *
+ *     t[i] = entries[i].move.from * XQ_SQUARES + entries[i].move.to + 1
+ *
+ * Square indices are in `[0, XQ_SQUARES)`, so this uniquely encodes the source/destination pair.
+ * Adding `1` makes every token nonzero. Piece and captured-piece fields are not encoded.
+ *
+ * `xq_history_push()` precomputes the prefix hash `H[i]` in `entries[i].prefix`, using the fixed
+ * base `B = HISTORY_HASH_BASE`:
+ *
+ *     H[0] = 0
+ *     H[i] = H[i - 1] * B + t[i]
+ *
+ * Multiplying by `B` increases every earlier token's exponent by one before appending `t[i]`.
+ *
+ * Position indices are interval boundaries: this function selects moves `begin + 1` through `end`.
+ * Let `L = end - begin`. For a nonempty interval, the prefix through `end` can be split as:
+ *
+ *     H[end] = H[begin] * B^L
+ *            + t[begin + 1] * B^(L - 1) + ... + t[end]
+ *
+ * The first term is the contribution of all moves before the selected interval, with their
+ * exponents increased by `L` to match their weights in `H[end]`. Subtracting that term cancels
+ * those earlier moves and leaves only the selected tokens, weighted from `B^(L - 1)` down to `1`.
+ * Thus the returned hash is:
+ *
+ *     H[end] - H[begin] * B^L = t[begin + 1] * B^(L - 1) + ... + t[end]
+ *
+ * For example, `begin=2`, `end=5` yields `t[3] * B^2 + t[4] * B + t[5]`.
+ *
+ * `entries[L].power` supplies the precomputed `B^L`, so extraction takes constant time without
+ * traversing moves. All hash and power arithmetic intentionally wraps modulo `2^64`. When `L=0`,
+ * `entries[0].power` is `1`, so the subtraction returns `0` for the empty path.
+ *
+ * Equal-length paths with identical source/destination sequences have equal hashes regardless of
+ * their offsets in history. Hash equality alone does not prove path equality; callers must compare
+ * the actual moves to exclude hash collisions and check position hashes separately for a cycle.
+ *
+ * @param history Recorded game history; must not be `NULL` and is left unchanged.
+ * @param begin   Starting position index; must satisfy `begin <= end`.
+ * @param end     Ending position index; must be less than `history->count`.
+ * @return        Hash of the selected move sequence, or `0` for an empty path (`begin == end`).
+ */
+static uint64_t history_path_hash(const XqHistory *history,
+                                  size_t           begin,
+                                  size_t           end)
+{
+    return history->entries[end].prefix -
+           history->entries[begin].prefix * history->entries[end - begin].power;
+}
+
+/**
+ * @brief Determines whether completing a detected threefold cycle makes the moving side lose.
+ *
+ * The caller has already verified that appending `candidate` would complete three consecutive,
+ * identical move sequences whose four boundary positions have matching hashes. This function
+ * applies the loss rule only; it does not detect cycles or play the `candidate` move.
+ *
+ * The current rule always returns `true`, making the side to move in `root` lose for closing the
+ * third cycle. Keeping this decision separate allows future rules to inspect the cycle, for example
+ * to require that every move by the closing side gives check before declaring a loss.
+ *
+ * `history` contains only real moves, and `root` is the position before `candidate`. The third
+ * cycle's final move is supplied separately as `candidate` and is not yet present in `history`. A
+ * future rule can use a copy of `root` and the recorded moves to reconstruct and inspect the cycle
+ * positions.
+ *
+ * @param history   Real-game history ending at `root`; must not be `NULL` and is left unchanged.
+ * @param start     Position index at the beginning of the first of the three cycles.
+ * @param length    Number of individual moves in one cycle; a positive even number satisfying
+ *                  `start + 3 * length == history->count`.
+ * @param root      Position before `candidate` is played; must not be `NULL` and is left unchanged.
+ * @param candidate Legal root move that would close the third identical cycle.
+ * @return          `true` if the side playing `candidate` loses under the cycle rule. The current
+ *                  implementation always returns `true`; future rules may return `false` to allow
+ *                  it.
+ */
+static bool root_cycle_is_loss(const XqHistory  *history,
+                               size_t            start,
+                               size_t            length,
+                               const XqPosition *root,
+                               XqMove            candidate)
+{
+    (void)history;
+    (void)start;
+    (void)length;
+    (void)root;
+    (void)candidate;
+    return true;
+}
+
+/**
+ * @brief Removes legal root moves that would complete a cycle penalized as a loss.
+ *
+ * Called once before iterative deepening, this function examines only real-game history plus a
+ * candidate root move. It does not detect repetitions inside recursive search.
+ * `NULL`, empty, or mismatched history leaves the move list unchanged; matching requires the last
+ * recorded position hash to equal the current position hash.
+ *
+ * The virtual position index after the candidate is `end = history->count`. For each possible even
+ * cycle length, the first cycle starts at `end - 3 * length`. Only even lengths can return to the
+ * same side to move. The first three boundary positions must have equal hashes, and prefix hashes
+ * must match for the first two complete paths and for the third path without its final move. That
+ * missing move must match the last move of the first path in the supplied legal move list.
+ *
+ * Hash matches are checked move by move using source and destination squares. The candidate is then
+ * played on a position copy to verify the fourth boundary position hash.
+ * `root_cycle_is_loss()` decides whether the verified cycle penalizes the moving side, keeping rule
+ * changes separate from cycle detection. Candidates are never appended to real history.
+ *
+ * Prefix-hash screening takes `O(history->count)` time; matching paths additionally require move
+ * lookup and exact comparison. Rejected moves are removed in place while preserving the relative
+ * order of surviving moves. The list may become empty; choosing a fallback is the caller's job.
+ *
+ * @param history Optional real-game history ending at `pos`; may be `NULL` and is left unchanged.
+ * @param pos     Root position; must not be `NULL` and is left unchanged.
+ * @param list    Legal root moves to filter in place; must not be `NULL`. Both `moves` and `count`
+ *                are updated when candidates are rejected.
+ * @return        `true` if at least one move was removed; `false` if no move was removed, including
+ *                when history is absent, empty, or does not match the root position.
+ */
+bool xq_history_filter_root_cycles(const XqHistory  *history,
+                                   const XqPosition *pos,
+                                   XqMoveList       *list)
+{
+    int original_count = list->count;
+
+    if (history == NULL || history->count == 0 ||
+        history->entries[history->count - 1].key != xq_position_hash(pos))
+        return false;
+
+    size_t end                    = history->count;
+    bool   rejected[XQ_MAX_MOVES] = {false};
+    for (size_t length = 2; length <= end / 3; length += 2)
+    {
+        size_t   start  = end - 3 * length;
+        size_t   second = start + length;
+        size_t   third  = second + length;
+        uint64_t key    = history->entries[start].key;
+
+        if (history->entries[second].key != key || history->entries[third].key != key ||
+            history_path_hash(history, start, second) !=
+                history_path_hash(history, second, third) ||
+            history_path_hash(history, start, second - 1) !=
+                history_path_hash(history, third, end - 1))
+            continue;
+
+        /* The missing move must equal the last move of the first period. */
+        int i = 0;
+        for (; i < list->count; ++i)
+            if (!rejected[i] && moves_equal(list->moves[i], history->entries[second].move))
+                break;
+        if (i == list->count)
+            continue;
+
+        size_t j = 1;
+        for (; j <= length; ++j)
+            if (!moves_equal(history->entries[start + j].move, history->entries[second + j].move) ||
+                (j < length &&
+                 !moves_equal(history->entries[start + j].move, history->entries[third + j].move)))
+                break;
+        if (j <= length)
+            continue;
+
+        XqPosition next = *pos;
+        xq_position_make_move(&next, list->moves[i]);
+        bool closed = xq_position_hash(&next) == key;
+        if (closed && root_cycle_is_loss(history, start, length, pos, list->moves[i]))
+            rejected[i] = true;
+    }
+
+    int count = 0;
+    for (int i = 0; i < list->count; ++i)
+        if (!rejected[i])
+            list->moves[count++] = list->moves[i];
+    list->count = count;
+    return count != original_count;
 }
