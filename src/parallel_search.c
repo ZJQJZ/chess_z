@@ -522,20 +522,17 @@ static bool parallel_tt_snapshot(XqParallelTranspositionTable *table,
     if (!parallel_tt_try_acquire(bucket))
         return false;
     bool hit = false;
-    /* Ordinary entry fields may be accessed only while this bucket is exclusively owned. */
     for (int i = 0; i < PARALLEL_TT_BUCKET_SIZE; ++i)
     {
         ParallelTtEntry *entry = &bucket->entries[i];
         if (entry->depth != 0 && entry->key == key)
         {
-            /* Refresh before copying so the snapshot reflects this iteration's `generation`. */
             entry->generation = table->generation;
             *snapshot         = *entry;
             hit               = true;
             break;
         }
     }
-    /* A miss must release the bucket too; callers receive a copy, never a borrowed entry. */
     atomic_store_explicit(&bucket->occupied, 0, memory_order_release);
     return hit;
 }
@@ -788,18 +785,15 @@ static void parallel_order_moves(const XqPosition *position,
     int scores[XQ_MAX_MOVES];
     for (int i = 0; i < list->count; ++i)
     {
-        /* The unprocessed suffix is untouched; score this original candidate exactly once. */
         XqMove move  = list->moves[i];
         int    score = xq_engine_default_move_order_score(position, move, NULL);
         int    j     = i;
-        /* Move each score together with its candidate; strict comparison preserves ties. */
         while (j > 0 && scores[j - 1] < score)
         {
             list->moves[j] = list->moves[j - 1];
             scores[j]      = scores[j - 1];
             --j;
         }
-        /* Close the gap with the saved candidate, extending the sorted prefix by one. */
         list->moves[j] = move;
         scores[j]      = score;
     }
@@ -852,12 +846,10 @@ static void parallel_build_pv(ParallelPv       *pv,
                               const ParallelPv *child)
 {
     int count = child->count;
-    /* Leave one slot for the current move, preserving the beginning of the child's line. */
     if (count > PARALLEL_MAX_PV_MOVES - 1)
         count = PARALLEL_MAX_PV_MOVES - 1;
     pv->moves[0] = move;
     memcpy(pv->moves + 1, child->moves, (size_t)count * sizeof(*pv->moves));
-    /* Only this prefix is valid; trailing slots need not be cleared. */
     pv->count = count + 1;
 }
 
@@ -909,7 +901,7 @@ static void parallel_pv_from_tt(XqParallelTranspositionTable *table,
 {
     XqPosition      current = *position;
     ParallelTtEntry cached  = *first;
-    /* Discard any old line, including when the requested depth is zero. */
+
     pv->count = 0;
     while (depth > 0 && pv->count < PARALLEL_MAX_PV_MOVES)
     {
@@ -917,7 +909,6 @@ static void parallel_pv_from_tt(XqParallelTranspositionTable *table,
             xq_position_king_square(&current, XQ_BLACK) == XQ_NO_SQUARE ||
             cached.score_kind != XQ_SEARCH_SCORE_EXACT || cached.depth < depth)
             break;
-        /* Use the current position's move metadata; the cached move supplies only `from`/`to`. */
         XqMoveList moves;
         xq_generate_pseudo_legal(&current, &moves);
         int i = 0;
@@ -927,7 +918,6 @@ static void parallel_pv_from_tt(XqParallelTranspositionTable *table,
                 break;
         if (i == moves.count)
             break;
-        /* Validate before extending the prefix so an invalid hint is never appended. */
         XqPosition next = current;
         if (!xq_position_make_move(&next, moves.moves[i]) ||
             xq_position_in_check(&next, current.side_to_move))
@@ -935,7 +925,6 @@ static void parallel_pv_from_tt(XqParallelTranspositionTable *table,
         pv->moves[pv->count++] = moves.moves[i];
         current                = next;
         --depth;
-        /* Short-circuit at either limit without probing an unnecessary continuation. */
         if (depth == 0 || pv->count == PARALLEL_MAX_PV_MOVES ||
             !parallel_tt_snapshot(table, xq_position_hash(&current), &cached))
             break;
@@ -1007,23 +996,21 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2,
  */
 typedef struct Node
 {
-    struct Node  *parent;
-    XqPosition    position;
-    XqMoveList    moves;
-    unsigned      depth;
-    bool          maximizing;
-    const XqMove *pv_hint;
-    int pv_hint_count; /* Nonzero only when the hint's first move matched and was moved to index
-                        * `0`.
-                        */
+    struct Node   *parent;
+    XqPosition     position;
+    XqMoveList     moves;
+    unsigned       depth;
+    bool           maximizing;
+    const XqMove  *pv_hint;
+    int            pv_hint_count;
     BatchPv        owner_pv, helper_pv;
     AtomicInterval value;
     Interval       children[XQ_MAX_MOVES];
     atomic_int     submitted_count;
-    atomic_int submitted_bound; /* MAX: maximum submitted upper bound; MIN: minimum lower bound. */
-    atomic_int best_index;
-    atomic_int alpha, beta;
-    atomic_int state;
+    atomic_int     submitted_bound;
+    atomic_int     best_index;
+    atomic_int     alpha, beta;
+    atomic_int     state;
 } Node;
 
 typedef enum WorkerState
@@ -1064,14 +1051,10 @@ typedef struct RootIteration
 
 typedef struct Worker
 {
-    struct Search  *search;
-    pthread_t       thread;
-    atomic_int      state;
-    SearchSemaphore task_available;
-    /*
-     * Written by the reserving owner, published through `READY`, cleared by the worker before
-     * `IDLE`. Completion belongs to the task and may outlive the worker's next assignment.
-     */
+    struct Search    *search;
+    pthread_t         thread;
+    atomic_int        state;
+    SearchSemaphore   task_available;
     TaskCompletion   *completion;
     Node             *node;
     SearchRange       range;
@@ -1091,14 +1074,14 @@ typedef struct Search
     XqEvaluateFn       evaluate;
     void              *evaluate_user;
     XqMoveList         root_moves;
-    bool               filtered_cycles; /* Actual root removals make its score history-dependent. */
+    bool               filtered_cycles;
     SearchThreadStats  stats;
     uint64_t           start_ms, deadline_ms;
     bool               start_available;
     atomic_int         time_state;
     atomic_int         root_completed;
     atomic_int         root_started;
-    unsigned           root_total; /* Immutable once the pool can receive work. */
+    unsigned           root_total;
     RootIteration      iteration;
 } Search;
 
