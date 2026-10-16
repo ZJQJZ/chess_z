@@ -297,7 +297,6 @@ struct XqParallelTranspositionTable
 XqParallelTranspositionTable *xq_parallel_transposition_table_create(void)
 {
     XqParallelTranspositionTable *table = calloc(1, sizeof(*table));
-    unsigned                      i;
     if (table == NULL)
         return NULL;
     table->buckets = calloc(PARALLEL_TT_BUCKET_COUNT, sizeof(*table->buckets));
@@ -306,7 +305,7 @@ XqParallelTranspositionTable *xq_parallel_transposition_table_create(void)
         free(table);
         return NULL;
     }
-    for (i = 0; i < PARALLEL_TT_BUCKET_COUNT; ++i)
+    for (unsigned i = 0; i < PARALLEL_TT_BUCKET_COUNT; ++i)
         atomic_init(&table->buckets[i].occupied, 0);
     return table;
 }
@@ -329,10 +328,9 @@ XqParallelTranspositionTable *xq_parallel_transposition_table_create(void)
  */
 void xq_parallel_transposition_table_clear(XqParallelTranspositionTable *table)
 {
-    unsigned i;
     if (table == NULL)
         return;
-    for (i = 0; i < PARALLEL_TT_BUCKET_COUNT; ++i)
+    for (unsigned i = 0; i < PARALLEL_TT_BUCKET_COUNT; ++i)
         memset(table->buckets[i].entries, 0, sizeof(table->buckets[i].entries));
     table->generation    = 0;
     table->has_context   = false;
@@ -516,16 +514,14 @@ static bool parallel_tt_snapshot(XqParallelTranspositionTable *table,
                                  uint64_t                      key,
                                  ParallelTtEntry              *snapshot)
 {
-    ParallelTtBucket *bucket;
-    bool              hit = false;
-    int               i;
     if (table == NULL)
         return false;
-    bucket = &table->buckets[key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
+    ParallelTtBucket *bucket = &table->buckets[key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
     if (!parallel_tt_try_acquire(bucket))
         return false;
+    bool hit = false;
     /* Ordinary entry fields may be accessed only while this bucket is exclusively owned. */
-    for (i = 0; i < PARALLEL_TT_BUCKET_SIZE; ++i)
+    for (int i = 0; i < PARALLEL_TT_BUCKET_SIZE; ++i)
     {
         ParallelTtEntry *entry = &bucket->entries[i];
         if (entry->depth != 0 && entry->key == key)
@@ -669,32 +665,31 @@ static void parallel_tt_store(XqParallelTranspositionTable *table,
                               XqMove                        best_move,
                               XqTranspositionStats         *stats)
 {
-    ParallelTtBucket *bucket;
-    ParallelTtEntry   incoming;
-    ParallelTtEntry  *target        = NULL;
-    int               weakest_score = INT_MAX, incoming_score, i;
     if (table == NULL || depth == 0)
         return;
-    incoming.key        = key;
-    incoming.score      = score;
-    incoming.best_move  = best_move;
-    incoming.depth      = depth > UINT16_MAX ? UINT16_MAX : (uint16_t)depth;
-    incoming.generation = table->generation;
-    incoming.score_kind = (uint8_t)kind;
-    incoming_score      = parallel_tt_retention_score(&incoming, table->generation);
-    bucket              = &table->buckets[key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
+    ParallelTtEntry incoming = {
+        .key        = key,
+        .score      = score,
+        .best_move  = best_move,
+        .depth      = depth > UINT16_MAX ? UINT16_MAX : (uint16_t)depth,
+        .generation = table->generation,
+        .score_kind = (uint8_t)kind,
+    };
+    int               incoming_score = parallel_tt_retention_score(&incoming, table->generation);
+    ParallelTtBucket *bucket         = &table->buckets[key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
     if (!parallel_tt_try_acquire(bucket))
         return;
-    for (i = 0; i < PARALLEL_TT_BUCKET_SIZE; ++i)
+    ParallelTtEntry *target        = NULL;
+    int              weakest_score = INT_MAX;
+    for (int i = 0; i < PARALLEL_TT_BUCKET_SIZE; ++i)
     {
         ParallelTtEntry *entry = &bucket->entries[i];
-        int              retention;
         if (entry->depth == 0)
         {
             target = entry;
             break;
         }
-        retention = parallel_tt_retention_score(entry, table->generation);
+        int retention = parallel_tt_retention_score(entry, table->generation);
         if (entry->key == key)
         {
             entry->generation = table->generation;
@@ -743,8 +738,7 @@ release:
 static bool parallel_prioritize_move(XqMoveList *list,
                                      XqMove      move)
 {
-    int i;
-    for (i = 0; i < list->count; ++i)
+    for (int i = 0; i < list->count; ++i)
         if (list->moves[i].from == move.from && list->moves[i].to == move.to)
         {
             XqMove prioritized = list->moves[i];
@@ -789,8 +783,7 @@ static void parallel_order_moves(const XqPosition *position,
                                  XqMoveList       *list)
 {
     int scores[XQ_MAX_MOVES];
-    int i;
-    for (i = 0; i < list->count; ++i)
+    for (int i = 0; i < list->count; ++i)
     {
         /* The unprocessed suffix is untouched; score this original candidate exactly once. */
         XqMove move  = list->moves[i];
@@ -917,23 +910,22 @@ static void parallel_pv_from_tt(XqParallelTranspositionTable *table,
     pv->count = 0;
     while (depth > 0 && pv->count < PARALLEL_MAX_PV_MOVES)
     {
-        XqMoveList moves;
-        XqPosition next;
-        int        i;
         if (xq_position_king_square(&current, XQ_RED) == XQ_NO_SQUARE ||
             xq_position_king_square(&current, XQ_BLACK) == XQ_NO_SQUARE ||
             cached.score_kind != XQ_SEARCH_SCORE_EXACT || cached.depth < depth)
             break;
         /* Use the current position's move metadata; the cached move supplies only `from`/`to`. */
+        XqMoveList moves;
         xq_generate_pseudo_legal(&current, &moves);
-        for (i = 0; i < moves.count; ++i)
+        int i = 0;
+        for (; i < moves.count; ++i)
             if (moves.moves[i].from == cached.best_move.from &&
                 moves.moves[i].to == cached.best_move.to)
                 break;
         if (i == moves.count)
             break;
         /* Validate before extending the prefix so an invalid hint is never appended. */
-        next = current;
+        XqPosition next = current;
         if (!xq_position_make_move(&next, moves.moves[i]) ||
             xq_position_in_check(&next, current.side_to_move))
             break;
@@ -1159,25 +1151,24 @@ static bool parallel_clock_ms(uint64_t *value)
  */
 static bool search_check_time(Search *search)
 {
-    uint64_t now;
-    int      state, expected, desired, completed;
     if (search->options.time_limit_ms == 0)
         return false;
-    state = atomic_load_explicit(&search->time_state, memory_order_relaxed);
+    int state = atomic_load_explicit(&search->time_state, memory_order_relaxed);
     if (state == TIME_STOP)
         return true;
+    uint64_t now;
     if (!parallel_clock_ms(&now) || now < search->start_ms)
         atomic_store_explicit(&search->time_state, TIME_STOP, memory_order_relaxed);
     else if (state == TIME_ACTIVE && now >= search->deadline_ms)
     {
-        completed = atomic_load_explicit(&search->root_completed, memory_order_relaxed);
-        desired =
+        int completed = atomic_load_explicit(&search->root_completed, memory_order_relaxed);
+        int desired =
             completed > 0 && (unsigned)completed < search->root_total &&
                     (uint64_t)completed * 100 >
                         (uint64_t)search->root_total * PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT
                 ? TIME_FINISH_ITERATION
                 : TIME_STOP;
-        expected = TIME_ACTIVE;
+        int expected = TIME_ACTIVE;
         (void)atomic_compare_exchange_strong_explicit(&search->time_state, &expected, desired,
                                                       memory_order_relaxed, memory_order_relaxed);
     }
@@ -1204,7 +1195,6 @@ static bool prepare_root_moves(Search           *search,
                                const XqHistory  *history,
                                XqParallelResult *result)
 {
-    XqMoveList *moves = &search->root_moves;
     if (xq_position_king_square(position, search->root_color) == XQ_NO_SQUARE ||
         xq_position_king_square(position, xq_color_opponent(search->root_color)) == XQ_NO_SQUARE)
     {
@@ -1213,6 +1203,7 @@ static bool prepare_root_moves(Search           *search,
         result->score_available = true;
         return false;
     }
+    XqMoveList *moves = &search->root_moves;
     xq_generate_legal(position, moves);
     if (moves->count == 0)
     {
@@ -1341,11 +1332,11 @@ static void parallel_tt_store_node(Search               *search,
                                    XqMove                best_move,
                                    XqTranspositionStats *stats)
 {
-    XqSearchScoreKind kind;
-    int               score;
     if (value.cancelled || search->options.transposition_table == NULL ||
         (node->parent == NULL && search->filtered_cycles))
         return;
+    XqSearchScoreKind kind;
+    int               score;
     if (value.lower == value.upper)
     {
         kind  = XQ_SEARCH_SCORE_EXACT;
@@ -1428,34 +1419,33 @@ static int tighten_bound(atomic_int *bound,
 static bool check_node(Search *search,
                        Node   *node)
 {
-    const Node *ancestor;
-    int         alpha = -INFINITY_SCORE, beta = INFINITY_SCORE;
-    int         lower, upper, desired, expected = NODE_RUNNING;
     bool cancelled = atomic_load_explicit(&search->time_state, memory_order_relaxed) == TIME_STOP;
     if (atomic_load_explicit(&node->state, memory_order_relaxed) != NODE_RUNNING)
         return true;
-    for (ancestor = node->parent; ancestor != NULL; ancestor = ancestor->parent)
+    int alpha = -INFINITY_SCORE;
+    int beta  = INFINITY_SCORE;
+    for (const Node *ancestor = node->parent; ancestor != NULL; ancestor = ancestor->parent)
     {
-        int bound;
         if (atomic_load_explicit(&ancestor->state, memory_order_relaxed) != NODE_RUNNING)
             cancelled = true;
         if (ancestor->maximizing)
         {
-            bound = atomic_load_explicit(&ancestor->value.lower, memory_order_relaxed);
+            int bound = atomic_load_explicit(&ancestor->value.lower, memory_order_relaxed);
             if (bound > alpha)
                 alpha = bound;
         }
         else
         {
-            bound = atomic_load_explicit(&ancestor->value.upper, memory_order_relaxed);
+            int bound = atomic_load_explicit(&ancestor->value.upper, memory_order_relaxed);
             if (bound < beta)
                 beta = bound;
         }
     }
-    alpha = tighten_bound(&node->alpha, alpha, true);
-    beta  = tighten_bound(&node->beta, beta, false);
-    lower = atomic_load_explicit(&node->value.lower, memory_order_relaxed);
-    upper = atomic_load_explicit(&node->value.upper, memory_order_relaxed);
+    alpha     = tighten_bound(&node->alpha, alpha, true);
+    beta      = tighten_bound(&node->beta, beta, false);
+    int lower = atomic_load_explicit(&node->value.lower, memory_order_relaxed);
+    int upper = atomic_load_explicit(&node->value.upper, memory_order_relaxed);
+    int desired;
     if (cancelled)
         desired = NODE_CANCELLED;
     else if (lower == upper || upper <= alpha || lower >= beta)
@@ -1463,6 +1453,7 @@ static bool check_node(Search *search,
     else
         return atomic_load_explicit(&node->state, memory_order_relaxed) != NODE_RUNNING;
 
+    int expected = NODE_RUNNING;
     /* Failure means another checker already published an immutable terminal state. */
     (void)atomic_compare_exchange_strong_explicit(&node->state, &expected, desired,
                                                   memory_order_relaxed, memory_order_relaxed);
@@ -1500,10 +1491,9 @@ static void aggregate(Node    *node,
                       int      index,
                       Interval child)
 {
-    int best, submitted;
     assert(!child.cancelled && index >= 0 && index < node->moves.count);
     node->children[index] = child;
-    best                  = atomic_load_explicit(&node->best_index, memory_order_acquire);
+    int best              = atomic_load_explicit(&node->best_index, memory_order_acquire);
     while (best < 0 || (node->maximizing && child.lower > node->children[best].lower) ||
            (!node->maximizing && child.upper < node->children[best].upper))
     {
@@ -1523,7 +1513,7 @@ static void aggregate(Node    *node,
         (void)tighten_bound(&node->value.upper, child.upper, false);
         (void)tighten_bound(&node->submitted_bound, child.lower, false);
     }
-    submitted = atomic_fetch_add_explicit(&node->submitted_count, 1, memory_order_acq_rel) + 1;
+    int submitted = atomic_fetch_add_explicit(&node->submitted_count, 1, memory_order_acq_rel) + 1;
     assert(submitted <= node->moves.count);
     if (submitted == node->moves.count)
     {
@@ -1566,14 +1556,13 @@ static void retain_root_order(Search     *search,
                               const Node *node,
                               int         best)
 {
-    int scores[XQ_MAX_MOVES];
-    int i;
     /* Keep the original move-to-child mapping intact while sorting a separate copy. */
     search->root_moves = node->moves;
-    for (i = 0; i < node->moves.count; ++i)
+    int scores[XQ_MAX_MOVES];
+    for (int i = 0; i < node->moves.count; ++i)
         scores[i] = node->children[i].upper;
     /* Shift only strictly smaller scores, preserving the input order for ties. */
-    for (i = 1; i < search->root_moves.count; ++i)
+    for (int i = 1; i < search->root_moves.count; ++i)
     {
         XqMove move  = search->root_moves.moves[i];
         int    score = scores[i];
@@ -1626,14 +1615,8 @@ static void search_range(Search            *search,
                          BatchPv           *batch,
                          SearchThreadStats *stats)
 {
-    int i;
-    for (i = range.begin; i < range.end; i += range.step)
+    for (int i = range.begin; i < range.end; i += range.step)
     {
-        XqPosition    child_position;
-        ParallelPv    child_pv         = {0};
-        const XqMove *child_hint       = NULL;
-        int           child_hint_count = 0;
-        Interval      child;
         if (node->parent == NULL)
             (void)search_check_time(search);
         if (check_node(search, node))
@@ -1641,15 +1624,18 @@ static void search_range(Search            *search,
         if (node->parent == NULL)
             atomic_store_explicit(&search->root_started, 1, memory_order_relaxed);
 
+        const XqMove *child_hint       = NULL;
+        int           child_hint_count = 0;
         if (i == 0 && node->pv_hint_count > 1)
         {
             child_hint       = node->pv_hint + 1;
             child_hint_count = node->pv_hint_count - 1;
         }
-        child_position = node->position;
+        XqPosition child_position = node->position;
         xq_position_make_move(&child_position, node->moves.moves[i]);
-        child = search_node(search, &child_position, node, node->depth - 1, NULL, child_hint,
-                            child_hint_count, &child_pv, stats);
+        ParallelPv child_pv = {0};
+        Interval   child    = search_node(search, &child_position, node, node->depth - 1, NULL,
+                                          child_hint, child_hint_count, &child_pv, stats);
 
         if (!child.cancelled)
         {
@@ -1703,13 +1689,12 @@ static void *worker_main(void *argument)
     Search *search = worker->search;
     for (;;)
     {
-        TaskCompletion *completion;
         search_semaphore_wait(&worker->task_available);
         if (atomic_load_explicit(&search->shutdown, memory_order_acquire))
             break;
         if (atomic_load_explicit(&worker->state, memory_order_acquire) != WORKER_READY)
             abort();
-        completion = worker->completion;
+        TaskCompletion *completion = worker->completion;
         search_range(search, worker->node, worker->range, &worker->node->helper_pv, &worker->stats);
         worker->node       = NULL;
         worker->range      = (SearchRange){0, 0, 1};
@@ -1765,14 +1750,13 @@ static SearchRange split_node(Search          *search,
                               Node            *node,
                               TaskCompletion **pending)
 {
-    unsigned    i;
     int         count = node->moves.count;
     SearchRange owner = {0, count, 1};
     *pending          = NULL;
     if (count < 2 || (search->options.split_strategy == XQ_PARALLEL_SPLIT_CONTIGUOUS &&
                       search->options.split_percent == 0))
         return owner;
-    for (i = 0; i < search->worker_count; ++i)
+    for (unsigned i = 0; i < search->worker_count; ++i)
     {
         Worker *worker   = &search->workers[i];
         int     expected = WORKER_IDLE;
@@ -1780,12 +1764,12 @@ static SearchRange split_node(Search          *search,
                                                     memory_order_acquire, memory_order_relaxed))
         {
             TaskCompletion *completion = task_completion_create();
-            SearchRange     helper;
             if (completion == NULL)
             {
                 atomic_store_explicit(&worker->state, WORKER_IDLE, memory_order_release);
                 return owner;
             }
+            SearchRange helper;
             if (search->options.split_strategy == XQ_PARALLEL_SPLIT_INTERLEAVED)
             {
                 owner.step = 2;
@@ -1897,14 +1881,7 @@ static Interval search_node(Search            *search,
                             ParallelPv        *pv_out,
                             SearchThreadStats *stats)
 {
-    Node            node = {0};
-    TaskCompletion *pending;
-    SearchRange     owner_range;
-    Interval        value;
-    XqMove          hash_move = {0};
-    uint64_t        key       = 0;
-    int             score     = 0, i;
-    bool            leaf = false, has_hash_move = false;
+    Node node                = {0};
     pv_out->count            = 0;
     node.parent              = parent;
     node.position            = *position;
@@ -1925,6 +1902,8 @@ static Interval search_node(Search            *search,
     if (check_node(search, &node))
         return node_value(&node);
 
+    int  score = 0;
+    bool leaf  = false;
     /*
      * Check terminal positions before the depth limit: even at depth zero, checkmate must not be
      * treated as an ordinary static evaluation.
@@ -1968,7 +1947,7 @@ static Interval search_node(Search            *search,
              * legal move matters here, so stop at the first one rather than filtering the list.
              */
             score = node.maximizing ? -WIN : WIN;
-            for (i = 0; i < node.moves.count; ++i)
+            for (int i = 0; i < node.moves.count; ++i)
             {
                 XqPosition next = *position;
                 if (xq_position_make_move(&next, node.moves.moves[i]) &&
@@ -1997,19 +1976,22 @@ static Interval search_node(Search            *search,
         (void)check_node(search, &node);
         return node_value(&node);
     }
+    XqMove   hash_move     = {0};
+    uint64_t key           = 0;
+    bool     has_hash_move = false;
     if (search->options.transposition_table != NULL)
     {
+        int alpha = atomic_load_explicit(&node.alpha, memory_order_relaxed);
+        int beta  = atomic_load_explicit(&node.beta, memory_order_relaxed);
+        key       = xq_position_hash(position);
         ParallelTtEntry cached;
-        bool            hit   = false;
-        int             alpha = atomic_load_explicit(&node.alpha, memory_order_relaxed);
-        int             beta  = atomic_load_explicit(&node.beta, memory_order_relaxed);
-        key                   = xq_position_hash(position);
+        bool            hit = false;
         if (parent != NULL &&
             parallel_tt_probe(search->options.transposition_table, key, depth,
                               node.maximizing ? alpha : -beta, node.maximizing ? beta : -alpha,
                               false, &cached, &hit, &stats->cache))
         {
-            value = parallel_tt_interval(&cached, node.maximizing);
+            Interval value = parallel_tt_interval(&cached, node.maximizing);
             /*
              * This node has not been shared. `check_node` still gives ancestor cancellation
              * priority.
@@ -2040,7 +2022,7 @@ static Interval search_node(Search            *search,
         node.pv_hint       = pv_hint;
         node.pv_hint_count = pv_hint_count;
     }
-    for (i = 0; i < node.moves.count; ++i)
+    for (int i = 0; i < node.moves.count; ++i)
         node.children[i] = (Interval){-WIN, WIN, false};
     if (search->progress != NULL && parent == NULL)
     {
@@ -2048,7 +2030,8 @@ static Interval search_node(Search            *search,
                                    (unsigned)node.moves.count};
         search->progress(&update, search->progress_user);
     }
-    owner_range = split_node(search, &node, &pending);
+    TaskCompletion *pending;
+    SearchRange     owner_range = split_node(search, &node, &pending);
 
     search_range(search, &node, owner_range, &node.owner_pv, stats);
 
@@ -2070,7 +2053,7 @@ static Interval search_node(Search            *search,
     (void)search_check_time(search);
     (void)check_node(search, &node);
     assert(atomic_load_explicit(&node.state, memory_order_relaxed) != NODE_RUNNING);
-    value = node_value(&node);
+    Interval value = node_value(&node);
     if (parent == NULL)
     {
         int best = atomic_load_explicit(&node.best_index, memory_order_relaxed);
@@ -2138,19 +2121,18 @@ static Interval search_node(Search            *search,
  */
 static void stop_pool(Search *search)
 {
-    unsigned i;
     atomic_store_explicit(&search->shutdown, 1, memory_order_release);
-    for (i = 0; i < search->worker_count; ++i)
+    for (unsigned i = 0; i < search->worker_count; ++i)
         search_semaphore_post(&search->workers[i].task_available);
-    for (i = 0; i < search->worker_count; ++i)
+    for (unsigned i = 0; i < search->worker_count; ++i)
         if (pthread_join(search->workers[i].thread, NULL) != 0)
             abort();
-    for (i = 0; i < search->worker_count; ++i)
+    for (unsigned i = 0; i < search->worker_count; ++i)
     {
         parallel_tt_add_stats(&search->stats.cache, &search->workers[i].stats.cache);
         search->stats.nodes += search->workers[i].stats.nodes;
     }
-    for (i = 0; i < search->initialized_worker_count; ++i)
+    for (unsigned i = 0; i < search->initialized_worker_count; ++i)
         search_semaphore_destroy(&search->workers[i].task_available);
     free(search->workers);
 }
@@ -2340,11 +2322,7 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
     return XQ_PARALLEL_UNSUPPORTED;
 #else
     {
-        Search           search      = {0};
-        ParallelPv       previous_pv = {0};
-        XqParallelStatus status      = XQ_PARALLEL_OK;
-        uint64_t         end_ms;
-        unsigned         i, current_depth;
+        Search search = {0};
         atomic_init(&search.shutdown, 0);
         atomic_init(&search.time_state, TIME_ACTIVE);
         atomic_init(&search.root_completed, 0);
@@ -2370,6 +2348,7 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
                                          ? UINT64_MAX
                                          : search.start_ms + effective.time_limit_ms;
         }
+        XqParallelStatus status = XQ_PARALLEL_OK;
         if (!prepare_root_moves(&search, pos, engine != NULL ? engine->history : NULL, result))
             goto finished;
         if (effective.thread_count > 1)
@@ -2381,12 +2360,11 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
                 goto finished;
             }
         }
-        for (i = 0; i + 1 < effective.thread_count; ++i)
+        for (unsigned i = 0; i + 1 < effective.thread_count; ++i)
         {
-            Worker *worker = &search.workers[i];
-            int     error;
             if (search_check_time(&search))
                 goto finished;
+            Worker *worker = &search.workers[i];
             worker->search = &search;
             atomic_init(&worker->state, WORKER_IDLE);
             if (!search_semaphore_init(&worker->task_available))
@@ -2395,7 +2373,7 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
                 goto finished;
             }
             ++search.initialized_worker_count;
-            error = pthread_create(&worker->thread, NULL, worker_main, worker);
+            int error = pthread_create(&worker->thread, NULL, worker_main, worker);
             if (error != 0)
             {
                 status = XQ_PARALLEL_RESOURCE_ERROR;
@@ -2403,10 +2381,9 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
             }
             ++search.worker_count;
         }
-        for (current_depth = 1;; ++current_depth)
+        ParallelPv previous_pv = {0};
+        for (unsigned current_depth = 1;; ++current_depth)
         {
-            ParallelPv current_pv = {0};
-            XqMove     best       = {0};
             /*
              * Previous workers are quiescent. Reset before checking time so old progress can never
              * grant an extension to a newly starting iteration.
@@ -2420,6 +2397,8 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
             if (current_depth > 1)
                 parallel_tt_new_iteration(effective.transposition_table, search.evaluate,
                                           search.evaluate_user, search.root_color);
+            ParallelPv current_pv = {0};
+            XqMove     best       = {0};
             (void)search_node(&search, pos, NULL, current_depth, &best, previous_pv.moves,
                               previous_pv.count, &current_pv, &search.stats);
             (void)search_check_time(&search);
@@ -2465,6 +2444,7 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
         result->stats.cache = search.stats.cache;
         result->stats.stopped =
             atomic_load_explicit(&search.time_state, memory_order_relaxed) != TIME_ACTIVE;
+        uint64_t end_ms;
         result->stats.elapsed_available =
             search.start_available && parallel_clock_ms(&end_ms) && end_ms >= search.start_ms;
         if (result->stats.elapsed_available)
