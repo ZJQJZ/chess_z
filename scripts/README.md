@@ -52,9 +52,3 @@ Doxygen 代码块的注释保留边界。
 `Option+Shift+F` 使用 `.clang-format` 配置及上面的声明对齐步骤，
 工作区没有启用额外的注释重排适配器。`Command+Shift+F` 保持原来的全局搜索行为。
 `clang_format_with_comments.py` 文件保留，但未接入当前编辑器的格式化流程。
-
-注释重排验证：
-
-```sh
-python3 -m unittest discover -s tests -p 'test_format_comments.py'
-```

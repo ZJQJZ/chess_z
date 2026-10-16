@@ -34,18 +34,22 @@ typedef enum XqParallelSplitStrategy
 
 typedef struct XqParallelOptions
 {
-    unsigned depth;          /* Maximum iterative-deepening depth >= 1; default 3. No deadline or quiescence. */
+    unsigned depth;          /* Maximum iterative-deepening depth >= 1; default 3. No quiescence. */
     unsigned thread_count;   /* >= 1, includes calling thread; default 2. */
     unsigned split_percent;  /* 0..100, default 50; contiguous only (0 disables); ignored by interleaved. */
     XqParallelTranspositionTable *transposition_table; /* Borrowed; NULL disables caching (default). */
     XqParallelSplitStrategy split_strategy; /* Default CONTIGUOUS; applied after all move ordering. */
+    uint64_t time_limit_ms;  /* Monotonic wall time; 0 disables timing (default). */
 } XqParallelOptions;
 
 typedef struct XqParallelResult
 {
     bool move_available;
     XqMove best_move;
-    int score; /* Last iteration's root-side value on OK; deeper cached results may be reused. */
+    int score; /* Root-side value, valid only when score_available; see score_kind. */
+    bool score_available;
+    XqSearchScoreKind score_kind;
+    XqSearchStats stats;
 } XqParallelResult;
 
 XqParallelOptions xq_parallel_options_default(void);
@@ -60,20 +64,29 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Internal TT scores use the side-to-move perspective and may come from greater search depths;
  * the root probes only for move ordering in the first iteration. Searches depths 1..options.depth,
  * reusing the helper pool and previous root scores for ordering, even without a table. Stops early
- * for a terminal root or proven winning move. Without a table, scores are exact for the last
- * iteration's depth. Table generations advance per iteration and entries survive between them.
+ * for a terminal root, proven winning move or time stop. Exact results describe the selected
+ * iteration; a partial first iteration supplies a lower bound. An unsearched legal fallback has
+ * score_available == false and selected_move_depth == 0. Table generations advance per iteration
+ * and entries survive between them.
  * The first root iteration and internal nodes use the built-in stable capture ordering, then
  * promote cache and previous-iteration PV moves (PV takes precedence). Later root iterations
  * retain the previous root ordering. PV suffixes follow only matching moves; up to 64 moves are
  * retained even without a table, without limiting search depth. Exact cache cutoffs may rebuild
  * a PV prefix; terminal positions, cache bounds/misses/contention or invalid moves can shorten it.
  * PV hints affect ordering only and are not exposed in the result. No custom move scorer is used.
- * TT statistics accumulate on the table, excluding PV reconstruction lookups; no trace or other
- * search statistics are collected. Each node may split once with one idle helper, after all move
- * ordering. CONTIGUOUS assigns a tail batch according to split_percent; INTERLEAVED assigns odd
+ * TT statistics accumulate on the table, excluding PV reconstruction lookups; stats contains
+ * per-call counters without resetting the table. Each node may split once with one idle helper,
+ * after all move ordering. CONTIGUOUS assigns a tail batch according to split_percent; INTERLEAVED assigns odd
  * zero-based indices to the helper and even indices to the owner, ignoring split_percent even
  * when zero. With fewer than two moves, no available helper or failed task-completion allocation,
  * the owner searches all moves serially. thread_count == 1 disables splitting for either strategy.
+ * The budget covers preparation, pool creation and all iterations. At the first detected deadline,
+ * an unfinished iteration with strictly more than half its root candidates completed may finish;
+ * otherwise running nodes are cancelled. No new iteration starts after the deadline. Clock failure
+ * stops even an extended iteration. A cancelled iteration preserves the last complete result;
+ * without one, select the best completed first-iteration candidate or a legal fallback. Timeout is
+ * OK with stats.stopped set. Workers and callbacks finish before return, so the budget is not a hard
+ * return deadline. Completed proofs remain valid if a final time check requests stopping.
  * Results are initialized even on failure.
  * Equal-score choices may depend on scheduling. POSIX pthread implementation requiring
  * always-lock-free atomic int; Windows returns UNSUPPORTED. */

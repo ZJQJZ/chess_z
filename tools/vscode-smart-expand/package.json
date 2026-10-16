@@ -118,8 +118,5 @@
         }
       }
     }
-  },
-  "scripts": {
-    "test": "node --test"
   }
 }

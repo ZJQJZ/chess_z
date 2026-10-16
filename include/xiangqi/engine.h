@@ -51,16 +51,16 @@ typedef struct XqSearchStats
     bool available;               /* Whether internal search counters are available. */
     unsigned max_started_depth;   /* Deepest iteration in which a root move was searched. */
     unsigned iteration_completed_moves; /* Completed root candidates at max_started_depth. */
-    unsigned iteration_total_moves;     /* Root candidates after history filtering, even if unstarted. */
+    unsigned iteration_total_moves;     /* Root candidates, after any history filtering, even if unstarted. */
     unsigned completed_depth;     /* All root moves completed at this depth. */
     unsigned selected_move_depth; /* Selected result depth; zero for an unsearched fallback. */
-    uint64_t nodes; /* Entries into negamax and quiescence, including their shared leaf. */
+    uint64_t nodes; /* Builtin: negamax/quiescence entries including their shared leaf; parallel: search-node entries. */
     bool stopped;   /* Time limit reached (including an extended iteration) or search clock failed. */
     bool winning_move_found; /* Selected the first completed root candidate with a winning mate score. */
     bool elapsed_available;
     uint64_t elapsed_ms; /* Monotonic wall time, independent of the search time mode. */
     bool cache_available;
-    XqTranspositionStats cache; /* Counter deltas; cumulative table stats are untouched. */
+    XqTranspositionStats cache; /* Per-call counters; cumulative table stats are not reset by collection. */
 } XqSearchStats;
 
 typedef struct XqEngineAdapter

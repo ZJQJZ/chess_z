@@ -22,7 +22,6 @@ stats/generate_positions.c   随机合法局面生成入口
 stats/search_positions.c     批量局面搜索入口
 stats/random_fen/            随机局面 FEN 数据
 stats/data/                  性能分析结果
-tests/test_core.c            基础规则测试
 ```
 
 ## 构建
@@ -32,14 +31,6 @@ tests/test_core.c            基础规则测试
 ```sh
 cmake -S . -B build
 cmake --build build
-ctest --test-dir build
-```
-
-如果本机只有 GCC，也可以直接编译测试：
-
-```sh
-gcc -std=c11 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c src/history.c src/engine.c tests/test_core.c -o build/xiangqi_core_tests
-./build/xiangqi_core_tests
 ```
 
 编译交互式人机示例：
@@ -193,19 +184,6 @@ release/acquire CAS 发布对应结果，避免索引与评分不一致，同分
 辅助线程完成后自行发布空闲状态，不必等待分配方领取结果。节点结束后仍须等待该任务的完成通知，
 才能复制结果并释放节点。每个任务持有独立棋盘。它不保证比原引擎更快，
 浅树上调度、缓存操作及额外分支搜索可能更慢。
-
-独立验证（不依赖 CMake）：
-
-```sh
-gcc -pthread -std=c11 -O1 -g -Iinclude src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c tests/test_parallel.c -o build/xiangqi_parallel_tests
-./build/xiangqi_parallel_tests
-python3 tests/test_parallel_cli.py build/xiangqi_cli
-```
-
-现有 C 测试通过默认关闭缓存的公开接口，用无剪枝 Minimax 检查不同线程数、分配比例下的分数和最优着法，
-并覆盖参数错误与伪合法分支；这些对照不覆盖新置换表的并发与跨次复用行为。
-搜索实现不包含测试钩子。用 Clang 在上述测试命令增加
-`-fsanitize=thread` 可检查竞态；另行增加 `-fsanitize=address,undefined` 可检查内存和未定义行为。
 
 ## 原引擎的限时搜索与对局操作
 
@@ -371,8 +349,6 @@ save-tt "build/my cache.tt"
 库调用方可使用 `xq_engine_find_best_move_with_stats(..., XqSearchStats *stats)` 获取相同统计；
 `stats` 可以为 `NULL`，原有 `xq_engine_find_best_move` 接口保持兼容。
 普通找最佳走法接口统一使用内置搜索，可获取其内部深度、节点和可用缓存的统计。
-安装 Python 3 时，CMake 会额外注册 CLI 日志集成测试；也可直接运行
-`python3 tests/test_cli.py ./build/xiangqi_cli`。
 
 示例入口默认是“你执红，内置简易引擎执黑”。输入格式是 `起点+终点`，文件用 `a..i`，行号用 `0..9`，例如：
 
@@ -503,12 +479,6 @@ quit   退出
 
 `cache probes/hits/cutoffs/stores/replacements` 是本次调用的累计计数增量，不清零表中
 原有统计。条目可能来自输入文件，也可能来自本次搜索的较早分支或迭代；这里不区分来源。
-
-新测试可通过 CTest 运行，命令行测试也可直接运行：
-
-```sh
-python3 tests/test_explain_cli.py ./build/xiangqi_explain
-```
 
 ## 随机局面生成与批量搜索
 

@@ -38,6 +38,17 @@ static const char *split_strategy_name(XqParallelSplitStrategy strategy)
     return strategy == XQ_PARALLEL_SPLIT_INTERLEAVED ? "interleaved" : "contiguous";
 }
 
+static const char *score_kind_name(XqSearchScoreKind kind)
+{
+    switch (kind)
+    {
+    case XQ_SEARCH_SCORE_EXACT: return "exact";
+    case XQ_SEARCH_SCORE_UPPER_BOUND: return "upper_bound";
+    case XQ_SEARCH_SCORE_LOWER_BOUND: return "lower_bound";
+    }
+    return "unknown";
+}
+
 /**
  * 打印命令行程序的用法、可用选项以及 FEN 参数的输入提示。
  *
@@ -53,7 +64,7 @@ static void print_usage(const char *program)
     printf("  --split-strategy contiguous|interleaved  parallel split strategy (default contiguous)\n");
     printf("  --split-percent P          contiguous batch percentage, 0..100 (default 50; 0 disables splitting)\n");
     printf("  interleaved: sorted indices 0,2,4,... stay with caller; 1,3,5,... go to helper; split-percent is ignored\n");
-    printf("  parallel: iterative deepening (default max depth 3), in-memory cache, no time limit or TT files\n");
+    printf("  parallel: iterative deepening (default max depth 3), in-memory cache, no time limit by default; no TT files\n");
     printf("  %-21s  %s\n", "-f, --fen FEN", "initialize the position from FEN");
     printf("  %-21s  %s\n", "-e, --engine COLOR", "choose the engine side: red or black");
     printf("  %-21s  %s\n", "    --depth N", "maximum search depth in plies (builtin default 10; parallel default 3)");
@@ -174,7 +185,6 @@ typedef struct CliMoveInput
     XqPosition positions[2]; /* Position after each validated move. */
     int count;
     uint64_t time_limit_ms;
-    bool explicit_time;
 } CliMoveInput;
 
 /* Tokenize the input buffer and validate on copies; NULL means success, otherwise an error.
@@ -212,7 +222,6 @@ static const char *parse_move_input(char *text, const XqPosition *pos,
 
     if (isdigit((unsigned char)tokens[1][0]))
     {
-        parsed->explicit_time = true;
         if (!parse_time_ms(tokens[1], &parsed->time_limit_ms))
             return "second item is an invalid time limit; use positive integer milliseconds";
         return NULL;
@@ -236,13 +245,8 @@ static const char *parse_move_input(char *text, const XqPosition *pos,
 static void print_help(bool parallel)
 {
     printf("commands:\n");
-    if (parallel)
-        printf("  a0a1            move; parallel search uses iterative deepening, without time_ms\n");
-    else
-    {
-        printf("  a0a1 [time_ms]  move; optional positive integer time limit for the next engine reply\n");
-        printf("                  e.g. a0a1 2000 (2 seconds); omit time to use the default\n");
-    }
+    printf("  a0a1 [time_ms]  move; optional positive integer time limit for the next engine reply\n");
+    printf("                  e.g. a0a1 2000 (2 seconds); omit time to use the startup default\n");
     printf("  a0a1 a9a8       play your move and specify the engine reply, without searching\n");
     printf("                  both moves must be legal; invalid input leaves the whole turn unchanged\n");
     printf("                  exactly two moves; no third move or additional time argument\n");
@@ -457,17 +461,40 @@ static void write_parallel_detail(FILE **log, const XqPosition *pos,
                                   XqParallelStatus status, const XqParallelResult *result)
 {
     char fen[128], move[8];
+    const XqSearchStats *stats = &result->stats;
     if (!xq_position_to_fen(pos, fen, sizeof(fen)))
         strcpy(fen, "unavailable");
     fprintf(*log, "\n--- parallel engine search ---\nsearch_mode: parallel\n"
-            "fen_before: %s\nstatus: %s\nselected_move: %s\nscore: %d\n"
-            "depth: %u\nthreads: %u\nsplit_strategy: %s\nsplit_percent: %u\n",
+            "fen_before: %s\nstatus: %s\nselected_move: %s\nscore_available: %s\n",
             fen, xq_parallel_status_text(status),
             result->move_available ? xq_move_to_string(result->best_move, move, sizeof(move)) : "none",
-            result->score, options->depth, options->thread_count,
+            result->score_available ? "yes" : "no");
+    if (result->score_available)
+        fprintf(*log, "score: %d\nscore_kind: %s\n", result->score,
+                score_kind_name(result->score_kind));
+    else
+        fprintf(*log, "score: unavailable\nscore_kind: unavailable\n");
+    fprintf(*log, "depth: %u\ntime_limit_ms: %" PRIu64 "\ntime_mode: monotonic\n"
+            "threads: %u\nsplit_strategy: %s\nsplit_percent: %u\n",
+            options->depth, options->time_limit_ms, options->thread_count,
             split_strategy_name(options->split_strategy), options->split_percent);
     if (options->split_strategy == XQ_PARALLEL_SPLIT_INTERLEAVED)
         fprintf(*log, "split_percent_note: ignored for interleaved\n");
+    fprintf(*log, "stats_available: %s\n", stats->available ? "yes" : "no");
+    if (stats->available)
+    {
+        fprintf(*log, "max_started_depth: %u\niteration_progress: %u/%u\n"
+                "completed_depth: %u\nselected_move_depth: %u\nnodes: %" PRIu64 "\n"
+                "stopped: %s\nwinning_move_found: %s\n",
+                stats->max_started_depth, stats->iteration_completed_moves,
+                stats->iteration_total_moves, stats->completed_depth, stats->selected_move_depth,
+                stats->nodes, stats->stopped ? "yes" : "no",
+                stats->winning_move_found ? "yes" : "no");
+    }
+    if (stats->elapsed_available)
+        fprintf(*log, "elapsed_ms: %" PRIu64 "\n", stats->elapsed_ms);
+    else
+        fprintf(*log, "elapsed_ms: unavailable\n");
     flush_search_detail(log);
 }
 
@@ -632,9 +659,9 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    if ((!parallel && parallel_options_set) || (parallel && (explicit_time || tt_file != NULL)))
+    if ((!parallel && parallel_options_set) || (parallel && tt_file != NULL))
     {
-        fprintf(stderr, "error: parallel options require --search parallel; parallel search accepts neither time limits nor TT files\n");
+        fprintf(stderr, "error: parallel options require --search parallel; parallel search does not accept TT files\n");
         return EXIT_FAILURE;
     }
 #ifdef _WIN32
@@ -644,7 +671,12 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 #endif
-    if (parallel && explicit_depth) parallel_options.depth = default_limits.max_depth;
+    if (parallel)
+    {
+        if (explicit_depth) parallel_options.depth = default_limits.max_depth;
+        if (!explicit_time) default_limits.time_limit_ms = parallel_options.time_limit_ms;
+        parallel_options.time_limit_ms = default_limits.time_limit_ms;
+    }
     limits = default_limits;
     if (fen != NULL)
     {
@@ -696,12 +728,19 @@ int main(int argc, char **argv)
     if (search_detail)
         search_log = open_search_detail(&pos, engine_color);
     if (parallel)
-        printf("Search mode: parallel, iterative deepening to max depth %u, threads %u, split strategy %s, split %u%%%s; no time limit; in-memory cache %s.\n",
+    {
+        printf("Search mode: parallel, iterative deepening to max depth %u, threads %u, split strategy %s, split %u%%%s; ",
                parallel_options.depth, parallel_options.thread_count,
                split_strategy_name(parallel_options.split_strategy), parallel_options.split_percent,
                parallel_options.split_strategy == XQ_PARALLEL_SPLIT_INTERLEAVED ?
-                   " (ignored for interleaved)" : "",
+                   " (ignored for interleaved)" : "");
+        if (parallel_options.time_limit_ms == 0)
+            printf("no time limit by default; ");
+        else
+            printf("default time limit %" PRIu64 " ms; ", parallel_options.time_limit_ms);
+        printf("in-memory cache %s.\n",
                parallel_options.transposition_table != NULL ? "enabled" : "disabled");
+    }
 
     printf("Xiangqi demo: human %s vs %s %s engine\n",
            color_name(xq_color_opponent(engine_color)), parallel ? "parallel" : "builtin",
@@ -730,20 +769,21 @@ int main(int argc, char **argv)
             char text[8];
             CliSearchProgress *progress = show_progress ?
                 cli_search_progress_start(parallel ? parallel_options.depth : limits.max_depth,
-                                           parallel ? 0 : limits.time_limit_ms) : NULL;
+                                           limits.time_limit_ms) : NULL;
             XqSearchProgressFn on_progress = progress != NULL ? cli_search_progress_update : NULL;
             if (parallel)
             {
                 XqParallelResult result;
                 XqParallelStatus status;
+                parallel_options.time_limit_ms = limits.time_limit_ms;
                 status = xq_engine_parallel_search_with_progress(
                     &pos, &parallel_options, NULL, NULL, &result, on_progress, progress);
                 found = status == XQ_PARALLEL_OK && result.move_available;
                 best = result.best_move;
                 cli_search_progress_finish(progress,
                     status != XQ_PARALLEL_OK ? "search failed" :
-                    !found ? "no move" : result.score == 30000 ? "winning move found" : "finished",
-                    NULL);
+                    !found ? "no move" : result.stats.winning_move_found ? "winning move found" :
+                    result.stats.stopped ? "time limit / clock stop" : "finished", &result.stats);
                 if (status != XQ_PARALLEL_OK)
                 {
                     fprintf(stderr, "error: %s\n", xq_parallel_status_text(status));
@@ -894,17 +934,12 @@ int main(int argc, char **argv)
             CliMoveInput parsed = {.time_limit_ms = default_limits.time_limit_ms};
             const char *error = parse_move_input(input, &pos, &legal, &parsed);
             size_t original_count = history.count;
-            if (error == NULL && parallel && parsed.explicit_time)
-                error = "parallel search has no time limit; enter a move without time_ms";
             int applied;
 
             if (error != NULL)
             {
                 printf("%s; no moves played.\n", error);
-                if (parallel)
-                    printf("Use a0a1 or a0a1 a9a8; type moves for legal first moves.\n");
-                else
-                    printf("Use a0a1, a0a1 2000, or a0a1 a9a8; type moves for legal first moves.\n");
+                printf("Use a0a1, a0a1 2000, or a0a1 a9a8; type moves for legal first moves.\n");
                 continue;
             }
             for (applied = 0; applied < parsed.count; ++applied)

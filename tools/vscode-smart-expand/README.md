@@ -64,12 +64,3 @@ VSCodeVim 默认可能接管 `Ctrl+Q`。当前机器的用户快捷键已经包�
 - `smartExpand.maxParseCharacters`：句子和环绕符解析的最大段落长度，默认 `1000000`。
 
 ASCII `<…>` 默认启用，但只有左右符号内侧都不是空白时才会匹配，以避免大多数比较表达式被误认为环绕结构。单引号位于单词内部时不会匹配，反斜杠转义的引号和反引号也会忽略。
-
-## 测试
-
-```sh
-cd tools/vscode-smart-expand
-npm test
-```
-
-测试只使用 Node 内置的 `node:test`，不会安装任何依赖。
