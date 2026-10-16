@@ -246,6 +246,7 @@ enum
     STATIC_LIMIT                                = 28999,
     INFINITY_SCORE                              = 30001,
     PARALLEL_MAX_QUIESCENCE_DEPTH               = 500,
+    PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
     PARALLEL_TT_BUCKET_COUNT                    = 1 << 18,
@@ -1514,8 +1515,8 @@ static bool quiescence_should_stop(Search *search,
  * check, static evaluation is a stand-pat candidate and only captures are searched. In check, all
  * legal evasions are searched without stand pat. The ordinary caller handles missing kings before
  * entry; here an attacked opponent king is scored as a win before any king-capture move is played.
- * That check and an empty generated move list are resolved before the extension limit. As in the built-in
- * quiescence search, outside check the list is pseudo-legal; no separate test for a legal
+ * That check and an empty generated move list are resolved before the extension limit. As in the
+ * built-in quiescence search, outside check the list is pseudo-legal; no separate test for a legal
  * continuation is performed before stand pat. At the extension limit, remaining positions are
  * evaluated even in check.
  *
@@ -2498,7 +2499,9 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
     return XQ_PARALLEL_UNSUPPORTED;
 #else
     {
-        Search search = {0};
+        Search         search                        = {0};
+        pthread_attr_t worker_attributes;
+        bool           worker_attributes_initialized = false;
         atomic_init(&search.shutdown, 0);
         atomic_init(&search.time_state, TIME_ACTIVE);
         atomic_init(&search.root_completed, 0);
@@ -2529,6 +2532,25 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
             goto finished;
         if (effective.thread_count > 1)
         {
+            if (pthread_attr_init(&worker_attributes) != 0)
+            {
+                status = XQ_PARALLEL_RESOURCE_ERROR;
+                goto finished;
+            }
+            worker_attributes_initialized = true;
+            /*
+             * Recursive search needs more than macOS's small default worker stack. Preserve
+             * platforms whose default is already larger than our minimum.
+             */
+            size_t stack_size;
+            if (pthread_attr_getstacksize(&worker_attributes, &stack_size) != 0 ||
+                (stack_size < PARALLEL_MIN_WORKER_STACK_BYTES &&
+                 pthread_attr_setstacksize(&worker_attributes, PARALLEL_MIN_WORKER_STACK_BYTES) !=
+                     0))
+            {
+                status = XQ_PARALLEL_RESOURCE_ERROR;
+                goto finished;
+            }
             search.workers = calloc(effective.thread_count - 1, sizeof(*search.workers));
             if (search.workers == NULL)
             {
@@ -2549,7 +2571,7 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
                 goto finished;
             }
             ++search.initialized_worker_count;
-            int error = pthread_create(&worker->thread, NULL, worker_main, worker);
+            int error = pthread_create(&worker->thread, &worker_attributes, worker_main, worker);
             if (error != 0)
             {
                 status = XQ_PARALLEL_RESOURCE_ERROR;
@@ -2615,6 +2637,8 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
                 break;
         }
     finished:
+        if (worker_attributes_initialized)
+            pthread_attr_destroy(&worker_attributes);
         stop_pool(&search);
         result->stats.nodes = search.stats.nodes;
         result->stats.cache = search.stats.cache;

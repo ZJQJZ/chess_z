@@ -99,6 +99,12 @@ CLI 的显示线程和同步由独立模块负责，不改变递归搜索、缓�
 使用相同策略。没有空闲线程、孩子少于两个或无法创建任务完成通知时，当前线程搜索全部孩子；
 不创建积压队列，也不进行任务窃取。
 
+并行搜索为每个工作线程设置至少 **32 MiB** 的栈；系统默认值更大时保留默认值。
+大小由 `src/parallel_search.c` 的 `PARALLEL_MIN_WORKER_STACK_BYTES` 控制，修改后需重新编译。
+`--threads 16` 包含调用线程，因此会创建 15 个搜索工作线程，合计至少预留 480 MiB
+的栈地址空间，实际驻留内存随使用情况变化。调用线程的栈大小不受此设置影响。
+增大栈可容纳更深的递归，但不能保证任意搜索深度都不会溢出。
+
 实现位于 `src/parallel_search.c`，接口为 `include/xiangqi/parallel_search.h` 中的
 `xq_engine_parallel_search`。库调用通过 `XqParallelOptions.split_strategy` 选择
 `XQ_PARALLEL_SPLIT_CONTIGUOUS`（默认）或 `XQ_PARALLEL_SPLIT_INTERLEAVED`。
