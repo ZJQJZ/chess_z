@@ -2325,39 +2325,7 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine,
                               const XqSearchLimits  *limits,
                               XqMove                *best_move)
 {
-    return xq_engine_find_best_move_with_stats(engine, pos, limits, best_move, NULL);
-}
-
-/**
- * @brief Finds the best move and optionally collects per-call search statistics.
- *
- * Default search limits are used when `limits` is `NULL`, and a maximum depth of `0` is normalized
- * to `1`. The built-in search uses the adapter's evaluation, move ordering, transposition table and
- * history; a `NULL` engine selects the default evaluation and move ordering without a transposition
- * table or game history.
- *
- * When supplied, `stats` is initialized even if the search fails. Cache statistics are per-call
- * counter differences when the search uses a transposition table; collecting them does not reset
- * the cache or its cumulative counters. Elapsed time is measured with the monotonic clock when
- * clock readings succeed, independently of the configured search time mode.
- *
- * @param engine    Engine adapter that may provide custom callbacks, a cache, and history; may be
- *                  `NULL` to use the built-in defaults.
- * @param pos       Position to search; must not be `NULL` and is restored before returning.
- * @param limits    Optional search limits; `NULL` selects the default configuration.
- * @param best_move Output that receives the selected move; must not be `NULL`.
- * @param stats     Optional statistics output; `NULL` skips reporting. Check availability flags
- *                  before reading internal counters, elapsed time, or cache data.
- * @return          `true` if a best move was found and written; `false` on invalid input or when no
- *                  move is available.
- */
-bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine,
-                                         XqPosition            *pos,
-                                         const XqSearchLimits  *limits,
-                                         XqMove                *best_move,
-                                         XqSearchStats         *stats)
-{
-    return xq_engine_find_best_move_with_progress(engine, pos, limits, best_move, stats, NULL,
+    return xq_engine_find_best_move_with_progress(engine, pos, limits, best_move, NULL, NULL,
                                                   NULL);
 }
 

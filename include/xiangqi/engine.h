@@ -251,13 +251,10 @@ XqSearchLimits xq_search_limits_default(void);
 /* 使用内置搜索；limits->time_limit_ms 为 0 时不限时。 */
 bool xq_engine_find_best_move(const XqEngineAdapter *engine, XqPosition *pos,
                               const XqSearchLimits *limits, XqMove *best_move);
-/* stats may be NULL; otherwise initialized on every return, including failure.
- * Elapsed time uses the monotonic clock independently of the search timing mode. */
-bool xq_engine_find_best_move_with_stats(const XqEngineAdapter *engine, XqPosition *pos,
-                                         const XqSearchLimits *limits, XqMove *best_move,
-                                         XqSearchStats *stats);
-/* Same behavior as with_stats, with optional root progress. Roots returning before iterative
- * deepening emit no events. NULL progress is equivalent to with_stats. */
+/* Optional statistics and root progress can be enabled independently.
+ * stats may be NULL; otherwise initialized on every return, including failure.
+ * Elapsed time uses the monotonic clock independently of the search timing mode.
+ * NULL progress disables notifications. Roots returning before iterative deepening emit no events. */
 bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine, XqPosition *pos,
                                             const XqSearchLimits *limits, XqMove *best_move,
                                             XqSearchStats *stats, XqSearchProgressFn progress,

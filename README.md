@@ -373,8 +373,9 @@ save-tt "build/my cache.tt"
 缓存统计取本次调用前后的计数差，不清空缓存和累计计数。命中包含仅用于走法排序的命中，
 不等同于可以直接复用缓存分数；无缓存时计数为零并标记 `cache_available: no`。
 
-库调用方可使用 `xq_engine_find_best_move_with_stats(..., XqSearchStats *stats)` 获取相同统计；
-`stats` 可以为 `NULL`，原有 `xq_engine_find_best_move` 接口保持兼容。
+库调用方可通过 `xq_engine_find_best_move_with_progress()` 的 `stats` 参数获取相同统计；
+不需要进度回调时，将 `progress` 和 `progress_user` 都传为 `NULL`。`stats` 也可以为 `NULL`；
+只需最佳走法时，可使用 `xq_engine_find_best_move()`。
 普通找最佳走法接口统一使用内置搜索，可获取其内部深度、节点和可用缓存的统计。
 
 示例入口默认是“你执红，内置简易引擎执黑”。输入格式是 `起点+终点`，文件用 `a..i`，行号用 `0..9`，例如：
