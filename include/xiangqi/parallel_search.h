@@ -59,8 +59,9 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * history are used; score_move and the built-in transposition_table are ignored. The parallel
  * table remains in options. NULL engine or static_evaluate selects the built-in evaluator with
  * NULL evaluator user data; NULL engine also disables history filtering. The evaluator and its
- * user data must support concurrent calls and must not modify positions. Cached evaluation must
- * be deterministic for a position and perspective. Changing the effective evaluator or user pointer
+ * user data must support concurrent calls and must not modify positions. Opposite perspectives
+ * must yield opposite evaluation scores. Cached evaluation must be deterministic for a position
+ * and perspective. Changing the effective evaluator or user pointer
  * clears the borrowed table; changing root color also clears it for custom evaluators. Clear it
  * explicitly after mutating evaluation parameters behind the same user pointer. Keep the adapter,
  * history, evaluator data and table alive until return; callers must not mutate the adapter,
@@ -84,8 +85,8 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * check, all legal evasions without stand pat when in check. As in built-in quiescence, an empty
  * generated list is a loss; outside check the list is pseudo-legal with no extra legal-move scan.
  * King checks and the empty-list check precede the 500-ply extension cap; at the cap other
- * positions use static evaluation even in check. The evaluator still receives the root color;
- * its result is clamped to +/-28999 and converted to the side-to-move perspective for negamax.
+ * positions use static evaluation even in check. The evaluator receives the side to move, and its
+ * result is clamped to +/-28999 for negamax.
  * Quiescence flips child scores and windows, then ordinary search converts its result back to
  * the root perspective. Wins/losses remain +/-30000. Quiescence shares time and ancestor cancellation checks,
  * preserves cutoff bounds and never splits tasks, accesses the table or extends PV hints.

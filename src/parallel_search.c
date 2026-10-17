@@ -416,10 +416,9 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  *
  * `has_context` indicates whether the stored evaluator configuration is valid, not whether the
  * table contains entries or a search is running. If a previous binding exists, changing the
- * evaluator or its user pointer clears the entries and statistics. A root-color change also clears
- * the table for custom evaluators: they need not return opposite scores for opposite perspectives,
- * so converting cached scores to side-to-move perspective alone is insufficient. The built-in
- * evaluator is antisymmetric and allows reuse across root-color changes.
+ * evaluator or its user pointer clears the entries and statistics. A root-color change also
+ * conservatively clears the table for custom evaluators; the built-in evaluator retains entries
+ * across root-color changes.
  *
  * Records the new binding, marks it valid and advances the `uint8_t` `generation` once per
  * iteration, wrapping modulo 256. Compatible bindings retain their entries and cumulative
@@ -435,7 +434,7 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * @param table         Borrowed table to prepare; `NULL` disables caching and does nothing here.
  * @param evaluate      Effective non-null evaluator, with the default already resolved.
  * @param evaluate_user Borrowed user-data pointer passed to the evaluator; may be `NULL`.
- * @param root_color    Root side whose perspective is used for this search's evaluations.
+ * @param root_color    Root side for this search and its evaluator-context binding.
  */
 static void parallel_tt_new_iteration(XqParallelTranspositionTable *table,
                                       XqEvaluateFn                  evaluate,
@@ -1387,8 +1386,8 @@ static bool check_node(Search *search,
 
 typedef struct QuiescenceResult
 {
-    int  score;   /* Fail-soft score from the current side-to-move perspective. */
-    bool stopped; /* Discard score and use the owning leaf's state instead. */
+    int  score;
+    bool stopped;
 } QuiescenceResult;
 
 /**
@@ -1422,9 +1421,7 @@ typedef struct QuiescenceResult
 static bool quiescence_should_stop(Search *search,
                                    Node   *leaf)
 {
-    /* Check time before node state so newly requested cancellation is visible to check_node(). */
     (void)search_check_time(search);
-    /* Use the leaf's state, not just the time result: ancestors may have stopped independently. */
     return check_node(search, leaf);
 }
 
@@ -1432,15 +1429,14 @@ static bool quiescence_should_stop(Search *search,
  * @brief Searches captures and legal check evasions without allocating helper tasks.
  *
  * Uses side-to-move negamax scores: each child receives [-beta, -alpha], and its score is negated
- * on return. The evaluator still receives the root color; its clamped result is converted to the
- * side-to-move perspective here, preserving custom evaluators that are not antisymmetric. Outside
- * check, static evaluation is a stand-pat candidate and only captures are searched. In check, all
- * legal evasions are searched without stand pat. The ordinary caller handles missing kings before
- * entry; here an attacked opponent king is scored as a win before any king-capture move is played.
- * That check and an empty generated move list are resolved before the extension limit. As in the
- * built-in quiescence search, outside check the list is pseudo-legal; no separate test for a legal
- * continuation is performed before stand pat. At the extension limit, remaining positions are
- * evaluated even in check.
+ * on return. The evaluator receives the side to move and must return opposite scores for opposite
+ * perspectives. Its result is clamped before use. Outside check, static evaluation is a stand-pat
+ * candidate and only captures are searched. In check, all legal evasions are searched without stand
+ * pat. The ordinary caller handles missing kings before entry; here an attacked opponent king is
+ * scored as a win before any king-capture move is played. That check and an empty generated move
+ * list are resolved before the extension limit. As in the built-in quiescence search, outside check
+ * the list is pseudo-legal; no separate test for a legal continuation is performed before stand
+ * pat. At the extension limit, remaining positions are evaluated even in check.
  *
  * `position` is a private mutable copy owned by the ordinary leaf. Every made move is unmade before
  * inspecting cancellation or returning. Recursion uses only local windows and move lists, not the
@@ -1502,20 +1498,30 @@ static QuiescenceResult parallel_quiescence(Search            *search,
     if (moves.count == 0)
         return (QuiescenceResult){-WIN, false};
 
-    int best = -INFINITY_SCORE;
-    if (!in_check || ply >= PARALLEL_MAX_QUIESCENCE_DEPTH)
+    if (ply >= PARALLEL_MAX_QUIESCENCE_DEPTH)
     {
-        int stand_pat = search->evaluate(position, search->root_color, search->evaluate_user);
+        int score = search->evaluate(position, position->side_to_move, search->evaluate_user);
+        if (score > STATIC_LIMIT)
+            score = STATIC_LIMIT;
+        if (score < -STATIC_LIMIT)
+            score = -STATIC_LIMIT;
+        if (quiescence_should_stop(search, leaf))
+            return (QuiescenceResult){0, true};
+        return (QuiescenceResult){score, false};
+    }
+
+    int best = -INFINITY_SCORE;
+    if (!in_check)
+    {
+        int stand_pat = search->evaluate(position, position->side_to_move, search->evaluate_user);
         if (stand_pat > STATIC_LIMIT)
             stand_pat = STATIC_LIMIT;
         if (stand_pat < -STATIC_LIMIT)
             stand_pat = -STATIC_LIMIT;
-        if (position->side_to_move != search->root_color)
-            stand_pat = -stand_pat;
         if (quiescence_should_stop(search, leaf))
             return (QuiescenceResult){0, true};
         best = stand_pat;
-        if (ply >= PARALLEL_MAX_QUIESCENCE_DEPTH || best >= beta)
+        if (best >= beta)
             return (QuiescenceResult){best, false};
         if (best > alpha)
             alpha = best;
