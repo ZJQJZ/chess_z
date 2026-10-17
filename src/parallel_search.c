@@ -1162,67 +1162,6 @@ static bool search_check_time(Search *search)
 }
 
 /**
- * @brief Prepares the root's ordered, history-filtered candidates and an unsearched fallback.
- *
- * Initializes the first cache generation and probes the root once for ordering before filtering.
- * Survivors retain their order. If every candidate closes a losing cycle, keeps the original legal
- * fallback, leaves its score unavailable and avoids starting a search. Otherwise the first survivor
- * becomes the fallback, including when preparation has already exhausted the time budget.
- *
- * @param search   Initialized search with no dispatched tasks; receives the prepared root list.
- * @param position Read-only root position.
- * @param history  Optional real-game history; never modified.
- * @param result   Initialized output receiving terminal scores or a legal fallback.
- * @return         True if candidates remain and timing permits searching; false for a terminal
- *                 root, an entirely filtered list or a time stop.
- */
-static bool prepare_root_moves(Search           *search,
-                               const XqPosition *position,
-                               const XqHistory  *history,
-                               XqParallelResult *result)
-{
-    if (xq_position_king_square(position, search->root_color) == XQ_NO_SQUARE ||
-        xq_position_king_square(position, xq_color_opponent(search->root_color)) == XQ_NO_SQUARE)
-    {
-        result->score =
-            xq_position_king_square(position, search->root_color) == XQ_NO_SQUARE ? -WIN : WIN;
-        result->score_available = true;
-        return false;
-    }
-    XqMoveList *moves = &search->root_moves;
-    xq_generate_legal(position, moves);
-    if (moves->count == 0)
-    {
-        result->score           = -WIN;
-        result->score_available = true;
-        return false;
-    }
-    parallel_order_moves(position, moves);
-    parallel_tt_new_iteration(search->options.transposition_table, search->evaluate,
-                              search->evaluate_user, search->root_color);
-    if (search->options.transposition_table != NULL)
-    {
-        ParallelTtEntry cached;
-        bool            hit;
-        (void)parallel_tt_probe(search->options.transposition_table, xq_position_hash(position), 1,
-                                -INFINITY_SCORE, INFINITY_SCORE, true, &cached, &hit,
-                                &search->stats.cache);
-        if (hit)
-            (void)parallel_prioritize_move(moves, cached.best_move);
-    }
-    result->move_available              = true;
-    result->best_move                   = moves->moves[0];
-    search->filtered_cycles             = xq_history_filter_root_cycles(history, position, moves);
-    search->root_total                  = (unsigned)moves->count;
-    result->stats.iteration_total_moves = search->root_total;
-    if (moves->count > 0)
-        result->best_move = moves->moves[0];
-    (void)search_check_time(search);
-    return moves->count > 0 &&
-           atomic_load_explicit(&search->time_state, memory_order_relaxed) != TIME_STOP;
-}
-
-/**
  * @brief Copies a completed node's result after all of its helper work has exited.
  *
  * Completion alone does not freeze the bounds: an in-flight helper may still submit a valid child
@@ -2511,7 +2450,46 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
                                          : search.start_ms + effective.time_limit_ms;
         }
         XqParallelStatus status = XQ_PARALLEL_OK;
-        if (!prepare_root_moves(&search, pos, engine != NULL ? engine->history : NULL, result))
+        if (xq_position_king_square(pos, search.root_color) == XQ_NO_SQUARE ||
+            xq_position_king_square(pos, xq_color_opponent(search.root_color)) == XQ_NO_SQUARE)
+        {
+            result->score =
+                xq_position_king_square(pos, search.root_color) == XQ_NO_SQUARE ? -WIN : WIN;
+            result->score_available = true;
+            goto finished;
+        }
+        XqMoveList *moves = &search.root_moves;
+        xq_generate_legal(pos, moves);
+        if (moves->count == 0)
+        {
+            result->score           = -WIN;
+            result->score_available = true;
+            goto finished;
+        }
+        parallel_order_moves(pos, moves);
+        parallel_tt_new_iteration(search.options.transposition_table, search.evaluate,
+                                  search.evaluate_user, search.root_color);
+        if (search.options.transposition_table != NULL)
+        {
+            ParallelTtEntry cached;
+            bool            hit;
+            (void)parallel_tt_probe(search.options.transposition_table, xq_position_hash(pos), 1,
+                                    -INFINITY_SCORE, INFINITY_SCORE, true, &cached, &hit,
+                                    &search.stats.cache);
+            if (hit)
+                (void)parallel_prioritize_move(moves, cached.best_move);
+        }
+        result->move_available = true;
+        result->best_move      = moves->moves[0];
+        search.filtered_cycles =
+            xq_history_filter_root_cycles(engine != NULL ? engine->history : NULL, pos, moves);
+        search.root_total                   = (unsigned)moves->count;
+        result->stats.iteration_total_moves = search.root_total;
+        if (moves->count > 0)
+            result->best_move = moves->moves[0];
+        (void)search_check_time(&search);
+        if (moves->count == 0 ||
+            atomic_load_explicit(&search.time_state, memory_order_relaxed) == TIME_STOP)
             goto finished;
         if (effective.thread_count > 1)
         {
