@@ -249,7 +249,7 @@ enum
     PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
-    PARALLEL_TT_BUCKET_COUNT                    = 1 << 18,
+    PARALLEL_TT_BUCKET_COUNT                    = 1 << 24,
     PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT = 30
 };
 

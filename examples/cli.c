@@ -462,6 +462,9 @@ static void write_parallel_detail(FILE **log, const XqPosition *pos,
 {
     char fen[128], move[8];
     const XqSearchStats *stats = &result->stats;
+    const XqTranspositionStats *cache = &stats->cache;
+    double hit_rate = cache->probes == 0 ? 0.0 : 100.0 * (double)cache->hits / (double)cache->probes;
+
     if (!xq_position_to_fen(pos, fen, sizeof(fen)))
         strcpy(fen, "unavailable");
     fprintf(*log, "\n--- parallel engine search ---\nsearch_mode: parallel\n"
@@ -495,6 +498,10 @@ static void write_parallel_detail(FILE **log, const XqPosition *pos,
         fprintf(*log, "elapsed_ms: %" PRIu64 "\n", stats->elapsed_ms);
     else
         fprintf(*log, "elapsed_ms: unavailable\n");
+    fprintf(*log, "cache_available: %s\n", stats->cache_available ? "yes" : "no");
+    fprintf(*log, "cache_probes: %" PRIu64 "\ncache_hits: %" PRIu64 "\ncache_hit_rate: %.2f%%\n"
+                 "cache_cutoffs: %" PRIu64 "\ncache_stores: %" PRIu64 "\ncache_replacements: %" PRIu64 "\n",
+            cache->probes, cache->hits, hit_rate, cache->cutoffs, cache->stores, cache->replacements);
     flush_search_detail(log);
 }
 

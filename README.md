@@ -337,6 +337,7 @@ save-tt "build/my cache.tt"
 ```sh
 ./build/xiangqi_cli --search-detail
 ./build/xiangqi_cli --engine red --search-detail
+./build/xiangqi_cli --search parallel --threads 4 --engine red --search-detail
 ```
 
 默认不记录日志。开启后，向**当前工作目录**下的 `build/search_detail.txt` 追加文本；
@@ -361,6 +362,8 @@ save-tt "build/my cache.tt"
 | `cache_probes` / `cache_hits` / `cache_hit_rate` | 本次置换表查询数、命中数和命中率；查询为零时为 `0.00%` |
 | `cache_cutoffs` | 缓存分数直接复用或上下界导致剪枝的次数 |
 | `cache_stores` / `cache_replacements` | 本次缓存写入和替换次数 |
+
+并行模式同样输出上述 `cache_*` 字段，计数为本次搜索各线程的汇总，而非置换表跨次搜索的累计值。
 
 搜索进度在每步搜索结束后写入摘要，按根候选数量计算，不代表耗时或搜索节点的完成比例。
 中途被打断的候选不计入完成数；完整轮次显示 `N/N (100.0%)`。超时回退到上一完整轮选棋时，
