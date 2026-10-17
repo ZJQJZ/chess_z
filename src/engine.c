@@ -136,7 +136,7 @@ enum
     XQ_WIN_SCORE                          = 30000,
     XQ_MAX_STATIC_SCORE                   = 29999,
     XQ_TT_BUCKET_SIZE                     = 4,
-    XQ_TT_BUCKET_COUNT                    = 1 << 18
+    XQ_TT_BUCKET_COUNT                    = 1 << 24
 };
 
 /**
@@ -2325,8 +2325,7 @@ bool xq_engine_find_best_move(const XqEngineAdapter *engine,
                               const XqSearchLimits  *limits,
                               XqMove                *best_move)
 {
-    return xq_engine_find_best_move_with_progress(engine, pos, limits, best_move, NULL, NULL,
-                                                  NULL);
+    return xq_engine_find_best_move_with_progress(engine, pos, limits, best_move, NULL, NULL, NULL);
 }
 
 /**

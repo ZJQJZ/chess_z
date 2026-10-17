@@ -179,7 +179,7 @@ enum
     INFINITY_SCORE                              = 30001,
     PARALLEL_MAX_QUIESCENCE_DEPTH               = 500,
     PARALLEL_MIN_SPLIT_DEPTH                    = 5,
-    PARALLEL_INTERLEAVED_SPLIT_THREADS          = 3,
+    PARALLEL_INTERLEAVED_SPLIT_THREADS          = 2,
     PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
@@ -1425,8 +1425,8 @@ typedef struct QuiescenceResult
  *
  * This is a cooperative checkpoint, not an asynchronous interrupt or a wait for other threads. It
  * does not modify the position, publish a quiescence score, update counters or invoke progress
- * callbacks. A false result only means no stop was observed at this checkpoint; callers must keep
- * checking as recursion proceeds and after potentially expensive evaluation calls.
+ * callbacks. A false result only means no stop was observed at this checkpoint. Quiescence checks
+ * once at each recursive entry; the ordinary caller checks again before publishing its result.
  *
  * @param search Initialized, non-null shared search state whose time state may be updated here.
  * @param leaf   Non-null ordinary depth-zero node owning the entire quiescence subtree, passed
@@ -1461,7 +1461,8 @@ static bool quiescence_should_stop(Search *search,
  * inspecting cancellation or returning. Recursion uses only local windows and move lists, not the
  * larger shared `Node` structure. The ordinary leaf is used solely for time/ancestor stop checks.
  * No table, PV or progress updates occur here; each entry contributes to the executing thread's
- * node count.
+ * node count. Time and ancestor cancellation are checked once at entry. A child's stopped result
+ * propagates after restoring the move; the ordinary caller performs the final stop check.
  *
  * A stopped result has no usable score. Otherwise the score is fail-soft and must be classified
  * against the caller's original window before being published as a proven interval. A score <= the
@@ -1512,8 +1513,6 @@ static QuiescenceResult parallel_quiescence(Search            *search,
     else
         xq_generate_pseudo_legal(position, &moves);
 
-    if (quiescence_should_stop(search, leaf))
-        return (QuiescenceResult){0, true};
     if (moves.count == 0)
         return (QuiescenceResult){-WIN, false};
 
@@ -1524,8 +1523,6 @@ static QuiescenceResult parallel_quiescence(Search            *search,
             score = STATIC_LIMIT;
         if (score < -STATIC_LIMIT)
             score = -STATIC_LIMIT;
-        if (quiescence_should_stop(search, leaf))
-            return (QuiescenceResult){0, true};
         return (QuiescenceResult){score, false};
     }
 
@@ -1537,8 +1534,6 @@ static QuiescenceResult parallel_quiescence(Search            *search,
             stand_pat = STATIC_LIMIT;
         if (stand_pat < -STATIC_LIMIT)
             stand_pat = -STATIC_LIMIT;
-        if (quiescence_should_stop(search, leaf))
-            return (QuiescenceResult){0, true};
         best = stand_pat;
         if (best >= beta)
             return (QuiescenceResult){best, false};
@@ -1552,14 +1547,12 @@ static QuiescenceResult parallel_quiescence(Search            *search,
     {
         if (!in_check && moves.moves[i].captured == XQ_EMPTY_PIECE)
             continue;
-        if (quiescence_should_stop(search, leaf))
-            return (QuiescenceResult){0, true};
         if (!xq_position_make_move(position, moves.moves[i]))
             continue;
         QuiescenceResult child =
             parallel_quiescence(search, leaf, position, ply + 1, -beta, -alpha, stats);
         xq_position_unmake_move(position, moves.moves[i]);
-        if (child.stopped || quiescence_should_stop(search, leaf))
+        if (child.stopped)
             return (QuiescenceResult){0, true};
 
         int score = -child.score;
