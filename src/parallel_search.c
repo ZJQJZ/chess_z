@@ -1452,10 +1452,12 @@ static bool quiescence_should_stop(Search *search,
  * perspectives. Its result is clamped before use. Outside check, static evaluation is a stand-pat
  * candidate and only captures are searched. In check, all legal evasions are searched without stand
  * pat. The ordinary caller handles missing kings before entry; here an attacked opponent king is
- * scored as a win before any king-capture move is played. That check and an empty generated move
- * list are resolved before the extension limit. As in the built-in quiescence search, outside check
- * the list is pseudo-legal; no separate test for a legal continuation is performed before stand
- * pat. At the extension limit, remaining positions are evaluated even in check.
+ * scored as a win before any king-capture move is played. All move lists are pseudo-legal: the move
+ * loop skips non-captures outside check, and after making a candidate in check rejects it if the
+ * original mover is still in check. If no evasion survives, the position is a loss. King,
+ * empty-list and missing evasion checks take precedence over the extension limit. Outside check, no
+ * separate test for a legal continuation is performed before stand pat. At the extension limit, an
+ * in-check position must have an evasion before static evaluation of the original position is used.
  *
  * `position` is a private mutable copy owned by the ordinary leaf. Every made move is unmade before
  * inspecting cancellation or returning. Recursion uses only local windows and move lists, not the
@@ -1503,30 +1505,19 @@ static QuiescenceResult parallel_quiescence(Search            *search,
     if (quiescence_should_stop(search, leaf))
         return (QuiescenceResult){0, true};
 
-    if (xq_position_in_check(position, xq_color_opponent(position->side_to_move)))
+    XqColor mover = position->side_to_move;
+    if (xq_position_in_check(position, xq_color_opponent(mover)))
         return (QuiescenceResult){WIN, false};
 
-    bool       in_check = xq_position_in_check(position, position->side_to_move);
+    bool       in_check = xq_position_in_check(position, mover);
     XqMoveList moves;
-    if (in_check)
-        xq_generate_legal(position, &moves);
-    else
-        xq_generate_pseudo_legal(position, &moves);
+    xq_generate_pseudo_legal(position, &moves);
 
     if (moves.count == 0)
         return (QuiescenceResult){-WIN, false};
 
-    if (ply >= PARALLEL_MAX_QUIESCENCE_DEPTH)
-    {
-        int score = search->evaluate(position, position->side_to_move, search->evaluate_user);
-        if (score > STATIC_LIMIT)
-            score = STATIC_LIMIT;
-        if (score < -STATIC_LIMIT)
-            score = -STATIC_LIMIT;
-        return (QuiescenceResult){score, false};
-    }
-
-    int best = -INFINITY_SCORE;
+    bool depth_limited = ply >= PARALLEL_MAX_QUIESCENCE_DEPTH;
+    int  best          = -WIN; /* Without a legal evasion, an in-check node is a loss. */
     if (!in_check)
     {
         int stand_pat = search->evaluate(position, position->side_to_move, search->evaluate_user);
@@ -1535,13 +1526,15 @@ static QuiescenceResult parallel_quiescence(Search            *search,
         if (stand_pat < -STATIC_LIMIT)
             stand_pat = -STATIC_LIMIT;
         best = stand_pat;
-        if (best >= beta)
+        if (depth_limited || best >= beta)
             return (QuiescenceResult){best, false};
         if (best > alpha)
             alpha = best;
     }
 
-    parallel_order_moves(position, &moves);
+    /* At the cap, only the existence of a legal evasion matters, so no ordering is needed. */
+    if (!depth_limited)
+        parallel_order_moves(position, &moves);
 
     for (int i = 0; i < moves.count; ++i)
     {
@@ -1549,6 +1542,22 @@ static QuiescenceResult parallel_quiescence(Search            *search,
             continue;
         if (!xq_position_make_move(position, moves.moves[i]))
             continue;
+        if (in_check && xq_position_in_check(position, mover))
+        {
+            xq_position_unmake_move(position, moves.moves[i]);
+            continue;
+        }
+        if (depth_limited)
+        {
+            /* A legal evasion exists; evaluate the original position, not its child. */
+            xq_position_unmake_move(position, moves.moves[i]);
+            int score = search->evaluate(position, mover, search->evaluate_user);
+            if (score > STATIC_LIMIT)
+                score = STATIC_LIMIT;
+            if (score < -STATIC_LIMIT)
+                score = -STATIC_LIMIT;
+            return (QuiescenceResult){score, false};
+        }
         QuiescenceResult child =
             parallel_quiescence(search, leaf, position, ply + 1, -beta, -alpha, stats);
         xq_position_unmake_move(position, moves.moves[i]);
@@ -1942,8 +1951,8 @@ static SearchRange split_node(Search          *search,
  *
  * Checks terminal positions before the depth limit. A missing king loses for its side. At depth
  * zero, enters thread-local quiescence with the inherited window snapshot converted to the
- * side-to-move perspective. Quiescence searches captures or all legal check evasions, using the
- * built-in quiescence move-list rules. Static evaluations are clamped to `[-STATIC_LIMIT,
+ * side-to-move perspective. Quiescence filters pseudo-legal moves in its move loop to search
+ * captures or all legal check evasions. Static evaluations are clamped to `[-STATIC_LIMIT,
  * STATIC_LIMIT]`. Its fail-soft result is converted back to the root perspective and classified
  * against that snapshot before publishing an exact or bounded interval; later ancestor updates only
  * tighten the window. At positive depth, a node with no legal continuation loses because every
@@ -2348,8 +2357,9 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * returned scores use the root side's perspective; quiescence uses side-to-move scores internally.
  * Static scores are clamped to `[-STATIC_LIMIT, STATIC_LIMIT]`, while terminal wins and losses
  * receive `WIN` and `-WIN`. Terminal positions are checked before the depth limit, and ordinary
- * search treats no legal moves as a loss even without check. Quiescence checks only whether its
- * generated list is empty, using pseudo-legal moves outside check. On success, returns the last
+ * search treats no legal moves as a loss even without check. Quiescence uses pseudo-legal move
+ * lists and treats an empty list or an in-check position with no legal evasion as a loss; outside
+ * check it performs no extra legal-move scan before stand pat. On success, returns the last
  * complete iteration, a proven win, or completed first-iteration candidates. A partial first
  * iteration supplies a lower-bound score; with no completed candidates, returns a legal unsearched
  * fallback with `score_available == false`. An enabled table may reuse results from greater depths.

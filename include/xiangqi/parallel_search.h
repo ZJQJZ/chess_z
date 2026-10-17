@@ -82,10 +82,12 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * score_available == false and selected_move_depth == 0. Table generations advance per iteration
  * and entries survive between them.
  * Depth-zero leaves run quiescence in the executing thread: stand pat plus captures when not in
- * check, all legal evasions without stand pat when in check. As in built-in quiescence, an empty
- * generated list is a loss; outside check the list is pseudo-legal with no extra legal-move scan.
- * King checks and the empty-list check precede the 500-ply extension cap; at the cap other
- * positions use static evaluation even in check. The evaluator receives the side to move, and its
+ * check, all legal evasions without stand pat when in check. All move lists are pseudo-legal; the
+ * move loop skips non-captures outside check and rejects moves that leave the original mover in
+ * check when evading. An empty list or an in-check position with no legal evasion is a loss;
+ * outside check there is no extra legal-move scan before stand pat. King and loss checks precede
+ * the 500-ply extension cap; at the cap an in-check position must have a legal evasion before the
+ * original position is statically evaluated. The evaluator receives the side to move, and its
  * result is clamped to +/-28999 for negamax.
  * Quiescence flips child scores and windows, then ordinary search converts its result back to
  * the root perspective. Wins/losses remain +/-30000. Quiescence shares time and ancestor cancellation checks,
