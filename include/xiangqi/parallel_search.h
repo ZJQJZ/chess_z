@@ -100,7 +100,12 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * PV hints affect ordering only and are not exposed in the result. No custom move scorer is used.
  * TT statistics accumulate on the table, excluding PV reconstruction lookups; stats contains
  * per-call counters without resetting the table. Each normal-search node may split once with one
- * idle helper after all move ordering. CONTIGUOUS assigns a tail batch according to split_percent;
+ * idle helper after all move ordering, provided its remaining normal-search depth is at least
+ * PARALLEL_MIN_SPLIT_DEPTH (7, defined in parallel_search.c). This includes the next move and
+ * excludes quiescence extensions; it applies to root and descendant nodes under both strategies.
+ * Shallower nodes search serially. Pruning, terminal positions and cancellation may still end a
+ * task early. The default maximum depth of 3 therefore dispatches no helper tasks.
+ * CONTIGUOUS assigns a tail batch according to split_percent;
  * INTERLEAVED assigns odd zero-based indices to the helper and even indices to the owner,
  * ignoring split_percent even
  * when zero. With fewer than two moves, no available helper or failed task-completion allocation,

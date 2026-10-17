@@ -16,8 +16,9 @@
  *
  * The default configuration iteratively deepens to at most 3 plies, uses 2 threads including the
  * calling thread, and uses contiguous splitting to assign a tail batch of 50 percent of a node's
- * children to an available helper. The search has no time limit and no transposition table by
- * default.
+ * children to an available helper when the remaining depth permits splitting. The default depth is
+ * below `PARALLEL_MIN_SPLIT_DEPTH`, so helpers receive no tasks. The search has no time limit and
+ * no transposition table by default.
  *
  * @return The default parallel-search configuration.
  */
@@ -246,6 +247,7 @@ enum
     STATIC_LIMIT                                = 28999,
     INFINITY_SCORE                              = 30001,
     PARALLEL_MAX_QUIESCENCE_DEPTH               = 500,
+    PARALLEL_MIN_SPLIT_DEPTH                    = 7,
     PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
@@ -1808,9 +1810,12 @@ static void *worker_main(void *argument)
 /**
  * @brief Assigns a node's helper batch and returns the owner's range in the ordered move list.
  *
- * Called once after all move ordering and before searching any child. With fewer than two moves, no
- * idle helper, or a zero split percentage under `CONTIGUOUS`, returns `{0, count, 1}` without
- * dispatching a task, leaving all moves for the current thread to search serially.
+ * Called once after all move ordering and before searching any child. With remaining normal-search
+ * depth below `PARALLEL_MIN_SPLIT_DEPTH`, fewer than two moves, no idle helper, or a zero split
+ * percentage under `CONTIGUOUS`, returns `{0, count, 1}` without dispatching a task, leaving all
+ * moves for the current thread to search serially. The depth threshold applies to both strategies
+ * at root and descendant nodes, counts the next move, and excludes quiescence extensions. It limits
+ * planned task depth; pruning, terminal positions and cancellation may still end work early.
  *
  * Otherwise, reserves the first idle worker. `CONTIGUOUS` assigns the last `ceil(count *
  * split_percent / 100)` moves, limited to `1..count-1`, with `step` `1` for both batches.
@@ -1848,8 +1853,9 @@ static SearchRange split_node(Search          *search,
     int         count = node->moves.count;
     SearchRange owner = {0, count, 1};
     *pending          = NULL;
-    if (count < 2 || (search->options.split_strategy == XQ_PARALLEL_SPLIT_CONTIGUOUS &&
-                      search->options.split_percent == 0))
+    if (node->depth < PARALLEL_MIN_SPLIT_DEPTH || count < 2 ||
+        (search->options.split_strategy == XQ_PARALLEL_SPLIT_CONTIGUOUS &&
+         search->options.split_percent == 0))
         return owner;
     for (unsigned i = 0; i < search->worker_count; ++i)
     {
@@ -1929,12 +1935,13 @@ static SearchRange split_node(Search          *search,
  * metadata is finalized before splitting. Quiescence uses only its own basic capture ordering;
  * terminal and cache-cutoff paths skip this sorting work.
  *
- * For a continuing internal node, initializes all child intervals as unknown and calls
- * `split_node()` once to assign a batch using the configured strategy if a helper is available.
- * Searches its retained range using `search_range()`, which submits results and checks bounds.
- * After its own batch ends, consumes the task's completion notification and acquires its `finished`
- * flag, releases its reference, and checks the node again. The helper may already have another
- * task. Even a finished or cancelled node must wait for this handshake to protect its stack
+ * For a continuing node, initializes all child intervals as unknown and calls `split_node()` once
+ * to assign a batch using the configured strategy if the remaining normal-search depth meets
+ * `PARALLEL_MIN_SPLIT_DEPTH` and the other splitting conditions, including an available helper,
+ * hold. Searches its retained range using `search_range()`, which submits results and checks
+ * bounds. After its own batch ends, consumes the task's completion notification and acquires its
+ * `finished` flag, releases its reference, and checks the node again. The helper may already have
+ * another task. Even a finished or cancelled node must wait for this handshake to protect its stack
  * lifetime.
  *
  * A valid cutoff result retains the node's proven interval rather than substituting an ancestor
@@ -2283,16 +2290,17 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * in the built-in search. Each iteration waits for all its helper work before the next begins.
  * `CONTIGUOUS` assigns a tail batch by percentage; zero disables splitting, not helper creation.
  * `INTERLEAVED` assigns sorted indices `0,2,...` to the owner and `1,3,...` to its helper, ignoring
- * the percentage even when zero. Both strategies split only when a helper is idle and keep all
- * moves serial otherwise. The search is synchronous; depth-zero leaves run thread-local quiescence
- * for captures and legal check evasions, with at most 500 extension plies. Quiescence shares the
- * time budget and ancestor cancellation, but neither splits tasks nor accesses the table or PV.
- * Node counts include both normal and quiescence entries, including their shared leaf; reported
- * depths exclude extensions. Real-game history removes root candidates that close a third identical
- * cycle before any helper tasks are dispatched. No search-tree history is kept. A nonzero time
- * budget uses a monotonic deadline shared across preparation and all iterations; an unfinished
- * iteration above `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may
- * finish before returning.
+ * the percentage even when zero. Both strategies require remaining normal-search depth of at least
+ * `PARALLEL_MIN_SPLIT_DEPTH` and an idle helper; otherwise all moves stay with the current thread.
+ * The search is synchronous; depth-zero leaves run thread-local quiescence for captures and legal
+ * check evasions, with at most 500 extension plies. Quiescence shares the time budget and ancestor
+ * cancellation, but neither splits tasks nor accesses the table or PV. Node counts include both
+ * normal and quiescence entries, including their shared leaf; reported depths exclude extensions.
+ * Real-game history removes root candidates that close a third identical cycle before any helper
+ * tasks are dispatched. No search-tree history is kept. A nonzero time budget uses a monotonic
+ * deadline shared across preparation and all iterations; an unfinished iteration above
+ * `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
+ * returning.
  *
  * Only the adapter's `static_evaluate`, `user` and `history` are used; its `score_move` and serial
  * table are ignored. The parallel table remains in `options`. A null adapter or static evaluator
