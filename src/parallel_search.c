@@ -172,88 +172,23 @@ static void search_semaphore_destroy(SearchSemaphore *semaphore)
 #endif
 }
 
-/*
- * Each split has its own completion, independent of the worker that executes it. The owner and
- * worker each hold one reference until their wait/post has returned. This keeps the semaphore alive
- * even if the owner wakes and returns from its stack frame before the worker's post returns.
- */
-typedef struct TaskCompletion
-{
-    SearchSemaphore notification;
-    atomic_int      finished;
-    atomic_int      references;
-} TaskCompletion;
-
-/**
- * @brief Creates a task-local completion record with one reference for each participant.
- *
- * Allocates the record and initializes its `notification` semaphore with count zero, `finished`
- * flag with zero, and reference count with two. The node owner holds one reference; the other is
- * reserved for the worker and transferred when the task is published through `WORKER_READY`. Each
- * participant must call `task_completion_release()` once, after its last access to the record.
- *
- * Called after reserving a worker but before publishing its task. Allocation or semaphore creation
- * failure leaves no resources behind. The caller must then release the worker reservation and
- * search the whole batch serially. This function itself neither dispatches nor waits for work.
- *
- * @return Initialized completion record, or `NULL` if memory allocation or semaphore creation
- *         fails.
- */
-static TaskCompletion *task_completion_create(void)
-{
-    TaskCompletion *completion = malloc(sizeof(*completion));
-    if (completion == NULL)
-        return NULL;
-    if (!search_semaphore_init(&completion->notification))
-    {
-        free(completion);
-        return NULL;
-    }
-    atomic_init(&completion->finished, 0);
-    atomic_init(&completion->references, 2);
-    return completion;
-}
-
-/**
- * @brief Releases one participant's reference and destroys the record after the final release.
- *
- * The worker releases after posting the completion notification; the owner releases after consuming
- * that notification and acquiring the `finished` flag. Both must finish all accesses, including the
- * entire semaphore post or wait call, before releasing. Either participant may release first.
- *
- * The atomic decrement returns the previous count: a value of one means this release changes it to
- * zero and must destroy the semaphore and free the record. Release ordering publishes each
- * participant's preceding accesses; acquire ordering lets the final releaser observe the other
- * participant's release before destruction. Thus an owner waking before the worker's post returns
- * cannot destroy a semaphore still in use by that worker.
- *
- * This function does not wait for task completion. Call exactly once per held reference and never
- * access the record through that reference afterward, even if the other participant still holds it.
- *
- * @param completion Non-null, initialized record for which the caller holds one live reference.
- */
-static void task_completion_release(TaskCompletion *completion)
-{
-    if (atomic_fetch_sub_explicit(&completion->references, 1, memory_order_acq_rel) == 1)
-    {
-        search_semaphore_destroy(&completion->notification);
-        free(completion);
-    }
-}
-
 enum
 {
     WIN                                         = 30000,
     STATIC_LIMIT                                = 28999,
     INFINITY_SCORE                              = 30001,
     PARALLEL_MAX_QUIESCENCE_DEPTH               = 500,
-    PARALLEL_MIN_SPLIT_DEPTH                    = 7,
+    PARALLEL_MIN_SPLIT_DEPTH                    = 5,
+    PARALLEL_INTERLEAVED_SPLIT_THREADS          = 3,
     PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
     PARALLEL_TT_BUCKET_COUNT                    = 1 << 24,
     PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT = 30
 };
+
+_Static_assert(PARALLEL_INTERLEAVED_SPLIT_THREADS >= 1,
+               "interleaved splitting requires a positive participant limit");
 
 typedef struct ParallelTtEntry
 {
@@ -807,14 +742,96 @@ typedef struct ParallelPv
 } ParallelPv;
 
 /*
- * Each node has at most two batches. Retain only each batch's selected child PV, rather than
- * allocating a full variation for every move. The batch's physical thread is its sole writer.
+ * Retain only each batch's selected child PV, rather than allocating a full variation for every
+ * move. The batch's physical thread is its sole writer. Helper batches keep their PVs in task-local
+ * completion records so the node's stack storage does not grow with the participant limit.
  */
 typedef struct BatchPv
 {
     int        best_index; /* `-1` until this batch submits a valid child. */
     ParallelPv child_pv;
 } BatchPv;
+
+struct Worker;
+
+/*
+ * Each helper task has its own completion and PV, independent of the worker that executes it. The
+ * owner builds the entire `next` chain before publishing any task and keeps one reference to every
+ * record until all notifications have been consumed and PV selection has finished. The worker holds
+ * the other reference until its post returns. This also keeps the semaphore alive if the owner
+ * wakes before that post returns. Only the owner uses `worker`, while dispatching; after
+ * publication the worker may finish and be reused before the owner collects the result.
+ */
+typedef struct TaskCompletion
+{
+    SearchSemaphore        notification;
+    atomic_int             finished;
+    atomic_int             references;
+    struct TaskCompletion *next;
+    struct Worker         *worker;
+    BatchPv                pv;
+} TaskCompletion;
+
+/**
+ * @brief Creates a task-local completion record with one reference for each participant.
+ *
+ * Initializes the semaphore with count zero, `finished` with zero, reference count with two, an
+ * empty PV and null links. The node owner holds one reference; the other is reserved for the worker
+ * and transferred when the task is published through `WORKER_READY`. Each participant must call
+ * `task_completion_release()` once, after its last access to the record.
+ *
+ * Called after reserving a worker but before publishing its task. Allocation or semaphore creation
+ * failure leaves no resources behind. The caller releases that worker reservation and dispatches
+ * any already prepared helpers, or searches serially if none were prepared. This function itself
+ * neither dispatches nor waits for work.
+ *
+ * @return Initialized completion record, or `NULL` on allocation or semaphore creation failure.
+ */
+static TaskCompletion *task_completion_create(void)
+{
+    TaskCompletion *completion = malloc(sizeof(*completion));
+    if (completion == NULL)
+        return NULL;
+    if (!search_semaphore_init(&completion->notification))
+    {
+        free(completion);
+        return NULL;
+    }
+    atomic_init(&completion->finished, 0);
+    atomic_init(&completion->references, 2);
+    completion->next   = NULL;
+    completion->worker = NULL;
+    completion->pv     = (BatchPv){.best_index = -1};
+    return completion;
+}
+
+/**
+ * @brief Releases one participant's reference and destroys the record after the final release.
+ *
+ * The worker releases after posting the completion notification. The owner releases after consuming
+ * all helper notifications, acquiring their `finished` flags and finishing PV selection. Both must
+ * finish all accesses, including the entire semaphore post or wait call, before releasing. Either
+ * participant may release first. The owner must save `next` before releasing a linked record.
+ *
+ * The atomic decrement returns the previous count: a value of one means this release changes it to
+ * zero and must destroy the semaphore and free the record. Release ordering publishes each
+ * participant's preceding accesses; acquire ordering lets the final releaser observe the other
+ * participant's release before destruction. Thus an owner waking before the worker's post returns
+ * cannot destroy a semaphore still in use by that worker.
+ *
+ * This function does not wait for task completion. Call exactly once per held reference and never
+ * access the record through that reference afterward, even if the other participant still holds it.
+ *
+ * @param completion Non-null, initialized record for which the caller holds one live reference.
+ */
+static void task_completion_release(TaskCompletion *completion)
+{
+    if (atomic_fetch_sub_explicit(&completion->references, 1, memory_order_acq_rel) == 1)
+    {
+        search_semaphore_destroy(&completion->notification);
+        free(completion);
+    }
+}
 
 /**
  * @brief Prepends a selected move to its child's PV, truncating to the 64-move hint capacity.
@@ -828,7 +845,7 @@ typedef struct BatchPv
  * and `count` are overwritten; any old array elements beyond `count` remain irrelevant. The child
  * is unchanged, and complete `XqMove` records are copied without modifying metadata.
  *
- * Called after the node selects its final best child and waits for any helper to finish. The
+ * Called after the node selects its final best child and waits for all helpers to finish. The
  * destination must be exclusively owned, and the child must be stable and visible to this thread.
  * The two objects must not overlap: writing the first move and using `memcpy` are not safe for
  * in-place prepending. This function supplies no synchronization or allocation of its own.
@@ -985,13 +1002,13 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2,
                "parallel search requires lock-free atomic int");
 
 /*
- * The owner keeps this stack-allocated node and its parent chain alive until its helper completes.
+ * The owner keeps this stack-allocated node and its parent chain alive until all helpers complete.
  * Position, `moves`, `depth`, `parent`, `maximizing` and PV hints are immutable once shared. The
  * previous iteration's hint storage stays alive until the root and all helpers return. Each batch
- * PV has one writer; the owner reads the helper's PV only after completion synchronization. Bounds,
+ * PV has one writer; the owner reads helper PVs only after completion synchronization. Bounds,
  * window and `state` use atomic access, as do submission counters and `best_index`. Each child slot
  * has one writer and is immutable after publication through `best_index`. Helper completion is
- * acquired through its task completion record after consuming the notification, before the owner
+ * acquired through each task completion record after consuming its notification, before the owner
  * returns. State combines finished/cancelled in one atomic transition so readers never see a
  * partial stop.
  */
@@ -1004,7 +1021,7 @@ typedef struct Node
     bool           maximizing;
     const XqMove  *pv_hint;
     int            pv_hint_count;
-    BatchPv        owner_pv, helper_pv;
+    BatchPv        owner_pv;
     AtomicInterval value;
     Interval       children[XQ_MAX_MOVES];
     atomic_int     submitted_count;
@@ -1166,8 +1183,8 @@ static bool search_check_time(Search *search)
  * @brief Copies a completed node's result after all of its helper work has exited.
  *
  * Completion alone does not freeze the bounds: an in-flight helper may still submit a valid child
- * result. Unless the node has never been shared, the owner must consume its helper's completion
- * notification and acquire its `finished` flag before calling this function. That synchronization
+ * result. Unless the node has never been shared, the owner must consume every helper's completion
+ * notification and acquire each `finished` flag before calling this function. That synchronization
  * (or exclusive ownership) makes the result visible; these loads need only relaxed ordering.
  *
  * @param node Completed, quiescent node; must not be null and must remain alive during the call.
@@ -1576,7 +1593,7 @@ static QuiescenceResult parallel_quiescence(Search            *search,
  * aggregate.
  *
  * Each child must be submitted exactly once; cancelled results must be excluded. The owner's and
- * helper's disjoint batches ensure exclusive slot ownership. A completed node may still accept
+ * helpers' disjoint batches ensure exclusive slot ownership. A completed node may still accept
  * in-flight valid submissions. This function does not check completion or change `alpha`/`beta`.
  *
  * @param node  `Node` with a non-empty move list and initialized aggregation state; must not be
@@ -1696,8 +1713,8 @@ static Interval search_node(Search *,
  * atomically publishes any completion or cancellation. Only the matched PV move at index zero
  * inherits the hint suffix. The batch retains its best child's variation using the same bound
  * comparison and strict tie rule as `aggregate()`. Within a batch submissions are sequential, so a
- * final global `best_index` must also be its batch's retained `best_index`. The other batch never
- * reads or writes this batch's PV while it runs.
+ * final global `best_index` must also be its batch's retained `best_index`. Other batches never
+ * read or write this batch's PV while it runs.
  *
  * @param search Shared search state; must not be null.
  * @param node   Parent with generated moves and positive depth; keep it and its parent chain alive.
@@ -1792,7 +1809,7 @@ static void *worker_main(void *argument)
         if (atomic_load_explicit(&worker->state, memory_order_acquire) != WORKER_READY)
             abort();
         TaskCompletion *completion = worker->completion;
-        search_range(search, worker->node, worker->range, &worker->node->helper_pv, &worker->stats);
+        search_range(search, worker->node, worker->range, &completion->pv, &worker->stats);
         worker->node       = NULL;
         worker->range      = (SearchRange){0, 0, 1};
         worker->completion = NULL;
@@ -1808,7 +1825,7 @@ static void *worker_main(void *argument)
 }
 
 /**
- * @brief Assigns a node's helper batch and returns the owner's range in the ordered move list.
+ * @brief Assigns a node's helper batches and returns the owner's range in the ordered move list.
  *
  * Called once after all move ordering and before searching any child. With remaining normal-search
  * depth below `PARALLEL_MIN_SPLIT_DEPTH`, fewer than two moves, no idle helper, or a zero split
@@ -1817,33 +1834,36 @@ static void *worker_main(void *argument)
  * at root and descendant nodes, counts the next move, and excludes quiescence extensions. It limits
  * planned task depth; pruning, terminal positions and cancellation may still end work early.
  *
- * Otherwise, reserves the first idle worker. `CONTIGUOUS` assigns the last `ceil(count *
- * split_percent / 100)` moves, limited to `1..count-1`, with `step` `1` for both batches.
- * `INTERLEAVED` ignores the percentage (including zero): the owner searches `{0, count, 2}` and the
- * helper searches `{1, count, 2}`. Both strategies produce non-empty, disjoint batches covering all
- * original indices. Dispatch does not wait for a first child result.
+ * `CONTIGUOUS` reserves at most one helper and assigns the last `ceil(count * split_percent / 100)`
+ * moves, limited to `1..count-1`, with `step` `1` for both batches. `INTERLEAVED` ignores the
+ * percentage (including zero), using at most `PARALLEL_INTERLEAVED_SPLIT_THREADS` participants
+ * including the owner, capped by the move count. A participant limit of one disables interleaved
+ * splitting. The actual count N is one plus the number of successfully prepared helpers: the owner
+ * searches `{0, count, N}` and helper k searches `{k, count, N}` for k in `1..N-1`. Both strategies
+ * produce non-empty, disjoint batches covering all original indices.
  *
- * Acquires `IDLE` with a CAS to `RESERVED`, ensuring exclusive ownership of task fields and
- * acquiring the previous worker release. Creates a per-task completion, stores the borrowed node
- * and batch range, release-publishes `READY`, and posts a task notification. The owner waits on
- * this completion even after pruning; the worker can return to `IDLE` independently. If completion
- * allocation or semaphore initialization fails, releases the reservation and keeps the entire batch
- * serial.
+ * Reserves workers in pool order using `IDLE` to `RESERVED` CAS, acquiring their previous releases.
+ * Builds all completion records before publishing any task, so the actual participant count and
+ * every range are fixed before work starts. If completion allocation or semaphore initialization
+ * fails, releases that worker reservation and stops acquiring helpers; already prepared helpers are
+ * still dispatched, or all moves stay serial if none were prepared. Publishes each borrowed node,
+ * range and completion through `READY`, then posts its task notification. The owner waits for every
+ * completion even after pruning and retains the records until PV selection finishes. Workers can
+ * return to `IDLE` independently; dispatch never waits for a first child result.
  *
- * Only already-created, idle workers receive tasks; there is no pending-task queue. If reservation
- * fails, the current thread keeps searching instead of waiting for a worker. Thus nested splits
- * cannot create queued tasks that depend on workers already blocked waiting for those tasks.
+ * Only already-created, idle workers receive tasks. A single scan skips busy workers and never
+ * waits for more to become idle. The returned list tracks dispatched tasks, not a pending-task
+ * queue. Nested splits cannot queue work that depends on workers already waiting for that work.
  *
  * The node must have no active helper or previously claimed moves and must remain alive until its
- * assigned helper has completed the batch. This function schedules work but does not search moves
- * or wait for the helper to finish.
+ * assigned helpers have completed their batches. This function schedules work but does not search
+ * moves or wait for helpers to finish.
  *
  * @param search  Shared search state with validated split options and an initialized worker pool;
  *                must not be null.
  * @param node    `Node` with a generated move list ready for its initial batch assignment; must not
  *                be null.
- * @param pending Required owner-local output; receives this task's completion, or `NULL` if not
- *                split.
+ * @param pending Required owner-local output; receives the completion list, or `NULL` if not split.
  * @return        The owner's batch range, or `{0, count, 1}` if no split occurs.
  */
 static SearchRange split_node(Search          *search,
@@ -1857,7 +1877,14 @@ static SearchRange split_node(Search          *search,
         (search->options.split_strategy == XQ_PARALLEL_SPLIT_CONTIGUOUS &&
          search->options.split_percent == 0))
         return owner;
-    for (unsigned i = 0; i < search->worker_count; ++i)
+
+    bool interleaved  = search->options.split_strategy == XQ_PARALLEL_SPLIT_INTERLEAVED;
+    int  helper_limit = interleaved ? PARALLEL_INTERLEAVED_SPLIT_THREADS - 1 : 1;
+    if (helper_limit > count - 1)
+        helper_limit = count - 1;
+    int              helper_count = 0;
+    TaskCompletion **tail         = pending;
+    for (unsigned i = 0; i < search->worker_count && helper_count < helper_limit; ++i)
     {
         Worker *worker   = &search->workers[i];
         int     expected = WORKER_IDLE;
@@ -1868,31 +1895,38 @@ static SearchRange split_node(Search          *search,
             if (completion == NULL)
             {
                 atomic_store_explicit(&worker->state, WORKER_IDLE, memory_order_release);
-                return owner;
+                break;
             }
-            SearchRange helper;
-            if (search->options.split_strategy == XQ_PARALLEL_SPLIT_INTERLEAVED)
-            {
-                owner.step = 2;
-                helper     = (SearchRange){1, count, 2};
-            }
-            else
-            {
-                int assigned = (count * (int)search->options.split_percent + 99) / 100;
-                if (assigned >= count)
-                    assigned = count - 1;
-                owner.end = count - assigned;
-                helper    = (SearchRange){owner.end, count, 1};
-            }
-            worker->node       = node;
-            worker->range      = helper;
-            worker->completion = completion;
-            *pending           = completion;
-            atomic_store_explicit(&worker->state, WORKER_READY, memory_order_release);
-            search_semaphore_post(&worker->task_available);
-            /* The worker may already have cleared its task fields; return the local copy. */
-            return owner;
+            completion->worker = worker;
+            *tail              = completion;
+            tail               = &completion->next;
+            ++helper_count;
         }
+    }
+    if (helper_count == 0)
+        return owner;
+
+    if (interleaved)
+        owner.step = helper_count + 1;
+    else
+    {
+        int assigned = (count * (int)search->options.split_percent + 99) / 100;
+        if (assigned >= count)
+            assigned = count - 1;
+        owner.end = count - assigned;
+    }
+
+    int batch_index = 1;
+    for (TaskCompletion *completion = *pending; completion != NULL; completion = completion->next)
+    {
+        Worker *worker     = completion->worker;
+        worker->node       = node;
+        worker->range      = interleaved ? (SearchRange){batch_index, count, owner.step}
+                                         : (SearchRange){owner.end, count, 1};
+        worker->completion = completion;
+        atomic_store_explicit(&worker->state, WORKER_READY, memory_order_release);
+        search_semaphore_post(&worker->task_available);
+        ++batch_index;
     }
     return owner;
 }
@@ -1936,13 +1970,13 @@ static SearchRange split_node(Search          *search,
  * terminal and cache-cutoff paths skip this sorting work.
  *
  * For a continuing node, initializes all child intervals as unknown and calls `split_node()` once
- * to assign a batch using the configured strategy if the remaining normal-search depth meets
+ * to assign helper batches using the configured strategy if the remaining normal-search depth meets
  * `PARALLEL_MIN_SPLIT_DEPTH` and the other splitting conditions, including an available helper,
  * hold. Searches its retained range using `search_range()`, which submits results and checks
- * bounds. After its own batch ends, consumes the task's completion notification and acquires its
- * `finished` flag, releases its reference, and checks the node again. The helper may already have
- * another task. Even a finished or cancelled node must wait for this handshake to protect its stack
- * lifetime.
+ * bounds. After its own batch ends, consumes every task's completion notification, acquires each
+ * `finished` flag, and checks the node again. Helpers may already have other tasks. Even a finished
+ * or cancelled node must wait for all these handshakes to protect its stack lifetime. Completion
+ * records remain alive until PV selection finishes, then the owner releases all its references.
  *
  * A valid cutoff result retains the node's proven interval rather than substituting an ancestor
  * threshold. If ancestor completion causes cancellation before a normal completion is published,
@@ -1993,7 +2027,7 @@ static Interval search_node(Search            *search,
     node.position            = *position;
     node.depth               = depth;
     node.maximizing          = position->side_to_move == search->root_color;
-    node.owner_pv.best_index = node.helper_pv.best_index = -1;
+    node.owner_pv.best_index = -1;
     atomic_init(&node.submitted_count, 0);
     atomic_init(&node.submitted_bound, node.maximizing ? -WIN : WIN);
     atomic_init(&node.value.lower, -WIN);
@@ -2142,15 +2176,14 @@ static Interval search_node(Search            *search,
     search_range(search, &node, owner_range, &node.owner_pv, stats);
 
     /*
-     * Node completion does not release the borrowed node: always consume the helper's notification.
+     * Node completion does not release the borrowed node: always consume every helper notification.
      * Helpers observe cancellation themselves. A notification posted early remains available.
      */
-    if (pending != NULL)
+    for (TaskCompletion *completion = pending; completion != NULL; completion = completion->next)
     {
-        search_semaphore_wait(&pending->notification);
-        if (!atomic_load_explicit(&pending->finished, memory_order_acquire))
+        search_semaphore_wait(&completion->notification);
+        if (!atomic_load_explicit(&completion->finished, memory_order_acquire))
             abort();
-        task_completion_release(pending);
     }
 
     /*
@@ -2195,15 +2228,26 @@ static Interval search_node(Search            *search,
         int best = atomic_load_explicit(&node.best_index, memory_order_relaxed);
         if (best >= 0)
         {
-            const BatchPv *batch =
-                node.owner_pv.best_index == best ? &node.owner_pv : &node.helper_pv;
-            assert(batch->best_index == best);
+            const BatchPv *batch = node.owner_pv.best_index == best ? &node.owner_pv : NULL;
+            for (TaskCompletion *completion = pending; batch == NULL && completion != NULL;
+                 completion                 = completion->next)
+            {
+                if (completion->pv.best_index == best)
+                    batch = &completion->pv;
+            }
+            assert(batch != NULL);
             parallel_build_pv(pv_out, node.moves.moves[best], &batch->child_pv);
             if (parent == NULL)
                 retain_root_order(search, &node, best);
             parallel_tt_store_node(search, &node, key, value, node.moves.moves[best],
                                    &stats->cache);
         }
+    }
+    while (pending != NULL)
+    {
+        TaskCompletion *next = pending->next;
+        task_completion_release(pending);
+        pending = next;
     }
     return value;
 }
@@ -2289,16 +2333,19 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * iteration. Stops at the maximum depth, a terminal root, a proven winning move, or a time stop, as
  * in the built-in search. Each iteration waits for all its helper work before the next begins.
  * `CONTIGUOUS` assigns a tail batch by percentage; zero disables splitting, not helper creation.
- * `INTERLEAVED` assigns sorted indices `0,2,...` to the owner and `1,3,...` to its helper, ignoring
- * the percentage even when zero. Both strategies require remaining normal-search depth of at least
- * `PARALLEL_MIN_SPLIT_DEPTH` and an idle helper; otherwise all moves stay with the current thread.
- * The search is synchronous; depth-zero leaves run thread-local quiescence for captures and legal
- * check evasions, with at most 500 extension plies. Quiescence shares the time budget and ancestor
- * cancellation, but neither splits tasks nor accesses the table or PV. Node counts include both
- * normal and quiescence entries, including their shared leaf; reported depths exclude extensions.
- * Real-game history removes root candidates that close a third identical cycle before any helper
- * tasks are dispatched. No search-tree history is kept. A nonzero time budget uses a monotonic
- * deadline shared across preparation and all iterations; an unfinished iteration above
+ * `INTERLEAVED` distributes sorted indices round-robin among the owner and prepared helpers, up to
+ * `PARALLEL_INTERLEAVED_SPLIT_THREADS` total participants, ignoring the percentage even when zero.
+ * With N actual participants, the owner takes `0,N,...` and helper k takes `k,k+N,...`. N shrinks
+ * when moves, idle workers or completion resources are insufficient; a limit of one is serial. Both
+ * strategies require remaining normal-search depth of at least `PARALLEL_MIN_SPLIT_DEPTH` and an
+ * idle helper; otherwise all moves stay with the current thread. The search is synchronous;
+ * depth-zero leaves run thread-local quiescence for captures and legal check evasions, with at most
+ * 500 extension plies. Quiescence shares the time budget and ancestor cancellation, but neither
+ * splits tasks nor accesses the table or PV. Node counts include both normal and quiescence
+ * entries, including their shared leaf; reported depths exclude extensions. Real-game history
+ * removes root candidates that close a third identical cycle before any helper tasks are
+ * dispatched. No search-tree history is kept. A nonzero time budget uses a monotonic deadline
+ * shared across preparation and all iterations; an unfinished iteration above
  * `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
  * returning.
  *
@@ -2318,9 +2365,10 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  *
  * Evaluators may be called concurrently; the callback and its user data must support this and must
  * not modify positions. Scheduling uses atomic states and semaphores, without explicit mutexes.
- * Each split owns a separate completion notification, allowing its worker to become available
- * before the owner collects the result. Failure to create a completion falls back to serial work
- * for that node; failure to create the initial worker pool returns a resource error.
+ * Each helper task owns a separate completion notification and PV, allowing its worker to become
+ * available before the owner collects the result. Failure to create a completion stops further
+ * reservations; prepared helpers are dispatched, or the node stays serial if none were prepared.
+ * Failure to create the initial worker pool returns a resource error.
  *
  * Zeroes a non-null `result` before validating arguments. On success, fills the move and score
  * validity metadata. Cache counters accumulate on the optional borrowed table; PV cache

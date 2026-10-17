@@ -29,7 +29,7 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
 typedef enum XqParallelSplitStrategy
 {
     XQ_PARALLEL_SPLIT_CONTIGUOUS = 0, /* Helper takes a tail batch sized by split_percent. */
-    XQ_PARALLEL_SPLIT_INTERLEAVED    /* After ordering: owner even indices, helper odd (zero-based). */
+    XQ_PARALLEL_SPLIT_INTERLEAVED    /* After ordering: round-robin among owner and available helpers. */
 } XqParallelSplitStrategy;
 
 typedef struct XqParallelOptions
@@ -99,17 +99,23 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * a PV prefix; terminal positions, cache bounds/misses/contention or invalid moves can shorten it.
  * PV hints affect ordering only and are not exposed in the result. No custom move scorer is used.
  * TT statistics accumulate on the table, excluding PV reconstruction lookups; stats contains
- * per-call counters without resetting the table. Each normal-search node may split once with one
- * idle helper after all move ordering, provided its remaining normal-search depth is at least
- * PARALLEL_MIN_SPLIT_DEPTH (7, defined in parallel_search.c). This includes the next move and
- * excludes quiescence extensions; it applies to root and descendant nodes under both strategies.
+ * per-call counters without resetting the table. Each normal-search node may split once after all
+ * move ordering, provided its remaining normal-search depth is at least PARALLEL_MIN_SPLIT_DEPTH
+ * (5, defined in parallel_search.c). This includes the next move and excludes quiescence extensions;
+ * it applies to root and descendant nodes under both strategies.
  * Shallower nodes search serially. Pruning, terminal positions and cancellation may still end a
  * task early. The default maximum depth of 3 therefore dispatches no helper tasks.
- * CONTIGUOUS assigns a tail batch according to split_percent;
- * INTERLEAVED assigns odd zero-based indices to the helper and even indices to the owner,
- * ignoring split_percent even
- * when zero. With fewer than two moves, no available helper or failed task-completion allocation,
- * the owner searches all moves serially. thread_count == 1 disables splitting for either strategy.
+ * CONTIGUOUS assigns a tail batch to at most one helper according to split_percent.
+ * INTERLEAVED uses at most PARALLEL_INTERLEAVED_SPLIT_THREADS participants (3, defined in
+ * parallel_search.c), including the owner, and ignores split_percent even when zero. It prepares
+ * idle helpers before fixing the actual participant count N, capped by the number of moves; the
+ * owner takes indices 0,N,2N,... and helper k takes k,k+N,k+2N,... for k in 1..N-1. Insufficient
+ * idle workers reduce N without waiting. A limit of 1 disables interleaved splitting; 2 gives
+ * even/odd batches. Completion allocation failure stops further reservations but keeps already
+ * prepared helpers. With no prepared helper or fewer than two moves, the owner searches all moves
+ * serially. thread_count == 1 disables splitting for either strategy. The global thread pool size
+ * and its default of 2 are unchanged; three-way splitting requires thread_count >= 3 and two idle
+ * helpers. Every dispatched helper completes before the node returns, including on cancellation.
  * The budget covers preparation, pool creation and all iterations. At the first detected deadline,
  * an unfinished iteration with strictly more than 30% of its root candidates completed may finish;
  * otherwise running nodes are cancelled. No new iteration starts after the deadline. Clock failure

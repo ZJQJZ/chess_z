@@ -63,7 +63,8 @@ static void print_usage(const char *program)
     printf("  --threads N                parallel threads including caller (default 2)\n");
     printf("  --split-strategy contiguous|interleaved  parallel split strategy (default contiguous)\n");
     printf("  --split-percent P          contiguous batch percentage, 0..100 (default 50; 0 disables splitting)\n");
-    printf("  interleaved: sorted indices 0,2,4,... stay with caller; 1,3,5,... go to helper; split-percent is ignored\n");
+    printf("  interleaved: sorted moves are shared round-robin among caller and available helpers; split-percent is ignored\n");
+    printf("  interleaved: per-node thread limit is set by PARALLEL_INTERLEAVED_SPLIT_THREADS in src/parallel_search.c (includes caller)\n");
     printf("  parallel: iterative deepening (default max depth 3), in-memory cache, no time limit by default; no TT files\n");
     printf("  %-21s  %s\n", "-f, --fen FEN", "initialize the position from FEN");
     printf("  %-21s  %s\n", "-e, --engine COLOR", "choose the engine side: red or black");
