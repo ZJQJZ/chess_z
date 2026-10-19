@@ -910,3 +910,922 @@ search depth 8/100  [#####---------------] 25%  roots 9/36  elapsed 0.9s / 5.0sz
 --progress \
 --fen "3akab2/9/b7r/p3C3p/2p6/7cP/c3P1p2/B6C1/5R3/3AKAB2 b - -"
 ```
+
+```
+zhangjiaqi@zhangjiaqideMacBook-Pro-2 chess_z % ./build/xiangqi_cli \
+--search parallel \
+--depth 100 \
+--threads 16 \
+--split-strategy interleaved \
+--progress \
+--time-ms 5000 \
+--engine b
+Search mode: parallel, iterative deepening to max depth 100, threads 16, split strategy interleaved, split 50% (ignored for interleaved); default time limit 5000 ms; in-memory cache enabled.
+Xiangqi demo: human red vs parallel black engine
+Use coordinates a-i and ranks 0-9. Example: b2b9
+commands:
+  a0a1 [time_ms]  move; optional positive integer time limit for the next engine reply
+                  e.g. a0a1 2000 (2 seconds); omit time to use the startup default
+  a0a1 a9a8       play your move and specify the engine reply, without searching
+                  both moves must be legal; invalid input leaves the whole turn unchanged
+                  exactly two moves; no third move or additional time argument
+  fen             print current FEN
+  moves           print legal moves
+  undo            take back your last move and the automatic or specified engine reply (alias: u)
+  flip            rotate the board display 180 degrees; move coordinates stay unchanged
+  quit            exit
+9 車 馬 象 士 将 士 象 馬 車 
+8 .  .  .  .  .  .  .  .  .  
+7 .  炮 .  .  .  .  .  炮 .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+5 .  .  .  .  .  .  .  .  .  
+4 .  .  .  .  .  .  .  .  .  
+3 兵 .  兵 .  兵 .  兵 .  兵 
+2 .  炮 .  .  .  .  .  炮 .  
+1 .  .  .  .  .  .  .  .  .  
+0 車 馬 相 仕 帥 仕 相 馬 車 
+  a  b  c  d  e  f  g  h  i
+side: red
+red to move > flip
+Board view: black at bottom. Move coordinates are unchanged.
+0 車 馬 相 仕 帥 仕 相 馬 車 
+1 .  .  .  .  .  .  .  .  .  
+2 .  炮 .  .  .  .  .  炮 .  
+3 兵 .  兵 .  兵 .  兵 .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 .  .  .  .  .  炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 馬 象 士 将 士 象 馬 車 
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > h2e2 h9g7
+black engine plays (specified by player): h9g7
+0 車 馬 相 仕 帥 仕 相 馬 車 
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  .  .  炮 .  .  炮 .  
+3 兵 .  兵 .  兵 .  兵 .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  .  炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 馬 車 
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > h0g2 1000
+0 車 .  相 仕 帥 仕 相 馬 車 
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  .  炮 .  
+3 兵 .  兵 .  兵 .  兵 .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  .  炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 馬 車 
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 8/100  [--------------------] 0%  roots 0/42  elapsed 1.0s / 1.0s; time limit / clock stop; selected depth 7
+black engine plays: b7c7
+0 車 .  相 仕 帥 仕 相 馬 車 
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  .  炮 .  
+3 兵 .  兵 .  兵 .  兵 .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  炮 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 馬 車 
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > i0i1 1000
+0 .  .  相 仕 帥 仕 相 馬 車 
+1 車 .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  .  炮 .  
+3 兵 .  兵 .  兵 .  兵 .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  炮 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 馬 車 
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 8/100  [#-------------------] 5%  roots 2/37  elapsed 1.0s / 1.0s; time limit / clock stop; selected depth 7
+black engine plays: c7c3
+0 .  .  相 仕 帥 仕 相 馬 車 
+1 車 .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  .  炮 .  
+3 兵 .  兵 .  兵 .  炮 .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 馬 車 
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > i1d1
+0 .  .  相 仕 帥 仕 相 馬 車 
+1 .  .  .  .  .  車 .  .  .  
+2 .  .  馬 .  炮 .  .  炮 .  
+3 兵 .  兵 .  兵 .  炮 .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 馬 車 
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 9/100  [--------------------] 0%  roots 0/38  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 8
+black engine plays: c3g3
+0 .  .  相 仕 帥 仕 相 馬 車 
+1 .  .  .  .  .  車 .  .  .  
+2 .  .  馬 .  炮 .  .  炮 .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 馬 車 
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > g0i2
+0 .  .  .  仕 帥 仕 相 馬 車 
+1 .  .  .  .  .  車 .  .  .  
+2 相 .  馬 .  炮 .  .  炮 .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 馬 車 
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 9/100  [--------------------] 0%  roots 0/36  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 8
+black engine plays: b9c7
+0 .  .  .  仕 帥 仕 相 馬 車 
+1 .  .  .  .  .  車 .  .  .  
+2 相 .  馬 .  炮 .  .  炮 .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 .  車 
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > b0c2
+0 .  .  .  仕 帥 仕 相 .  車 
+1 .  .  .  .  .  車 .  .  .  
+2 相 .  馬 .  炮 .  馬 炮 .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 .  車 
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 9/100  [--------------------] 0%  roots 0/38  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 8
+black engine plays: a9b9
+0 .  .  .  仕 帥 仕 相 .  車 
+1 .  .  .  .  .  車 .  .  .  
+2 相 .  馬 .  炮 .  馬 炮 .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 車 .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > a0b0
+0 .  .  .  仕 帥 仕 相 車 .  
+1 .  .  .  .  .  車 .  .  .  
+2 相 .  馬 .  炮 .  馬 炮 .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  .  .  .  
+6 卒 .  卒 .  卒 .  卒 .  卒 
+7 .  炮 馬 .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 車 .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 8/100  [####################] 100%  roots 42/42  elapsed 6.8s / 5.0s; time limit / clock stop; selected depth 8
+black engine plays: c6c5
+0 .  .  .  仕 帥 仕 相 車 .  
+1 .  .  .  .  .  車 .  .  .  
+2 相 .  馬 .  炮 .  馬 炮 .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  .  .  .  卒 .  .  
+6 卒 .  卒 .  卒 .  .  .  卒 
+7 .  炮 馬 .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 車 .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > d1d4
+0 .  .  .  仕 帥 仕 相 車 .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 炮 .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  車 .  .  .  
+5 .  .  .  .  .  .  卒 .  .  
+6 卒 .  卒 .  卒 .  .  .  卒 
+7 .  炮 馬 .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 車 .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 9/100  [--------------------] 0%  roots 0/44  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 8
+black engine plays: g6g5
+0 .  .  .  仕 帥 仕 相 車 .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 炮 .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  車 .  .  .  
+5 .  .  卒 .  .  .  卒 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 .  炮 馬 .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 車 .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > b2b7
+0 .  .  .  仕 帥 仕 相 車 .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  車 .  .  .  
+5 .  .  卒 .  .  .  卒 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 .  炮 馬 .  .  .  馬 炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 車 .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 8/100  [####################] 100%  roots 39/39  elapsed 6.9s / 5.0s; time limit / clock stop; selected depth 8
+black engine plays: g7f5
+0 .  .  .  仕 帥 仕 相 車 .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  車 .  .  .  
+5 .  .  卒 馬 .  .  卒 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 .  炮 .  .  .  .  馬 炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 車 .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > d4f4
+0 .  .  .  仕 帥 仕 相 車 .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  車 .  .  .  .  .  
+5 .  .  卒 馬 .  .  卒 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 .  炮 .  .  .  .  馬 炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 車 .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 9/100  [####################] 100%  roots 44/44  elapsed 9.7s / 5.0s; time limit / clock stop; selected depth 9
+black engine plays: b9b7
+0 .  .  .  仕 帥 仕 相 車 .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  車 .  .  .  .  .  
+5 .  .  卒 馬 .  .  卒 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 .  炮 .  .  .  .  馬 車 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > b0b7
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  車 .  .  .  .  .  
+5 .  .  卒 馬 .  .  卒 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 .  炮 .  .  .  .  馬 車 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [--------------------] 0%  roots 0/42  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 9
+black engine plays: h7b7
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  車 .  .  .  .  .  
+5 .  .  卒 馬 .  .  卒 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 .  .  .  .  .  .  馬 炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > f4f5
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  卒 車 .  .  卒 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 .  .  .  .  .  .  馬 炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [--------------------] 0%  roots 0/33  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 9
+black engine plays: g5g4
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  卒 .  .  .  .  .  .  
+5 .  .  .  車 .  .  卒 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 .  .  .  .  .  .  馬 炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > f5c5
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  卒 .  .  .  .  .  .  
+5 .  .  .  .  .  .  車 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 .  .  .  .  .  .  馬 炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 車 .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [--------------------] 0%  roots 0/32  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 9
+black engine plays: i9i7
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 相 .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  卒 .  .  .  .  .  .  
+5 .  .  .  .  .  .  車 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > i2g4
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  相 .  .  .  .  .  .  
+5 .  .  .  .  .  .  車 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 炮 .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 9/100  [#-------------------] 6%  roots 2/33  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 8
+black engine plays: b7b8
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  馬 .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  相 .  .  .  .  .  .  
+5 .  .  .  .  .  .  車 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  炮 .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > c2d4
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  相 .  .  馬 .  .  .  
+5 .  .  .  .  .  .  車 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  炮 .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [--------------------] 0%  roots 0/40  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 9
+black engine plays: b8c8
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  相 .  .  馬 .  .  .  
+5 .  .  .  .  .  .  車 .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  炮 .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > c5f5
+0 .  .  .  仕 帥 仕 相 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  相 .  .  馬 .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  炮 .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [####################] 100%  roots 32/32  elapsed 5.1s / 5.0s; time limit / clock stop; selected depth 10
+black engine plays: c8c0
+0 .  .  .  仕 帥 仕 炮 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  相 .  .  馬 .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > d0e1
+0 .  .  .  仕 帥 .  炮 .  .  
+1 .  .  .  .  仕 .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  相 .  .  馬 .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 9/100  [--------------------] 0%  roots 0/34  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 8
+black engine plays: g3a3
+0 .  .  .  仕 帥 .  炮 .  .  
+1 .  .  .  .  仕 .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  相 .  .  馬 .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > u
+Undid 2 move(s). Your turn again.
+0 .  .  .  仕 帥 仕 炮 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  相 .  .  馬 .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > e0e1
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  炮 .  兵 .  .  .  兵 
+4 .  .  相 .  .  馬 .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [--------------------] 0%  roots 0/33  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 9
+black engine plays: g3a3
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  相 .  .  馬 .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  卒 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > d4e6
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  相 .  .  .  .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  馬 .  .  .  卒 
+7 車 .  .  .  .  .  馬 .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 11/100  [--------------------] 0%  roots 0/39  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 10
+black engine plays: c7e6
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  馬 .  炮 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  相 .  .  .  .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  馬 .  .  .  卒 
+7 車 .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > e2e6
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  馬 .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  相 .  .  .  .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  炮 .  .  .  卒 
+7 車 .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [--------------------] 0%  roots 0/33  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 9
+black engine plays: i7g7
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  馬 .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  相 .  .  .  .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  炮 .  .  .  卒 
+7 .  .  車 .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > g2f4
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  .  .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  相 馬 .  .  .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  炮 .  .  .  卒 
+7 .  .  車 .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [--------------------] 0%  roots 0/36  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 9
+black engine plays: g7g4
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  .  .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  車 馬 .  .  .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  炮 .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > f4d6
+first move is illegal or is not a four-character coordinate move; no moves played.
+Use a0a1, a0a1 2000, or a0a1 a9a8; type moves for legal first moves.
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  .  .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  車 馬 .  .  .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  炮 .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > f4d5
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  .  .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  車 .  .  .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  炮 .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [####################] 100%  roots 41/41  elapsed 5.3s / 5.0s; time limit / clock stop; selected depth 10
+black engine plays: g4g1
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  車 .  帥 .  .  .  .  
+2 .  .  .  .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  炮 .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > e1e2
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  車 .  .  .  .  .  .  
+2 .  .  .  .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  炮 .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 9/100  [####################] 100%  roots 41/41  elapsed 5.2s / 5.0s; time limit / clock stop; selected depth 9
+black engine plays: g1g6
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  .  .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  .  .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  車 .  炮 .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > e6e4
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  .  .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  車 .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [##------------------] 10%  roots 4/38  elapsed 5.0s / 5.0s; time limit / clock stop; selected depth 9
+black engine plays: g6g2
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  車 .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > e2e1
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  車 .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 10/100  [####################] 100%  roots 41/41  elapsed 7.3s / 5.0s; time limit / clock stop; selected depth 10
+black engine plays: g2g1
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  車 .  帥 .  .  .  .  
+2 .  .  .  .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > e1e2 10
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  車 .  .  .  .  .  .  
+2 .  .  .  .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 9/100  [--------------------] 2%  roots 1/41  elapsed 0.0s / 0.0s; time limit / clock stop; selected depth 8
+black engine plays: g1g2
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  車 .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > e2e1 50
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  車 .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 11/100  [--------------------] 0%  roots 0/41  elapsed 0.1s / 0.1s; time limit / clock stop; selected depth 10
+black engine plays: g2g1
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  車 .  帥 .  .  .  .  
+2 .  .  .  .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > e1e2 50
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  車 .  .  .  .  .  .  
+2 .  .  .  .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 9/100  [#-------------------] 7%  roots 3/41  elapsed 0.1s / 0.1s; time limit / clock stop; selected depth 8
+black engine plays: g1g2
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  .  .  .  .  .  
+2 .  .  車 .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > e2e1 50
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  .  .  帥 .  .  .  .  
+2 .  .  車 .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 11/100  [--------------------] 0%  roots 0/41  elapsed 0.1s / 0.1s; time limit / clock stop; selected depth 10
+black engine plays: g2g1
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  車 .  帥 .  .  .  .  
+2 .  .  .  .  .  .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > e1e2 50
+0 .  .  .  仕 .  仕 炮 .  .  
+1 .  .  車 .  .  .  .  .  .  
+2 .  .  .  .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 5/100  [####################] 100%  roots 40/40  elapsed 0.1s / 0.1s; time limit / clock stop; selected depth 5
+black engine plays: g1i1
+0 .  .  .  仕 .  仕 炮 .  .  
+1 車 .  .  .  .  .  .  .  .  
+2 .  .  .  .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > d5e6
+first move is illegal or is not a four-character coordinate move; no moves played.
+Use a0a1, a0a1 2000, or a0a1 a9a8; type moves for legal first moves.
+0 .  .  .  仕 .  仕 炮 .  .  
+1 車 .  .  .  .  .  .  .  .  
+2 .  .  .  .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  馬 .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  .  .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+red to move > d5e7
+0 .  .  .  仕 .  仕 炮 .  .  
+1 車 .  .  .  .  .  .  .  .  
+2 .  .  .  .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  馬 .  .  .  .  
+8 .  .  .  .  .  .  .  .  .  
+9 .  .  象 士 将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: black
+search depth 100/100  [####################] 100%  roots 2/2  elapsed 0.0s / 5.0s; finished; selected depth 100
+black engine plays: f9e8
+0 .  .  .  仕 .  仕 炮 .  .  
+1 車 .  .  .  .  .  .  .  .  
+2 .  .  .  .  帥 .  .  .  .  
+3 兵 .  .  .  兵 .  .  .  炮 
+4 .  .  .  .  炮 .  .  .  .  
+5 .  .  .  車 .  .  .  .  .  
+6 卒 .  .  .  .  .  .  .  卒 
+7 .  .  .  .  馬 .  .  .  .  
+8 .  .  .  .  士 .  .  .  .  
+9 .  .  象 .  将 士 象 .  .  
+  i  h  g  f  e  d  c  b  a
+side: red
+```
