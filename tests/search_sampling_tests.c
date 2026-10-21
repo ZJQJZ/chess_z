@@ -331,8 +331,8 @@ static void disabled_and_terminal(void)
     CHECK(xq_engine_parallel_search_with_sampling(NULL, &check.root, &options, &result,
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
     CHECK(check.samples == 0);
-    CHECK(xq_engine_parallel_search_with_progress(NULL, &check.root, &options, &result,
-          path_progress, &check) == XQ_PARALLEL_OK);
+    CHECK(xq_engine_parallel_search_with_sampling(NULL, &check.root, &options, &result,
+          path_progress, &check, NULL) == XQ_PARALLEL_OK);
     CHECK(check.samples == 0);
 #endif
     CHECK(xq_position_remove_piece(&check.root, xq_position_king_square(&check.root, XQ_RED)));

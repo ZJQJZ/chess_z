@@ -131,16 +131,12 @@ const char *xq_parallel_status_text(XqParallelStatus status);
 XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter *engine,
     const XqPosition *pos, const XqParallelOptions *options, XqParallelResult *result);
 
-/* Same search with optional root progress (see XqSearchProgressFn concurrency contract).
- * Terminal roots, fully filtered roots and argument/resource failures emit no iteration events. */
-XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter *engine,
-    const XqPosition *pos, const XqParallelOptions *options, XqParallelResult *result,
-    XqSearchProgressFn progress, void *progress_user);
-
-/* Same search with optional cooperative logical-path samples and thread-state events on the
- * progress channel. The sampler is borrowed until return; a controller with capacity smaller
- * than options.thread_count disables sampling for this invocation. Existing entrypoints never
- * emit sampling events and retain their search behavior. */
+/* Same search with optional root progress (see XqSearchProgressFn concurrency contract),
+ * cooperative logical-path samples and thread-state events on the progress channel.
+ * Pass NULL for sampler to receive only root progress. Terminal roots, fully filtered roots
+ * and argument/resource failures emit no iteration events. The sampler is borrowed until
+ * return; a controller with capacity smaller than options.thread_count disables sampling for
+ * this invocation. The basic entrypoint never emits sampling events. */
 XqParallelStatus xq_engine_parallel_search_with_sampling(const XqEngineAdapter *engine,
     const XqPosition *pos, const XqParallelOptions *options, XqParallelResult *result,
     XqSearchProgressFn progress, void *progress_user, XqSearchSampler *sampler);

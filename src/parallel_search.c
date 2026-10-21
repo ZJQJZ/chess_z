@@ -2435,22 +2435,11 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
                                            const XqParallelOptions *options,
                                            XqParallelResult        *result)
 {
-    return xq_engine_parallel_search_with_progress(engine, pos, options, result, NULL, NULL);
-}
-
-XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter   *engine,
-                                                         const XqPosition        *pos,
-                                                         const XqParallelOptions *options,
-                                                         XqParallelResult        *result,
-                                                         XqSearchProgressFn       progress,
-                                                         void                    *progress_user)
-{
-    return xq_engine_parallel_search_with_sampling(engine, pos, options, result, progress,
-                                                   progress_user, NULL);
+    return xq_engine_parallel_search_with_sampling(engine, pos, options, result, NULL, NULL, NULL);
 }
 
 /**
- * @brief Runs parallel iterative deepening with optional root progress notifications.
+ * @brief Runs parallel iterative deepening with optional root progress and path sampling.
  *
  * Uses the same search semantics as `xq_engine_parallel_search()`: copies `options` or selects the
  * defaults, creates a helper pool once, and searches depths 1 through the configured maximum. Stops
@@ -2499,6 +2488,10 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
  * @param progress_user                 Borrowed pointer passed unchanged to `progress`; may be null
  *                                      and is ignored when `progress` is null. Keep referenced data
  *                                      valid until return.
+ * @param sampler                       Optional sampling controller borrowed until return. Null
+ *                                      disables sampling while retaining root progress. Capacity
+ *                                      below `options.thread_count` disables sampling for this
+ *                                      call.
  * @retval XQ_PARALLEL_OK               Search completed, including terminal root positions.
  * @retval XQ_PARALLEL_INVALID_ARGUMENT A required pointer is null, an option is out of range, or
  *                                      the root side to move is invalid.
