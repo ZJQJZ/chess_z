@@ -36,7 +36,7 @@ cmake --build build
 编译交互式人机示例：
 
 ```sh
-gcc -pthread -std=c11 -O2 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c examples/cli.c examples/search_progress.c -o build/xiangqi_cli
+gcc -pthread -std=c11 -O2 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c src/search_sampling.c examples/cli.c examples/search_progress.c examples/search_sample_report.c -o build/xiangqi_cli
 ./build/xiangqi_cli
 ```
 
@@ -70,6 +70,66 @@ search depth 5/10  [############--------] 60%  roots 24/40  elapsed 2.3s / 5.0s
 并行根走法回调可能并发、乱序到达，应同步访问并合并同轮的最大完成数。
 回调内不能修改或重入当前搜索；快照只在回调期间有效，全部回调在搜索返回前结束。
 CLI 的显示线程和同步由独立模块负责，不改变递归搜索、缓存和剪枝规则。
+
+## 走法路径采样
+
+`--sample-search` 独立于 `--progress`，同时覆盖普通搜索和静态搜索：
+
+```sh
+./build/xiangqi_cli --search parallel --threads 16 --depth 10 --engine red \
+  --progress --sample-search --sample-interval-ms 20 \
+  --sample-output-dir build/search_samples
+```
+
+收集线程默认每 20ms 请求一次快照，每个搜索线程在检查点最多回复一次；
+空闲、等待辅助任务的线程不计样本，旧快照不会被反复累计。
+这是逻辑路径的协作采样分布，不是真实 CPU 占比、精确节点访问数或搜索主变。
+辅助线程继承从根局面到任务拆分点的完整走法前缀。
+仅开启原有 `--progress` 不维护采样路径，也不创建采样控制器。
+
+TTY 中额外显示近期 5 秒的采样摘要；非 TTY 仍收集并写文件。
+每次引擎思考在输出目录下创建独立目录，包含局面和配置、按迭代深度分组的
+JSON 聚合报告及 `.folded` 折叠栈文件，可供火焰图工具使用。
+目录时间戳使用 UTC；样本时间戳使用单调时钟，不是日历时间。
+当前迭代每 5 秒及迭代/搜索结束时刷新报告，使用临时文件重命名发布。
+JSON 分开记录前缀累计样本与节点自身样本；折叠栈权重使用自身样本，避免重复计数。
+路径最多保留 1024 步根前缀，并报告实际普通/静态层数及截断标记。
+每迭代统计内存上限 64MiB，达到上限时报告未收录样本及不完整标记。
+采样槽覆盖、延迟和其他丢弃另行统计；文件失败仅关闭文件输出，不中断对局。
+采样不会改变搜索深度、重复局面、剪枝或时间限制策略。
+
+库调用可创建 `XqSearchSampler`，由观察线程调用 `xq_search_sampler_request()`，
+通过新增的 `*_with_sampling()` 入口借给搜索。
+路径和线程状态经 `XqSearchProgressFn` 的新增事件传回；
+样本及路径指针仍只在回调期间有效，使用者须在返回前复制。
+控制器只能用于一次搜索，搜索和观察线程都退出后方可销毁。
+
+### 离线棋盘查看器
+
+用浏览器直接打开 [`tools/search_sample_viewer/index.html`](tools/search_sample_viewer/index.html)，
+无需安装依赖、联网或启动本地服务；移动查看器时保留同目录的 `model.js` 和 `viewer.js`。
+
+1. 点击“选择报告目录”，选择 `build/search_samples/search-…/` 中的一次思考；
+   也可同时选择 `session.json` 和一个或多个 `depth-N.json`，或拖入文件/目录。
+   选择整个 `build/search_samples` 时，可通过“思考”下拉框切换报告。
+2. 在“迭代深度”中选择一轮搜索。热点图按前缀累计样本排列；
+   单击着法或下方分支列表，在右侧查看执行该着法后的中文棋盘。
+3. 双击图中的分支或点击“放大所选分支”查看细节；通过路径按钮或“上一步”回退。
+   棋盘支持翻转，并可复制当前 FEN 和完整走法路径。
+
+蓝色表示普通搜索，橙色表示静态搜索；静态搜索阶段标记本身不执行走法。
+“前缀累计样本”包含全部后续分支，“自身样本”只计算恰好落在该节点的样本。
+同名着法按完整父链区分。路径截断或统计容量不足时，棋盘只还原已记录前缀并显示提示。
+回放忠实于搜索记录，不额外过滤可能尚未被搜索淘汰的伪合法走法。
+文件是累计快照；搜索期间重新选择报告目录即可读取最新检查点。
+页面中的“体验示例”可以在没有报告时演示棋盘联动。
+
+如需拷贝或分享查看器，可生成一个不依赖旁边 JS 文件的单文件版本：
+
+```sh
+python3 tools/search_sample_viewer/package.py
+# 用浏览器打开 build/search_sample_viewer.html
+```
 
 ## 固定视角并行搜索（macOS / Linux）
 

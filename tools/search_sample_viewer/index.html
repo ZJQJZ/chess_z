@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>搜索走法采样 · 离线查看器</title>
+  <style>
+    :root { --ink:#202b38; --muted:#6a7685; --line:#e1e6ec; --blue:#245cc5; --blue-light:#edf3ff; --surface:#fff; --bg:#f5f7fa; --red:#c73530; --orange:#a36619; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:var(--bg); font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    button,input,select { font:inherit; }
+    button,.file-button { border:1px solid var(--line); border-radius:7px; background:#fff; color:var(--ink); cursor:pointer; padding:7px 12px; display:inline-flex; align-items:center; justify-content:center; gap:6px; text-decoration:none; white-space:nowrap; }
+    button:hover,.file-button:hover { background:#f0f4f9; border-color:#b9c8dc; }
+    button:disabled { opacity:.45; cursor:default; }
+    button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,[tabindex]:focus-visible { outline:3px solid #9bbaff; outline-offset:2px; }
+    .primary { color:#fff; background:var(--blue); border-color:var(--blue); }
+    .primary:hover { background:#194fae; color:#fff; }
+    .muted { color:var(--muted); }
+    .mono { font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; }
+    .top { background:#fff; border-bottom:1px solid var(--line); padding:21px 30px 18px; display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap; }
+    .brand { display:flex; align-items:center; gap:13px; }
+    .brand-mark { height:38px; width:38px; border:1px solid #cddbf4; border-radius:10px; display:grid; place-items:center; background:var(--blue-light); color:var(--blue); font-size:23px; font-family:serif; }
+    h1 { margin:0; font-size:20px; font-weight:650; letter-spacing:.02em; }
+    .brand p { margin:1px 0 0; font-size:12px; color:var(--muted); }
+    .actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .file-input { position:absolute; width:1px; height:1px; clip-path:inset(50%); overflow:hidden; }
+    .file-button:focus-within { outline:3px solid #9bbaff; outline-offset:2px; }
+    main { max-width:1600px; padding:22px 30px 35px; margin:auto; }
+    #notice { margin:0 0 16px; padding:11px 14px; border:1px solid #e6c892; background:#fff8e9; color:#79500f; border-radius:8px; overflow-wrap:anywhere; }
+    #notice.error { color:#9d2928; background:#fff0ef; border-color:#ecc1be; }
+    [hidden] { display:none !important; }
+    #empty { min-height:450px; display:grid; place-items:center; border:1px dashed #c5d0de; border-radius:12px; background:#fff; text-align:center; padding:45px 24px; }
+    #empty h2 { font-size:22px; font-weight:600; margin:18px 0 8px; }
+    #empty p { color:var(--muted); margin:5px 0; }
+    #empty .files { display:inline-block; color:#465a76; font-size:13px; background:#f5f7fb; border-radius:7px; padding:11px 19px; margin:18px 0 8px; }
+    .empty-icon { font-size:36px; color:#8199bd; }
+    body.dragging #empty,body.dragging main { outline:3px solid #769de1; outline-offset:-4px; background:#edf3ff; }
+    .session-row { display:flex; gap:18px; flex-wrap:wrap; align-items:center; margin-bottom:16px; }
+    .session-name { font-size:14px; font-weight:600; max-width:650px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    select,input[type="search"] { border:1px solid #cdd6e1; border-radius:6px; padding:6px 9px; color:var(--ink); background:#fff; max-width:100%; }
+    .selector { display:flex; align-items:center; gap:8px; }
+    .badge { display:inline-flex; align-items:center; gap:4px; border-radius:4px; padding:2px 7px; font-size:11px; background:#edf2f7; color:#607084; white-space:nowrap; }
+    .badge.q { color:#83551c; background:#fff0d8; }
+    .badge.warn { color:#a44e18; background:#fff0df; }
+    .metrics { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
+    .metric { background:#fff; border:1px solid var(--line); padding:12px 16px; border-radius:9px; }
+    .metric-label { color:var(--muted); font-size:12px; }
+    .metric-value { font-size:23px; font-weight:600; font-variant-numeric:tabular-nums; line-height:1.45; }
+    .metric-value small { font-size:12px; font-weight:400; color:var(--muted); margin-left:5px; }
+    .workspace { display:grid; grid-template-columns:minmax(0,1fr) 375px; gap:18px; align-items:start; }
+    .panel { border:1px solid var(--line); border-radius:10px; background:#fff; overflow:hidden; }
+    .panel-head { padding:14px 17px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+    .panel-head h2 { margin:0; font-size:15px; font-weight:600; }
+    .small { font-size:12px; }
+    .chart-tools { padding:11px 16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; border-bottom:1px solid #eef1f5; }
+    .chart-tools button { padding:4px 10px; font-size:12px; }
+    #chart-info { margin-left:auto; color:var(--muted); font-size:12px; }
+    .chart-shell { overflow:auto; max-height:480px; min-height:190px; position:relative; }
+    #chart { display:block; width:100%; }
+    .chart-empty { padding:45px 20px; color:var(--muted); text-align:center; }
+    .chart-caption { padding:9px 16px; color:var(--muted); font-size:11px; border-top:1px solid var(--line); }
+    .chart-frame { cursor:pointer; }
+    .chart-frame rect { stroke:#fff; stroke-width:1; }
+    .chart-frame:hover rect { filter:brightness(.95); stroke:#24466e; }
+    .chart-frame.selected rect { stroke:#174ca7; stroke-width:2; }
+    .chart-frame text { font:11px ui-monospace,SFMono-Regular,Consolas,monospace; pointer-events:none; fill:#243f60; }
+    .chart-frame.q text { fill:#75531d; }
+    .list-head { padding:13px 16px 9px; display:flex; justify-content:space-between; gap:10px; align-items:center; border-top:1px solid var(--line); }
+    .list-head h3 { font-size:13px; margin:0; font-weight:600; }
+    #move-filter { width:156px; padding:4px 8px; font-size:12px; }
+    .branch-wrap { overflow:auto; max-height:310px; }
+    table { border-collapse:collapse; width:100%; font-size:12px; font-variant-numeric:tabular-nums; }
+    th { color:var(--muted); text-align:right; font-weight:400; background:#f8fafc; padding:7px 14px; position:sticky; top:0; }
+    th:first-child,td:first-child { text-align:left; }
+    td { text-align:right; padding:8px 14px; border-top:1px solid #eef1f5; }
+    tbody tr { cursor:pointer; }
+    tbody tr:hover,tbody tr.selected { background:#edf3ff; }
+    .node-link { padding:0; border:0; background:none; color:var(--blue); font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .branch-track { width:80px; height:4px; background:#edf1f5; display:inline-block; vertical-align:middle; margin-left:8px; border-radius:2px; }
+    .branch-track span { height:100%; display:block; background:#7c9fdd; border-radius:2px; }
+    .board-panel { position:sticky; top:16px; }
+    .board-tools { display:flex; gap:7px; }
+    .board-tools button { font-size:12px; padding:4px 9px; }
+    #board-title { font-size:13px; }
+    .board-wrap { padding:14px 18px 4px; background:#fcfcfa; }
+    #board { display:grid; grid-template-columns:20px repeat(9,minmax(0,1fr)); grid-template-rows:repeat(11,28px); justify-items:center; align-items:center; font-family:"Songti SC","Noto Serif CJK SC","SimSun",serif; font-size:22px; line-height:1; }
+    .square { width:28px; max-width:100%; height:28px; display:flex; align-items:center; justify-content:center; position:relative; }
+    .square.red { color:#d1302b; }
+    .square.black { color:#303538; }
+    .square.is-empty { color:#92989b; font:18px ui-monospace,monospace; }
+    .square.from { background:#edf0e8; border:1px dashed #b4beaa; border-radius:4px; }
+    .square.to { background:#ffebae; border:1px solid #ddbc5b; border-radius:4px; }
+    .coordinate { color:#858b92; font:12px ui-monospace,SFMono-Regular,monospace; }
+    #side { display:flex; align-items:center; justify-content:space-between; padding:12px 0 10px; font-size:12px; }
+    .side-dot { display:inline-block; border-radius:50%; height:7px; width:7px; margin-right:6px; background:#363d46; }
+    .side-dot.red { background:var(--red); }
+    .node-detail { padding:13px 17px 17px; border-top:1px solid var(--line); }
+    .node-top { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
+    #selected-move { font-size:20px; font-weight:600; }
+    .node-stats { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:8px 0 11px; }
+    .node-stats p { margin:0; font-size:17px; font-weight:600; }
+    .node-stats span { color:var(--muted); font-size:11px; }
+    #node-warning { color:#925a15; background:#fff5e5; padding:8px 10px; margin:10px 0; border-radius:5px; font-size:12px; }
+    #replay-error { color:#a22f29; background:#fff0ed; padding:10px; margin-bottom:8px; font-size:12px; border-radius:5px; }
+    .path-head { display:flex; align-items:center; justify-content:space-between; color:var(--muted); font-size:11px; margin-top:13px; }
+    #path { display:flex; flex-wrap:wrap; gap:4px; max-height:140px; overflow:auto; padding:7px 0; }
+    #path button { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:11px; padding:2px 5px; border:1px solid #e1e7ef; background:#f7f9fc; border-radius:4px; }
+    #path button.current { border-color:#8faee1; background:#edf3ff; color:var(--blue); }
+    #path button.phase { color:#94611b; background:#fff5e6; }
+    details { margin-top:15px; }
+    summary { cursor:pointer; color:var(--muted); font-size:12px; }
+    #fen { width:100%; height:76px; resize:vertical; border:1px solid var(--line); border-radius:5px; background:#f8fafc; padding:8px; margin:7px 0; font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; color:#48586b; }
+    .fen-actions { display:flex; gap:7px; }
+    .fen-actions button { font-size:11px; padding:4px 8px; }
+    .session-detail { padding:14px 17px; margin-top:18px; }
+    .session-detail h2 { font-size:13px; margin:0 0 8px; font-weight:600; }
+    #report-detail { display:flex; flex-wrap:wrap; gap:8px 24px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+    .footer { color:var(--muted); font-size:11px; margin:15px 0 0; }
+    #load-status { color:var(--muted); font-size:12px; }
+    @media (min-width:1400px) { .workspace { grid-template-columns:minmax(0,1fr) 400px; } #board { grid-template-rows:repeat(11,30px); } }
+    @media (max-width:1050px) { .workspace { grid-template-columns:minmax(0,1fr) 335px; gap:13px; } main { padding:18px; } .top { padding:18px; } .branch-track { display:none; } .metrics { gap:8px; } .metric { padding:11px; } }
+    @media (max-width:780px) { .workspace { grid-template-columns:1fr; } .board-panel { position:static; } .metrics { grid-template-columns:repeat(3,minmax(0,1fr)); } .metric-value { font-size:20px; } .board-wrap { max-width:400px; margin:auto; } .board-panel { max-width:100%; } .top { gap:14px; } .chart-shell { max-height:350px; } }
+    @media (max-width:480px) { main { padding:12px; } .top { padding:16px 12px; } .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } .metric:last-child { grid-column:span 2; } .session-row { gap:9px; } .list-head { flex-wrap:wrap; } th,td { padding:7px 9px; } }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">車</span><div><h1>搜索走法采样</h1><p>离线查看器 · 热点路径与棋盘联动</p></div></div>
+    <div class="actions">
+      <span id="load-status" role="status" aria-live="polite"></span>
+      <label class="file-button primary">选择报告文件<input class="file-input" id="files" type="file" accept=".json,application/json" multiple></label>
+      <label class="file-button">选择报告目录<input class="file-input" id="directory" type="file" webkitdirectory multiple></label>
+      <button id="demo" type="button">体验示例</button>
+    </div>
+  </header>
+  <main>
+    <p id="notice" role="alert" hidden></p>
+    <section id="empty">
+      <div><div class="empty-icon" aria-hidden="true">▥</div><h2>把搜索路径放到棋盘上看</h2>
+        <p>拖入报告文件，或在右上角选择一次思考的报告目录。</p>
+        <div class="files mono">session.json &nbsp;+&nbsp; depth-*.json</div>
+        <p class="small">报告通常保存在 build/search_samples/search-…/ 下。</p>
+        <p class="small">全部处理在本地完成，无需安装依赖或启动服务。</p>
+      </div>
+    </section>
+    <section id="loaded" hidden>
+      <div class="session-row">
+        <div class="selector" id="session-picker" hidden><label for="session-select">思考</label><select id="session-select"></select></div>
+        <span class="session-name mono" id="session-name"></span>
+        <div class="selector"><label for="depth-select">迭代深度</label><select id="depth-select"></select></div>
+        <span id="iteration-status" class="badge"></span>
+        <span id="sample-integrity" class="badge"></span>
+      </div>
+      <div class="metrics">
+        <div class="metric"><div class="metric-label">有效样本</div><div class="metric-value" id="total-samples">—</div></div>
+        <div class="metric"><div class="metric-label">有样本的线程</div><div class="metric-value" id="sample-threads">—</div></div>
+        <div class="metric"><div class="metric-label">采到的最大普通深度</div><div class="metric-value" id="normal-depth">—</div></div>
+        <div class="metric"><div class="metric-label">采到的最大静态深度</div><div class="metric-value" id="q-depth">—</div></div>
+        <div class="metric"><div class="metric-label">采样间隔</div><div class="metric-value" id="sample-interval">—</div></div>
+      </div>
+      <div class="workspace">
+        <section class="panel" aria-label="热点路径">
+          <div class="panel-head"><h2>热点路径</h2><span class="small muted">蓝色：普通搜索　橙色：静态搜索</span></div>
+          <div class="chart-tools"><button id="zoom-root" type="button">完整路径图</button><button id="zoom-parent" type="button">放大范围上一级</button><button id="zoom-selected" type="button">放大所选分支</button><span id="chart-info"></span></div>
+          <div class="chart-shell" id="chart-shell"><svg id="chart" role="group" aria-label="走法前缀采样分布，点击查看棋盘，双击放大"></svg><div class="chart-empty" id="chart-empty" hidden></div></div>
+          <div class="chart-caption" id="chart-caption">宽度表示前缀累计样本；单击查看棋盘，双击放大。很窄的分支可在下方列表中选择。</div>
+          <div class="list-head"><h3 id="branches-title">后续分支</h3><input id="move-filter" type="search" placeholder="筛选后续着法" aria-label="筛选所选节点的直接后续着法"></div>
+          <div class="branch-wrap"><table><thead><tr><th>后续着法</th><th>前缀样本</th><th>占父分支</th><th>自身样本</th></tr></thead><tbody id="branches"></tbody></table></div>
+        </section>
+        <aside class="panel board-panel" aria-label="所选节点的棋盘与路径">
+          <div class="panel-head"><h2 id="board-title">所选着法后的棋盘</h2><div class="board-tools"><button id="parent" type="button">上一步</button><button id="flip" type="button" aria-pressed="false">翻转</button></div></div>
+          <div class="board-wrap"><div id="board" role="img" aria-label="尚未加载棋盘"></div><div id="side"></div></div>
+          <div class="node-detail">
+            <div id="replay-error" role="alert" hidden></div>
+            <div class="node-top"><span id="selected-move" class="mono">根局面</span><span id="node-phase" class="badge"></span></div>
+            <div class="node-stats"><div><p id="inclusive">—</p><span>前缀累计样本</span></div><div><p id="self">—</p><span>节点自身样本</span></div></div>
+            <div id="node-ratio" class="small muted"></div>
+            <div id="node-warning" hidden></div>
+            <div class="path-head"><span id="path-title">根到所选节点的路径</span><span id="node-id"></span></div>
+            <nav id="path" aria-label="走法路径，可点击回到任一前缀"></nav>
+            <details><summary>局面 FEN 与路径</summary><textarea id="fen" readonly aria-label="所选节点 FEN" spellcheck="false"></textarea><div class="fen-actions"><button id="copy-fen" type="button">复制 FEN</button><button id="copy-path" type="button">复制走法路径</button></div></details>
+          </div>
+        </aside>
+      </div>
+      <section class="panel session-detail"><h2>报告信息</h2><div id="report-detail"></div></section>
+      <p class="footer">这是逻辑路径采样分布，比例不代表真实 CPU 占用或节点访问次数。文件为累计快照；搜索过程中重新选择目录即可载入最新检查点。棋盘按报告路径原样回放，包含搜索尚未淘汰的伪合法走法。</p>
+    </section>
+  </main>
+  <noscript>请启用浏览器 JavaScript，以便在本地读取报告和回放棋盘。</noscript>
+  <script src="model.js"></script>
+  <script src="viewer.js"></script>
+</body>
+</html>

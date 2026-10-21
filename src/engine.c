@@ -5,6 +5,7 @@
 #include "xiangqi/engine.h"
 
 #include "history_internal.h"
+#include "search_sampling_internal.h"
 
 #include "xiangqi/movegen.h"
 
@@ -198,15 +199,16 @@ typedef struct ScoredMove
  */
 typedef struct SearchContext
 {
-    uint64_t         deadline_ms;
-    uint64_t         nodes;
-    unsigned         iteration_completed_moves;
-    unsigned         iteration_total_moves;
-    bool             time_limited;
-    bool             deadline_reached;
-    bool             finish_iteration;
-    bool             time_stop_required;
-    XqSearchTimeMode time_mode;
+    uint64_t          deadline_ms;
+    uint64_t          nodes;
+    unsigned          iteration_completed_moves;
+    unsigned          iteration_total_moves;
+    bool              time_limited;
+    bool              deadline_reached;
+    bool              finish_iteration;
+    bool              time_stop_required;
+    XqSearchTimeMode  time_mode;
+    XqSamplingThread *sampling;
 } SearchContext;
 
 /**
@@ -1841,6 +1843,10 @@ static int quiescence(const XqEngineAdapter *engine,
                       int                    beta,
                       SearchContext         *context)
 {
+    XqSamplingThread *sampling = context != NULL ? context->sampling : NULL;
+    if (sampling != NULL)
+        xq_sampling_checkpoint(sampling, true);
+
     if (search_count_node_and_check_time(context))
         return 0;
 
@@ -1878,7 +1884,11 @@ static int quiescence(const XqEngineAdapter *engine,
             continue;
 
         xq_position_make_move(pos, list.moves[i]);
+        if (sampling != NULL)
+            xq_sampling_push(sampling, list.moves[i], true);
         int score = -quiescence(engine, pos, depth - 1, -beta, -alpha, context);
+        if (sampling != NULL)
+            xq_sampling_pop(sampling, true);
         xq_position_unmake_move(pos, list.moves[i]);
         if (context != NULL && context->time_stop_required)
             return 0;
@@ -1982,6 +1992,10 @@ static int negamax(const XqEngineAdapter *engine,
                    PrincipalVariation    *pv_out,
                    SearchContext         *context)
 {
+    XqSamplingThread *sampling = context != NULL ? context->sampling : NULL;
+    if (sampling != NULL)
+        xq_sampling_checkpoint(sampling, false);
+
     if (pv_out != NULL)
         pv_out->count = 0;
 
@@ -2035,9 +2049,13 @@ static int negamax(const XqEngineAdapter *engine,
         }
 
         xq_position_make_move(pos, list.moves[i]);
+        if (sampling != NULL)
+            xq_sampling_push(sampling, list.moves[i], false);
         PrincipalVariation child_pv;
         int score = -negamax(engine, table, pos, depth - 1, -beta, -alpha, child_hint,
                              child_hint_count, pv_out != NULL ? &child_pv : NULL, context);
+        if (sampling != NULL)
+            xq_sampling_pop(sampling, false);
         xq_position_unmake_move(pos, list.moves[i]);
         if (context != NULL && context->time_stop_required)
             return 0;
@@ -2109,6 +2127,7 @@ static int negamax(const XqEngineAdapter *engine,
  * @param progress_user Borrowed user-data pointer passed unchanged to `progress`; may be `NULL` and
  *                      is ignored when `progress` is `NULL`. Keep referenced data valid until
  *                      return.
+ * @param sampler       Optional controller for cooperative logical-path sampling.
  * @return              `true` if at least one root move exists and a move is selected; `false` if
  *                      the position is invalid for searching or contains no legal moves.
  */
@@ -2118,7 +2137,8 @@ static bool builtin_search(const XqEngineAdapter *engine,
                            XqMove                *best_move,
                            XqSearchStats         *stats,
                            XqSearchProgressFn     progress,
-                           void                  *progress_user)
+                           void                  *progress_user,
+                           XqSearchSampler       *sampler)
 {
     XqTranspositionTable *table = engine != NULL ? engine->transposition_table : NULL;
     unsigned              depth = limits->max_depth == 0 ? 1 : limits->max_depth;
@@ -2150,6 +2170,8 @@ static bool builtin_search(const XqEngineAdapter *engine,
         stats->iteration_total_moves = (unsigned)list.count;
     if (list.count == 0)
         return true; /* All legal moves lose: retain the original first move. */
+    if (sampler != NULL && xq_search_sampler_capacity(sampler) >= 1)
+        context.sampling = xq_sampling_thread(sampler, 0);
 
     ScoredMove root_moves[XQ_MAX_MOVES];
     for (int i = 0; i < list.count; ++i)
@@ -2171,9 +2193,11 @@ static bool builtin_search(const XqEngineAdapter *engine,
         if (progress != NULL)
         {
             XqSearchProgress update = {XQ_SEARCH_ITERATION_STARTED, current_depth, 0,
-                                       (unsigned)list.count};
+                                       (unsigned)list.count, NULL};
             progress(&update, progress_user);
         }
+        if (context.sampling != NULL)
+            xq_sampling_begin(context.sampling, current_depth, progress, progress_user);
 
         if (current_depth > 1)
             tt_new_generation(table);
@@ -2204,9 +2228,13 @@ static bool builtin_search(const XqEngineAdapter *engine,
             }
 
             xq_position_make_move(pos, root_moves[i].move);
+            if (context.sampling != NULL)
+                xq_sampling_push(context.sampling, root_moves[i].move, false);
             PrincipalVariation child_pv;
             int score = -negamax(engine, table, pos, current_depth - 1, -beta, -alpha, child_hint,
                                  child_hint_count, &child_pv, &context);
+            if (context.sampling != NULL)
+                xq_sampling_pop(context.sampling, false);
             xq_position_unmake_move(pos, root_moves[i].move);
 
             if (context.time_stop_required)
@@ -2228,7 +2256,7 @@ static bool builtin_search(const XqEngineAdapter *engine,
             if (progress != NULL)
             {
                 XqSearchProgress update = {XQ_SEARCH_ROOT_MOVE_COMPLETED, current_depth,
-                                           (unsigned)completed_roots, (unsigned)list.count};
+                                           (unsigned)completed_roots, (unsigned)list.count, NULL};
                 progress(&update, progress_user);
             }
 
@@ -2245,7 +2273,7 @@ static bool builtin_search(const XqEngineAdapter *engine,
         if (progress != NULL)
         {
             XqSearchProgress update = {XQ_SEARCH_ITERATION_FINISHED, current_depth,
-                                       (unsigned)completed_roots, (unsigned)list.count};
+                                       (unsigned)completed_roots, (unsigned)list.count, NULL};
             progress(&update, progress_user);
         }
 
@@ -2301,6 +2329,8 @@ static bool builtin_search(const XqEngineAdapter *engine,
                 break;
             }
     }
+    if (context.sampling != NULL)
+        xq_sampling_state(context.sampling, XQ_SEARCH_THREAD_IDLE);
     return true;
 }
 
@@ -2369,6 +2399,26 @@ bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine,
                                             XqSearchProgressFn     progress,
                                             void                  *progress_user)
 {
+    return xq_engine_find_best_move_with_sampling(engine, pos, limits, best_move, stats, progress,
+                                                  progress_user, NULL);
+}
+
+/**
+ * @brief Finds the best move with optional statistics, progress and cooperative path sampling.
+ *
+ * Sampling uses thread zero of the optional controller and sends borrowed snapshots through
+ * `progress`. The position, search limits, statistics and root progress retain their usual
+ * semantics. A `NULL` or undersized controller disables sampling without allocating path storage.
+ */
+bool xq_engine_find_best_move_with_sampling(const XqEngineAdapter *engine,
+                                            XqPosition            *pos,
+                                            const XqSearchLimits  *limits,
+                                            XqMove                *best_move,
+                                            XqSearchStats         *stats,
+                                            XqSearchProgressFn     progress,
+                                            void                  *progress_user,
+                                            XqSearchSampler       *sampler)
+{
     XqTranspositionTable *table =
         stats != NULL && engine != NULL ? engine->transposition_table : NULL;
 
@@ -2391,8 +2441,8 @@ bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine,
         start = monotonic_time_ms();
         xq_transposition_table_get_stats(table, &before);
     }
-    bool found =
-        builtin_search(engine, pos, &effective_limits, best_move, stats, progress, progress_user);
+    bool found = builtin_search(engine, pos, &effective_limits, best_move, stats, progress,
+                                progress_user, sampler);
     if (stats != NULL)
     {
         int64_t end = monotonic_time_ms();

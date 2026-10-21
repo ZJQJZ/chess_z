@@ -3,6 +3,7 @@
 #endif
 #include "xiangqi/parallel_search.h"
 #include "history_internal.h"
+#include "search_sampling_internal.h"
 #include "xiangqi/movegen.h"
 
 #include <assert.h>
@@ -183,7 +184,7 @@ enum
     PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
-    PARALLEL_TT_BUCKET_COUNT                    = 1 << 28,
+    PARALLEL_TT_BUCKET_COUNT                    = 1 << 24,
     PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT = 15
 };
 
@@ -1049,6 +1050,7 @@ typedef struct SearchThreadStats
 {
     XqTranspositionStats cache;
     uint64_t             nodes;
+    XqSamplingThread    *sampling;
 } SearchThreadStats;
 
 typedef enum SearchTimeState
@@ -1089,6 +1091,7 @@ typedef struct Search
     XqColor            root_color;
     XqSearchProgressFn progress;
     void              *progress_user;
+    XqSearchSampler   *sampler;
     XqEvaluateFn       evaluate;
     void              *evaluate_user;
     XqMoveList         root_moves;
@@ -1502,6 +1505,8 @@ static QuiescenceResult parallel_quiescence(Search            *search,
                                             SearchThreadStats *stats)
 {
     ++stats->nodes;
+    if (stats->sampling != NULL)
+        xq_sampling_checkpoint(stats->sampling, true);
     if (quiescence_should_stop(search, leaf))
         return (QuiescenceResult){0, true};
 
@@ -1558,8 +1563,12 @@ static QuiescenceResult parallel_quiescence(Search            *search,
                 score = -STATIC_LIMIT;
             return (QuiescenceResult){score, false};
         }
+        if (stats->sampling != NULL)
+            xq_sampling_push(stats->sampling, moves.moves[i], true);
         QuiescenceResult child =
             parallel_quiescence(search, leaf, position, ply + 1, -beta, -alpha, stats);
+        if (stats->sampling != NULL)
+            xq_sampling_pop(stats->sampling, true);
         xq_position_unmake_move(position, moves.moves[i]);
         if (child.stopped)
             return (QuiescenceResult){0, true};
@@ -1749,9 +1758,13 @@ static void search_range(Search            *search,
         }
         XqPosition child_position = node->position;
         xq_position_make_move(&child_position, node->moves.moves[i]);
+        if (stats->sampling != NULL)
+            xq_sampling_push(stats->sampling, node->moves.moves[i], false);
         ParallelPv child_pv = {0};
         Interval   child    = search_node(search, &child_position, node, node->depth - 1, NULL,
                                           child_hint, child_hint_count, &child_pv, stats);
+        if (stats->sampling != NULL)
+            xq_sampling_pop(stats->sampling, false);
 
         if (!child.cancelled)
         {
@@ -1770,7 +1783,7 @@ static void search_range(Search            *search,
                 XqSearchProgress update = {
                     XQ_SEARCH_ROOT_MOVE_COMPLETED, node->depth,
                     (unsigned)atomic_load_explicit(&node->submitted_count, memory_order_relaxed),
-                    (unsigned)node->moves.count};
+                    (unsigned)node->moves.count, NULL};
                 search->progress(&update, search->progress_user);
             }
         }
@@ -1811,10 +1824,15 @@ static void *worker_main(void *argument)
         if (atomic_load_explicit(&worker->state, memory_order_acquire) != WORKER_READY)
             abort();
         TaskCompletion *completion = worker->completion;
+        if (worker->stats.sampling != NULL)
+            xq_sampling_state(worker->stats.sampling, XQ_SEARCH_THREAD_SEARCH);
         search_range(search, worker->node, worker->range, &completion->pv, &worker->stats);
         worker->node       = NULL;
         worker->range      = (SearchRange){0, 0, 1};
         worker->completion = NULL;
+        /* Finish every access to this sampling slot before the reservation is released. */
+        if (worker->stats.sampling != NULL)
+            xq_sampling_state(worker->stats.sampling, XQ_SEARCH_THREAD_IDLE);
         atomic_store_explicit(&completion->finished, 1, memory_order_release);
         atomic_store_explicit(&worker->state, WORKER_IDLE, memory_order_release);
         /*
@@ -1868,9 +1886,10 @@ static void *worker_main(void *argument)
  * @param pending Required owner-local output; receives the completion list, or `NULL` if not split.
  * @return        The owner's batch range, or `{0, count, 1}` if no split occurs.
  */
-static SearchRange split_node(Search          *search,
-                              Node            *node,
-                              TaskCompletion **pending)
+static SearchRange split_node(Search           *search,
+                              Node             *node,
+                              TaskCompletion  **pending,
+                              XqSamplingThread *sampling)
 {
     int         count = node->moves.count;
     SearchRange owner = {0, count, 1};
@@ -1926,6 +1945,8 @@ static SearchRange split_node(Search          *search,
         worker->range      = interleaved ? (SearchRange){batch_index, count, owner.step}
                                          : (SearchRange){owner.end, count, 1};
         worker->completion = completion;
+        if (worker->stats.sampling != NULL)
+            xq_sampling_inherit(worker->stats.sampling, sampling);
         atomic_store_explicit(&worker->state, WORKER_READY, memory_order_release);
         search_semaphore_post(&worker->task_available);
         ++batch_index;
@@ -2040,6 +2061,8 @@ static Interval search_node(Search            *search,
     atomic_init(&node.beta, INFINITY_SCORE);
 
     ++stats->nodes;
+    if (stats->sampling != NULL)
+        xq_sampling_checkpoint(stats->sampling, false);
     (void)search_check_time(search);
     if (check_node(search, &node))
         return node_value(&node);
@@ -2169,11 +2192,11 @@ static Interval search_node(Search            *search,
     if (search->progress != NULL && parent == NULL)
     {
         XqSearchProgress update = {XQ_SEARCH_ITERATION_STARTED, depth, 0,
-                                   (unsigned)node.moves.count};
+                                   (unsigned)node.moves.count, NULL};
         search->progress(&update, search->progress_user);
     }
     TaskCompletion *pending;
-    SearchRange     owner_range = split_node(search, &node, &pending);
+    SearchRange     owner_range = split_node(search, &node, &pending, stats->sampling);
 
     search_range(search, &node, owner_range, &node.owner_pv, stats);
 
@@ -2181,12 +2204,21 @@ static Interval search_node(Search            *search,
      * Node completion does not release the borrowed node: always consume every helper notification.
      * Helpers observe cancellation themselves. A notification posted early remains available.
      */
+    bool sampling_wait = false;
     for (TaskCompletion *completion = pending; completion != NULL; completion = completion->next)
     {
+        if (stats->sampling != NULL && !sampling_wait &&
+            !atomic_load_explicit(&completion->finished, memory_order_acquire))
+        {
+            xq_sampling_state(stats->sampling, XQ_SEARCH_THREAD_WAIT_HELPERS);
+            sampling_wait = true;
+        }
         search_semaphore_wait(&completion->notification);
         if (!atomic_load_explicit(&completion->finished, memory_order_acquire))
             abort();
     }
+    if (sampling_wait)
+        xq_sampling_state(stats->sampling, XQ_SEARCH_THREAD_SEARCH);
 
     /*
      * This node is now quiescent; acquiring `finished` makes all helper result submissions visible.
@@ -2221,7 +2253,7 @@ static Interval search_node(Search            *search,
         XqSearchProgress update = {
             XQ_SEARCH_ITERATION_FINISHED, depth,
             (unsigned)atomic_load_explicit(&node.submitted_count, memory_order_relaxed),
-            (unsigned)node.moves.count};
+            (unsigned)node.moves.count, NULL};
         search->progress(&update, search->progress_user);
     }
     if (!value.cancelled)
@@ -2406,6 +2438,17 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
     return xq_engine_parallel_search_with_progress(engine, pos, options, result, NULL, NULL);
 }
 
+XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter   *engine,
+                                                         const XqPosition        *pos,
+                                                         const XqParallelOptions *options,
+                                                         XqParallelResult        *result,
+                                                         XqSearchProgressFn       progress,
+                                                         void                    *progress_user)
+{
+    return xq_engine_parallel_search_with_sampling(engine, pos, options, result, progress,
+                                                   progress_user, NULL);
+}
+
 /**
  * @brief Runs parallel iterative deepening with optional root progress notifications.
  *
@@ -2463,12 +2506,13 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
  *                                      thread creation failed on a supported platform.
  * @retval XQ_PARALLEL_UNSUPPORTED      Arguments are valid, but the build targets Windows.
  */
-XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter   *engine,
+XqParallelStatus xq_engine_parallel_search_with_sampling(const XqEngineAdapter   *engine,
                                                          const XqPosition        *pos,
                                                          const XqParallelOptions *options,
                                                          XqParallelResult        *result,
                                                          XqSearchProgressFn       progress,
-                                                         void                    *progress_user)
+                                                         void                    *progress_user,
+                                                         XqSearchSampler         *sampler)
 {
     XqParallelOptions effective = options != NULL ? *options : xq_parallel_options_default();
     if (result != NULL)
@@ -2483,6 +2527,7 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
     (void)engine;
     (void)progress;
     (void)progress_user;
+    (void)sampler;
     return XQ_PARALLEL_UNSUPPORTED;
 #else
     {
@@ -2496,10 +2541,16 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
         search.options       = effective;
         search.progress      = progress;
         search.progress_user = progress_user;
-        search.root_color    = pos->side_to_move;
-        search.evaluate      = engine != NULL && engine->static_evaluate != NULL
-                                   ? engine->static_evaluate
-                                   : xq_engine_default_static_evaluate;
+        search.sampler =
+            sampler != NULL && xq_search_sampler_capacity(sampler) >= effective.thread_count
+                ? sampler
+                : NULL;
+        if (search.sampler != NULL)
+            search.stats.sampling = xq_sampling_thread(search.sampler, 0);
+        search.root_color = pos->side_to_move;
+        search.evaluate   = engine != NULL && engine->static_evaluate != NULL
+                                ? engine->static_evaluate
+                                : xq_engine_default_static_evaluate;
         search.evaluate_user =
             engine != NULL && engine->static_evaluate != NULL ? engine->user : NULL;
         result->stats.available       = true;
@@ -2590,6 +2641,8 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
                 goto finished;
             Worker *worker = &search.workers[i];
             worker->search = &search;
+            if (search.sampler != NULL)
+                worker->stats.sampling = xq_sampling_thread(search.sampler, i + 1);
             atomic_init(&worker->state, WORKER_IDLE);
             if (!search_semaphore_init(&worker->task_available))
             {
@@ -2623,8 +2676,12 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter  
                                           search.evaluate_user, search.root_color);
             ParallelPv current_pv = {0};
             XqMove     best       = {0};
+            if (search.stats.sampling != NULL)
+                xq_sampling_begin(search.stats.sampling, current_depth, progress, progress_user);
             (void)search_node(&search, pos, NULL, current_depth, &best, previous_pv.moves,
                               previous_pv.count, &current_pv, &search.stats);
+            if (search.stats.sampling != NULL)
+                xq_sampling_state(search.stats.sampling, XQ_SEARCH_THREAD_IDLE);
             (void)search_check_time(&search);
             if (atomic_load_explicit(&search.root_started, memory_order_relaxed))
             {

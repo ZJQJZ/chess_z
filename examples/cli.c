@@ -73,6 +73,9 @@ static void print_usage(const char *program)
     printf("  %-21s  %s\n", "", "a nearly complete iteration may finish after this budget");
     printf("  %-21s  %s\n", "    --tt-file PATH", "load a saved transposition table before the first search");
     printf("  %-21s  %s\n", "    --progress", "show live per-depth root-move progress on stderr");
+    printf("  %-21s  %s\n", "    --sample-search", "sample logical move paths (independent of --progress)");
+    printf("  %-21s  %s\n", "    --sample-interval-ms N", "positive sampling interval in milliseconds (default 20)");
+    printf("  %-21s  %s\n", "    --sample-output-dir DIR", "sampling reports directory (default build/search_samples)");
     printf("  %-21s  %s\n", "    --search-detail", "append each engine search to build/search_detail.txt");
     printf("  %-21s  %s\n", "-h, --help", "show this help");
     printf("\n");
@@ -521,6 +524,10 @@ int main(int argc, char **argv)
     XqParallelOptions parallel_options = xq_parallel_options_default();
     bool search_detail = false;
     bool show_progress = false;
+    bool sample_search = false;
+    bool sample_options_set = false;
+    uint64_t sample_interval_ms = 20;
+    const char *sample_output_dir = "build/search_samples";
     bool board_flipped = false;
     FILE *search_log = NULL;
     int exit_status = EXIT_SUCCESS;
@@ -584,6 +591,32 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--progress") == 0)
         {
             show_progress = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--sample-search") == 0)
+        {
+            sample_search = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--sample-interval-ms") == 0)
+        {
+            if (++i >= argc || !parse_time_ms(argv[i], &sample_interval_ms))
+            {
+                fprintf(stderr, "error: --sample-interval-ms requires positive integer milliseconds\n");
+                return EXIT_FAILURE;
+            }
+            sample_options_set = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--sample-output-dir") == 0)
+        {
+            if (++i >= argc || argv[i][0] == '\0')
+            {
+                fprintf(stderr, "error: --sample-output-dir requires a nonempty directory\n");
+                return EXIT_FAILURE;
+            }
+            sample_output_dir = argv[i];
+            sample_options_set = true;
             continue;
         }
         if (strcmp(argv[i], "--search-detail") == 0)
@@ -667,6 +700,11 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    if (sample_options_set && !sample_search)
+    {
+        fprintf(stderr, "error: sampling options require --sample-search\n");
+        return EXIT_FAILURE;
+    }
     if ((!parallel && parallel_options_set) || (parallel && tt_file != NULL))
     {
         fprintf(stderr, "error: parallel options require --search parallel; parallel search does not accept TT files\n");
@@ -775,17 +813,23 @@ int main(int argc, char **argv)
             XqSearchStats stats;
             bool found;
             char text[8];
-            CliSearchProgress *progress = show_progress ?
+            CliSearchProgress *progress = sample_search ?
+                cli_search_progress_start_sampling(
+                    parallel ? parallel_options.depth : limits.max_depth, limits.time_limit_ms,
+                    show_progress, parallel ? parallel_options.thread_count : 1,
+                    sample_interval_ms, sample_output_dir, &pos, parallel ? "parallel" : "builtin") :
+                show_progress ?
                 cli_search_progress_start(parallel ? parallel_options.depth : limits.max_depth,
                                            limits.time_limit_ms) : NULL;
             XqSearchProgressFn on_progress = progress != NULL ? cli_search_progress_update : NULL;
+            XqSearchSampler *sampler = cli_search_progress_sampler(progress);
             if (parallel)
             {
                 XqParallelResult result;
                 XqParallelStatus status;
                 parallel_options.time_limit_ms = limits.time_limit_ms;
-                status = xq_engine_parallel_search_with_progress(
-                    &engine, &pos, &parallel_options, &result, on_progress, progress);
+                status = xq_engine_parallel_search_with_sampling(
+                    &engine, &pos, &parallel_options, &result, on_progress, progress, sampler);
                 found = status == XQ_PARALLEL_OK && result.move_available;
                 best = result.best_move;
                 cli_search_progress_finish(progress,
@@ -802,9 +846,10 @@ int main(int argc, char **argv)
             }
             else
             {
-                found = xq_engine_find_best_move_with_progress(
+                found = xq_engine_find_best_move_with_sampling(
                     &engine, &pos, &limits, &best,
-                    search_log != NULL || progress != NULL ? &stats : NULL, on_progress, progress);
+                    search_log != NULL || progress != NULL ? &stats : NULL, on_progress, progress,
+                    sampler);
                 if (progress != NULL)
                     cli_search_progress_finish(progress,
                         !found ? "no move" : stats.winning_move_found ? "winning move found" :

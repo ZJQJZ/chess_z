@@ -6,6 +6,7 @@
 #include "xiangqi/history.h"
 #include "xiangqi/position.h"
 #include "xiangqi/types.h"
+#include "xiangqi/search_sampling.h"
 
 /* Built-in search clamps static evaluations to [-28999, 28999]. Proven wins/losses
  * use fixed +30000/-30000 scores with no mate distance. Direct evaluator calls are unchanged. */
@@ -18,7 +19,9 @@ typedef enum XqSearchProgressEvent
 {
     XQ_SEARCH_ITERATION_STARTED,
     XQ_SEARCH_ROOT_MOVE_COMPLETED,
-    XQ_SEARCH_ITERATION_FINISHED
+    XQ_SEARCH_ITERATION_FINISHED,
+    XQ_SEARCH_PATH_SAMPLE,
+    XQ_SEARCH_THREAD_STATE
 } XqSearchProgressEvent;
 
 typedef struct XqSearchProgress
@@ -27,13 +30,18 @@ typedef struct XqSearchProgress
     unsigned depth;
     unsigned completed_moves;
     unsigned total_moves;
+    const XqSearchSample *sample; /* Non-NULL only for sampling/state events. */
 } XqSearchProgress;
 
 /* Snapshots are borrowed for the duration of the callback. Parallel root-move callbacks
  * may overlap and arrive out of count order; consumers must synchronize and merge counts
  * monotonically within each iteration. STARTED precedes all root callbacks; FINISHED follows
  * them, including for partial iterations. No callbacks outlive the search. Keep callbacks
- * short and do not mutate/reenter the search, its position, table or evaluator state. */
+ * short and do not mutate/reenter the search, its position, table or evaluator state.
+ * Sampling entrypoints also emit per-thread PATH_SAMPLE and THREAD_STATE events;
+ * their sample (including path) must be copied before the callback returns.
+ * Sampling events carry their own iteration identity and may precede STARTED.
+ * Observer request() is thread-safe; it does not mutate search decisions. */
 typedef void (*XqSearchProgressFn)(const XqSearchProgress *progress, void *user);
 
 typedef struct XqTranspositionStats
@@ -259,6 +267,12 @@ bool xq_engine_find_best_move_with_progress(const XqEngineAdapter *engine, XqPos
                                             const XqSearchLimits *limits, XqMove *best_move,
                                             XqSearchStats *stats, XqSearchProgressFn progress,
                                             void *progress_user);
+/* Same search with optional cooperative sampling; old entrypoints never emit
+ * sampling events. An undersized controller disables sampling for this call. */
+bool xq_engine_find_best_move_with_sampling(const XqEngineAdapter *engine, XqPosition *pos,
+                                            const XqSearchLimits *limits, XqMove *best_move,
+                                            XqSearchStats *stats, XqSearchProgressFn progress,
+                                            void *progress_user, XqSearchSampler *sampler);
 bool xq_engine_explain_search_one_ply(const XqEngineAdapter *engine, XqPosition *pos,
                                       unsigned depth, XqExplainResult *result);
 bool xq_engine_explain_quiescence_one_ply(const XqEngineAdapter *engine, XqPosition *pos,

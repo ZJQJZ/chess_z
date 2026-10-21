@@ -137,4 +137,12 @@ XqParallelStatus xq_engine_parallel_search_with_progress(const XqEngineAdapter *
     const XqPosition *pos, const XqParallelOptions *options, XqParallelResult *result,
     XqSearchProgressFn progress, void *progress_user);
 
+/* Same search with optional cooperative logical-path samples and thread-state events on the
+ * progress channel. The sampler is borrowed until return; a controller with capacity smaller
+ * than options.thread_count disables sampling for this invocation. Existing entrypoints never
+ * emit sampling events and retain their search behavior. */
+XqParallelStatus xq_engine_parallel_search_with_sampling(const XqEngineAdapter *engine,
+    const XqPosition *pos, const XqParallelOptions *options, XqParallelResult *result,
+    XqSearchProgressFn progress, void *progress_user, XqSearchSampler *sampler);
+
 #endif
