@@ -63,7 +63,7 @@ search depth 5/10  [############--------] 60%  roots 24/40  elapsed 2.3s / 5.0s
 重定向 stderr 时只输出每轮结束及最终摘要，不输出终端控制字符。
 
 库使用者可通过 `xq_engine_find_best_move_with_progress()` 或
-`xq_engine_parallel_search_with_sampling()` 传入可选 `XqSearchProgressFn`；
+`xq_engine_parallel_search_with_observer()` 传入可选 `XqSearchProgressFn`；
 并行入口的末尾 `sampler` 参数传 `NULL` 时只报告进度，不采样。
 两个并行入口均以 `const XqEngineAdapter *engine` 为首参，传入估值配置和真实对局历史。
 事件仅覆盖根迭代开始、有效根走法完成和迭代结束，
@@ -100,7 +100,8 @@ JSON 分开记录前缀累计样本与节点自身样本；折叠栈权重使用
 采样不会改变搜索深度、重复局面、剪枝或时间限制策略。
 
 库调用可创建 `XqSearchSampler`，由观察线程调用 `xq_search_sampler_request()`，
-通过新增的 `*_with_sampling()` 入口借给搜索。
+通过串行 `xq_engine_find_best_move_with_sampling()` 或并行
+`xq_engine_parallel_search_with_observer()` 入口借给搜索。
 路径和线程状态经 `XqSearchProgressFn` 的新增事件传回；
 样本及路径指针仍只在回调期间有效，使用者须在返回前复制。
 控制器只能用于一次搜索，搜索和观察线程都退出后方可销毁。
@@ -187,7 +188,7 @@ python3 tools/search_sample_viewer/package.py
 `xq_engine_parallel_search`。库调用通过 `XqParallelOptions.split_strategy` 选择
 `XQ_PARALLEL_SPLIT_CONTIGUOUS`（默认）或 `XQ_PARALLEL_SPLIT_INTERLEAVED`。
 调用形式为 `xq_engine_parallel_search(&engine, &pos, &options, &result)`；
-`xq_engine_parallel_search_with_sampling()` 在相同参数后附加回调、回调用户指针和可选 `sampler`；
+`xq_engine_parallel_search_with_observer()` 在相同参数后附加回调、回调用户指针和可选 `sampler`；
 `sampler` 传 `NULL` 时关闭采样。旧签名中的独立 `evaluate`、`evaluate_user` 参数已移除，调用方需将其迁移到适配器。
 `XqEngineAdapter` 中只使用 `static_evaluate`、`user`、`history`，
 `score_move` 和串行 `transposition_table` 不参与并行搜索；并行表仍由 `options.transposition_table` 提供。

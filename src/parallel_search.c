@@ -2435,11 +2435,11 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
                                            const XqParallelOptions *options,
                                            XqParallelResult        *result)
 {
-    return xq_engine_parallel_search_with_sampling(engine, pos, options, result, NULL, NULL, NULL);
+    return xq_engine_parallel_search_with_observer(engine, pos, options, result, NULL, NULL, NULL);
 }
 
 /**
- * @brief Runs parallel iterative deepening with optional root progress and path sampling.
+ * @brief Runs parallel iterative deepening with optional search observation.
  *
  * Uses the same search semantics as `xq_engine_parallel_search()`: copies `options` or selects the
  * defaults, creates a helper pool once, and searches depths 1 through the configured maximum. Stops
@@ -2481,10 +2481,11 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
  * @param result                        Required output record; initialized even when the search
  *                                      fails. Terminal roots return success with `move_available`
  *                                      set to `false`.
- * @param progress                      Optional root observer; must support concurrent root-move
- *                                      callbacks. Snapshots are borrowed only for the duration of
- *                                      each callback. Keep callbacks short and do not mutate or
- *                                      reenter the search or its state.
+ * @param progress                      Optional observer for root progress, path samples and
+ *                                      thread-state events; must support concurrent callbacks.
+ *                                      Snapshots are borrowed only for the duration of each
+ *                                      callback. Keep callbacks short and do not mutate or reenter
+ *                                      the search or its state.
  * @param progress_user                 Borrowed pointer passed unchanged to `progress`; may be null
  *                                      and is ignored when `progress` is null. Keep referenced data
  *                                      valid until return.
@@ -2499,7 +2500,7 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
  *                                      thread creation failed on a supported platform.
  * @retval XQ_PARALLEL_UNSUPPORTED      Arguments are valid, but the build targets Windows.
  */
-XqParallelStatus xq_engine_parallel_search_with_sampling(const XqEngineAdapter   *engine,
+XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter   *engine,
                                                          const XqPosition        *pos,
                                                          const XqParallelOptions *options,
                                                          XqParallelResult        *result,

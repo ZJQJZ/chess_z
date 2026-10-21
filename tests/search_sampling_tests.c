@@ -176,7 +176,7 @@ static void parallel_paths(void)
             if (counts[c] == 1)
                 CHECK(xq_engine_parallel_search(NULL, &check.root, &options,
                       &plain_result) == XQ_PARALLEL_OK);
-            CHECK(xq_engine_parallel_search_with_sampling(NULL, &check.root, &options,
+            CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options,
                   &result, path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
             CHECK(check.samples && check.normal && check.quiet && check.idle);
             if (counts[c] == 1)
@@ -195,7 +195,7 @@ static void parallel_paths(void)
     XqParallelOptions options = xq_parallel_options_default();
     options.depth = 2;
     XqParallelResult result;
-    CHECK(xq_engine_parallel_search_with_sampling(NULL, &check.root, &options, &result,
+    CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
     CHECK(check.quiet_extensions);
     check_destroy(&check);
@@ -223,7 +223,7 @@ static void cancellation(void)
     options.thread_count = 16;
     options.time_limit_ms = 1;
     XqParallelResult result;
-    CHECK(xq_engine_parallel_search_with_sampling(&adapter, &check.root, &options, &result,
+    CHECK(xq_engine_parallel_search_with_observer(&adapter, &check.root, &options, &result,
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
     CHECK(result.stats.stopped);
     check_destroy(&check);
@@ -328,10 +328,10 @@ static void disabled_and_terminal(void)
     options.depth = 2;
     options.thread_count = 2; /* A capacity-one sampler disables the entire invocation. */
     XqParallelResult result;
-    CHECK(xq_engine_parallel_search_with_sampling(NULL, &check.root, &options, &result,
+    CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
     CHECK(check.samples == 0);
-    CHECK(xq_engine_parallel_search_with_sampling(NULL, &check.root, &options, &result,
+    CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
           path_progress, &check, NULL) == XQ_PARALLEL_OK);
     CHECK(check.samples == 0);
 #endif
@@ -341,7 +341,7 @@ static void disabled_and_terminal(void)
     CHECK(check.samples == 0);
 #ifndef _WIN32
     options.thread_count = 1;
-    CHECK(xq_engine_parallel_search_with_sampling(NULL, &check.root, &options, &result,
+    CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
     CHECK(!result.move_available && check.samples == 0);
 #endif
@@ -368,7 +368,7 @@ static void winning_and_no_moves(void)
     options.depth = 5;
     options.thread_count = 1;
     XqParallelResult result;
-    CHECK(xq_engine_parallel_search_with_sampling(NULL, &check.root, &options, &result,
+    CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
     CHECK(result.stats.winning_move_found && result.stats.max_started_depth == 1);
     check_destroy(&check);
@@ -379,7 +379,7 @@ static void winning_and_no_moves(void)
           &stats, path_progress, &check, check.sampler));
     CHECK(check.samples == 0);
 #ifndef _WIN32
-    CHECK(xq_engine_parallel_search_with_sampling(NULL, &check.root, &options, &result,
+    CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
     CHECK(!result.move_available && check.samples == 0);
 #endif
