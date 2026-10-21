@@ -73,6 +73,52 @@ if(BUILD_TESTING)
     endif()
 endif()
 if(BUILD_TESTING AND NOT WIN32)
+    # White-box tests include generated copies with test-only enum values.
+    set(similarity_source_path "${CMAKE_CURRENT_SOURCE_DIR}/src/parallel_search.c")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${similarity_source_path}")
+    file(READ "${similarity_source_path}" similarity_source)
+    foreach(similarity_constant IN ITEMS
+            PARALLEL_TT_BUCKET_COUNT PARALLEL_MAX_SIMILAR_POSITION_QUERIES)
+        string(REGEX MATCHALL "\n[ \t]*${similarity_constant}[ \t]*=[^,\r\n]*,"
+            similarity_declarations "${similarity_source}")
+        list(LENGTH similarity_declarations similarity_declaration_count)
+        if(NOT similarity_declaration_count EQUAL 1)
+            message(FATAL_ERROR "Expected one enum initializer for ${similarity_constant}")
+        endif()
+    endforeach()
+    string(REGEX REPLACE "(\n[ \t]*PARALLEL_TT_BUCKET_COUNT[ \t]*=)[^,\r\n]*,"
+        "\\1 64," similarity_source "${similarity_source}")
+    # Keep the support library static even when the main library is shared.
+    set(XQ_SIMILARITY_SUPPORT_SOURCES ${XIANGQI_SOURCES})
+    list(REMOVE_ITEM XQ_SIMILARITY_SUPPORT_SOURCES src/parallel_search.c)
+    add_library(xiangqi_similarity_test_support STATIC ${XQ_SIMILARITY_SUPPORT_SOURCES})
+    target_include_directories(xiangqi_similarity_test_support PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(xiangqi_similarity_test_support PUBLIC Threads::Threads)
+    xq_enable_warnings(xiangqi_similarity_test_support)
+    foreach(query_limit IN ITEMS 2 0)
+        set(similarity_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/parallel_similarity_${query_limit}")
+        file(MAKE_DIRECTORY "${similarity_generated_dir}")
+        string(REGEX REPLACE "(\n[ \t]*PARALLEL_MAX_SIMILAR_POSITION_QUERIES[ \t]*=)[^,\r\n]*,"
+            "\\1 ${query_limit}," similarity_test_source "${similarity_source}")
+        file(WRITE "${similarity_generated_dir}/parallel_search_under_test.c" "${similarity_test_source}")
+        set(similarity_target xiangqi_parallel_similarity_tests_${query_limit})
+        add_executable(${similarity_target} tests/parallel_similarity_tests.c)
+        target_include_directories(${similarity_target} PRIVATE
+            ${similarity_generated_dir} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(${similarity_target} PRIVATE
+            XQ_TEST_SIMILARITY_QUERY_LIMIT=${query_limit})
+        target_link_libraries(${similarity_target} PRIVATE xiangqi_similarity_test_support)
+        xq_enable_warnings(${similarity_target})
+        if(query_limit EQUAL 0)
+            set(similarity_test_name parallel_similarity_disabled)
+        else()
+            set(similarity_test_name parallel_similarity)
+        endif()
+        add_test(NAME ${similarity_test_name} COMMAND ${similarity_target})
+        set_tests_properties(${similarity_test_name} PROPERTIES TIMEOUT 30)
+    endforeach()
+
     add_executable(xiangqi_sampling_tests tests/search_sampling_tests.c)
     target_include_directories(xiangqi_sampling_tests PRIVATE src)
     target_link_libraries(xiangqi_sampling_tests PRIVATE xiangqi)

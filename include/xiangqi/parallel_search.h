@@ -94,16 +94,30 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * preserves cutoff bounds and never splits tasks, accesses the table or extends PV hints.
  * Node counts include normal and quiescence entries (the shared leaf counts once for each);
  * reported depths exclude extensions and progress still counts only root candidates.
- * The first root iteration and internal nodes use the built-in stable capture ordering, then
- * promote cache and previous-iteration PV moves (PV takes precedence). Later root iterations
- * retain the previous root ordering. PV suffixes follow only matching moves; up to 64 moves are
- * retained even without a table, without limiting search depth. Exact cache cutoffs may rebuild
- * a PV prefix; terminal positions, cache bounds/misses/contention or invalid moves can shorten it.
+ * The first root iteration and internal nodes use the built-in stable capture ordering. With a
+ * table, non-root normal-search nodes that do not return early also borrow quiet-move hints from
+ * similar positions, even when a matching cache or PV move exists. Initially these positions are
+ * legal siblings: the parent's current best branch first, then its ordered move list, excluding
+ * the current branch and duplicate positions. Other sources can share the same per-node budget.
+ * The PARALLEL_MAX_SIMILAR_POSITION_QUERIES enum constant in parallel_search.c (default 2;
+ * change its value to 0 to disable) limits actual lookup attempts, including misses, busy buckets
+ * and unusable hits;
+ * rejected candidate positions do not consume the budget. Only EXACT/LOWER_BOUND entries supply
+ * hints, regardless of depth; quiet hints must match a current move's squares and piece color/type.
+ * The current move's complete data is retained. Similar-position scores, bounds and PVs are never
+ * reused to score or cut off the current node. Ordering precedence is previous-iteration PV,
+ * matching-position cache move, captures, similar-position quiet hints in
+ * discovery order, then other quiet moves; unaffected moves retain their relative order. Later root
+ * iterations retain the previous root ordering. PV suffixes follow only matching moves; up to 64
+ * moves are retained even without a table, without limiting search depth. Exact cache cutoffs may
+ * rebuild a PV prefix; terminal positions, cache bounds/misses/contention or invalid moves can
+ * shorten it.
  * PV hints affect ordering only and are not exposed in the result. No custom move scorer is used.
- * TT statistics accumulate on the table, excluding PV reconstruction lookups; stats contains
- * per-call counters without resetting the table. Each normal-search node may split once after all
- * move ordering, provided its remaining normal-search depth is at least PARALLEL_MIN_SPLIT_DEPTH
- * (5, defined in parallel_search.c). This includes the next move and excludes quiescence extensions;
+ * Similar-position lookups skip busy buckets without waiting and do not refresh entry generations.
+ * TT statistics accumulate on the table, excluding PV reconstruction and similar-position lookups;
+ * stats contains per-call counters without resetting the table. Each normal-search node may split
+ * once after all move ordering, provided its remaining normal-search depth is at least
+ * PARALLEL_MIN_SPLIT_DEPTH (5, defined in parallel_search.c). This includes the next move and excludes quiescence extensions;
  * it applies to root and descendant nodes under both strategies.
  * Shallower nodes search serially. Pruning, terminal positions and cancellation may still end a
  * task early. The default maximum depth of 3 therefore dispatches no helper tasks.

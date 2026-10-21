@@ -185,11 +185,17 @@ enum
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
     PARALLEL_TT_BUCKET_COUNT                    = 1 << 24,
+    PARALLEL_MAX_SIMILAR_POSITION_QUERIES       = 2,
     PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT = 15
 };
 
 _Static_assert(PARALLEL_INTERLEAVED_SPLIT_THREADS >= 1,
                "interleaved splitting requires a positive participant limit");
+_Static_assert(PARALLEL_TT_BUCKET_COUNT > 0 &&
+                   (PARALLEL_TT_BUCKET_COUNT & (PARALLEL_TT_BUCKET_COUNT - 1u)) == 0,
+               "parallel table requires a positive power-of-two bucket count");
+_Static_assert(PARALLEL_MAX_SIMILAR_POSITION_QUERIES >= 0,
+               "similar-position query limit must be nonnegative");
 
 typedef struct ParallelTtEntry
 {
@@ -427,12 +433,13 @@ static bool parallel_tt_try_acquire(ParallelTtBucket *bucket)
  * scans the four slots for a non-empty entry (`depth != 0`) with the same full position key.
  * Sharing a bucket alone is not a hit; the full key, including the side to move, must match.
  *
- * On a hit, refreshes the shared entry's `generation` to the current iteration and copies the whole
- * entry into caller-owned storage. Thus the returned snapshot includes the refreshed `generation`.
- * Releases the bucket on both hit and miss paths before returning. The release publishes the
- * `generation` update to subsequent acquiring callers; the copied entry can be inspected without
- * holding the guard, even if another thread later replaces the shared entry. No shared pointer
- * escapes, and snapshots from successive calls need not describe one consistent table state.
+ * On a hit, optionally refreshes the shared entry's `generation` to the current iteration and
+ * copies the whole entry into caller-owned storage. Normal probes and PV reconstruction refresh
+ * entries; neighboring-position ordering lookups leave replacement metadata unchanged. Releases the
+ * bucket on both hit and miss paths before returning. The release publishes the `generation` update
+ * to subsequent acquiring callers; the copied entry can be inspected without holding the guard,
+ * even if another thread later replaces the shared entry. No shared pointer escapes, and snapshots
+ * from successive calls need not describe one consistent table state.
  *
  * A `true` return means only that the key matched: this helper does not check search depth, score
  * kind, cutoff eligibility or move legality. `parallel_tt_probe()` handles score reuse, while PV
@@ -446,12 +453,14 @@ static bool parallel_tt_try_acquire(ParallelTtBucket *bucket)
  * @param table    Initialized table borrowed by the search; `NULL` disables lookup.
  * @param key      Full position hash used for bucket selection and entry matching.
  * @param snapshot Non-null caller-owned output; written only on a hit, otherwise left unchanged.
+ * @param refresh  Whether to refresh a matching entry's generation.
  * @return         True on a matching entry; false for a disabled table, bucket contention or a
  *                 missing key. Inspect `snapshot` only when `true` is returned.
  */
-static bool parallel_tt_snapshot(XqParallelTranspositionTable *table,
-                                 uint64_t                      key,
-                                 ParallelTtEntry              *snapshot)
+static bool parallel_tt_read(XqParallelTranspositionTable *table,
+                             uint64_t                      key,
+                             ParallelTtEntry              *snapshot,
+                             bool                          refresh)
 {
     if (table == NULL)
         return false;
@@ -464,14 +473,78 @@ static bool parallel_tt_snapshot(XqParallelTranspositionTable *table,
         ParallelTtEntry *entry = &bucket->entries[i];
         if (entry->depth != 0 && entry->key == key)
         {
-            entry->generation = table->generation;
-            *snapshot         = *entry;
-            hit               = true;
+            if (refresh)
+                entry->generation = table->generation;
+            *snapshot = *entry;
+            hit       = true;
             break;
         }
     }
     atomic_store_explicit(&bucket->occupied, 0, memory_order_release);
     return hit;
+}
+
+/**
+ * @brief Copies a matching cache entry and refreshes its generation to the current iteration.
+ *
+ * Delegates to `parallel_tt_read()` with generation refresh enabled. Selects the bucket from the
+ * full position key and attempts its guard once; a busy bucket returns immediately without retrying
+ * or waiting. On a matching non-empty entry, refreshes the shared generation before copying the
+ * complete entry into caller-owned storage. The returned copy therefore contains the refreshed
+ * generation and remains usable after the bucket guard is released, even if the entry is replaced.
+ *
+ * Used by ordinary cache probes and exact-entry PV reconstruction. A hit only establishes a key
+ * match: this function does not check requested depth, score bounds, cutoff eligibility or move
+ * legality. Those checks belong to the caller. No cache statistics are updated here; ordinary
+ * probes count their own activity, while PV reconstruction lookups remain uncounted.
+ *
+ * Keep the table alive and its generation stable throughout concurrent lookups. External clearing,
+ * destruction and iteration changes require all search users to finish first. Output storage must
+ * be private to the caller and must not alias shared table entries.
+ *
+ * @param table    Initialized table borrowed by the search; `NULL` disables lookup.
+ * @param key      Full position hash, including the side to move, to match exactly.
+ * @param snapshot Non-null caller-owned output; written only on a hit, otherwise left unchanged.
+ * @return         True on a matching non-empty entry; false for a disabled table, bucket contention
+ *                 or a missing key. Inspect `snapshot` only when `true` is returned.
+ */
+static bool parallel_tt_snapshot(XqParallelTranspositionTable *table,
+                                 uint64_t                      key,
+                                 ParallelTtEntry              *snapshot)
+{
+    return parallel_tt_read(table, key, snapshot, true);
+}
+
+/**
+ * @brief Copies a matching cache entry without refreshing its generation or cache statistics.
+ *
+ * Delegates to `parallel_tt_read()` with generation refresh disabled. Attempts the selected
+ * bucket's guard once and returns immediately if it is busy. A matching non-empty entry is copied
+ * while the guard is held; the guard is released before returning. The copy retains the entry's
+ * existing generation, and no entry fields or ordinary probe/hit/cutoff counters are changed.
+ *
+ * Intended for neighboring-position move-order hints, so consulting a neighbor does not make its
+ * entry appear younger to the replacement policy. Lookup still requires the neighbor's exact full
+ * key; it does not search for similar hashes. The caller enumerates candidate positions, enforces
+ * its query budget and validates any hinted move against the current position's candidates. A hit
+ * does not establish depth sufficiency, move legality or that the neighbor's score can be reused in
+ * the current position; neighboring hints must affect ordering only.
+ *
+ * Keep the table alive and its generation stable throughout concurrent lookups. The bucket guard
+ * protects the copy against search-thread updates, not external clearing or destruction. Output
+ * storage must be private to the caller and must not alias shared table entries.
+ *
+ * @param table    Initialized table borrowed by the search; `NULL` disables lookup.
+ * @param key      Full hash of the candidate neighboring position, including the side to move.
+ * @param snapshot Non-null caller-owned output; written only on a hit, otherwise left unchanged.
+ * @return         True on a matching non-empty entry; false for a disabled table, bucket contention
+ *                 or a missing key. Inspect `snapshot` only when `true` is returned.
+ */
+static bool parallel_tt_peek(XqParallelTranspositionTable *table,
+                             uint64_t                      key,
+                             ParallelTtEntry              *snapshot)
+{
+    return parallel_tt_read(table, key, snapshot, false);
 }
 
 /**
@@ -1004,25 +1077,26 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2,
 
 /*
  * The owner keeps this stack-allocated node and its parent chain alive until all helpers complete.
- * Position, `moves`, `depth`, `parent`, `maximizing` and PV hints are immutable once shared. The
- * previous iteration's hint storage stays alive until the root and all helpers return. Each batch
- * PV has one writer; the owner reads helper PVs only after completion synchronization. Bounds,
- * window and `state` use atomic access, as do submission counters and `best_index`. Each child slot
- * has one writer and is immutable after publication through `best_index`. Helper completion is
- * acquired through each task completion record after consuming its notification, before the owner
- * returns. State combines finished/cancelled in one atomic transition so readers never see a
- * partial stop.
+ * Position, `moves`, `depth`, `parent`, `parent_move_index`, `maximizing` and PV hints are
+ * immutable once shared. The previous iteration's hint storage stays alive until the root and all
+ * helpers return. Each batch PV has one writer; the owner reads helper PVs only after completion
+ * synchronization. Bounds, window and `state` use atomic access, as do submission counters and
+ * `best_index`. Each child slot has one writer and is immutable after publication through
+ * `best_index`. Helper completion is acquired through each task completion record after consuming
+ * its notification, before the owner returns. State combines finished/cancelled in one atomic
+ * transition so readers never see a partial stop.
  */
 typedef struct Node
 {
-    struct Node   *parent;
-    XqPosition     position;
-    XqMoveList     moves;
-    unsigned       depth;
-    bool           maximizing;
-    const XqMove  *pv_hint;
-    int            pv_hint_count;
-    BatchPv        owner_pv;
+    struct Node  *parent;
+    int           parent_move_index; /* Root uses -1; otherwise indexes the parent's final moves. */
+    XqPosition    position;
+    XqMoveList    moves;
+    unsigned      depth;
+    bool          maximizing;
+    const XqMove *pv_hint;
+    int           pv_hint_count;
+    BatchPv       owner_pv;
     AtomicInterval value;
     Interval       children[XQ_MAX_MOVES];
     atomic_int     submitted_count;
@@ -1031,6 +1105,22 @@ typedef struct Node
     atomic_int     alpha, beta;
     atomic_int     state;
 } Node;
+
+/* Sources enumerate positions only; lookup budgets and move acceptance are source-independent. */
+typedef enum SimilarPositionSource
+{
+    SIMILAR_POSITION_SIBLING,
+    SIMILAR_POSITION_SOURCE_COUNT
+} SimilarPositionSource;
+
+typedef struct SimilarPositionIterator
+{
+    const Node           *node;
+    SimilarPositionSource source;
+    int                   preferred_sibling;
+    int                   next_sibling;
+    bool                  preferred_pending;
+} SimilarPositionIterator;
 
 typedef enum WorkerState
 {
@@ -1406,6 +1496,256 @@ static bool check_node(Search *search,
     return true;
 }
 
+/**
+ * @brief Initializes a lazy iterator over positions related to the current search node.
+ *
+ * A non-root node starts with `SIMILAR_POSITION_SIBLING`. Reads its parent's `best_index` once with
+ * `memory_order_acquire` and retains that index as `preferred_sibling`; subsequent best-index
+ * updates do not change this iterator's preferred branch. Initializes `next_sibling` to `0` and
+ * `preferred_pending` to `true`, so the sibling source tries the preferred branch before scanning
+ * the parent's ordered move list. Invalid indices and the current branch are skipped during
+ * enumeration, not during initialization.
+ *
+ * A root has no siblings: its `source` is immediately `SIMILAR_POSITION_SOURCE_COUNT` and its
+ * `preferred_sibling` is `-1`. Initialization neither constructs positions nor queries the table,
+ * checks cancellation or reserves query budget. The returned value owns only iterator state and
+ * borrows `node`; it does not retain or copy the parent chain.
+ *
+ * Keep `node` and its parent chain alive throughout enumeration. Their positions, ordered move
+ * lists and `parent_move_index` fields must remain unchanged while the iterator uses them.
+ *
+ * @param node Non-null current search node whose neighboring positions will be enumerated.
+ * @return     Initialized iterator by value; a root produces an already exhausted source range.
+ */
+static SimilarPositionIterator parallel_similar_positions(const Node *node)
+{
+    return (SimilarPositionIterator){
+        .node   = node,
+        .source = node->parent != NULL ? SIMILAR_POSITION_SIBLING : SIMILAR_POSITION_SOURCE_COUNT,
+        .preferred_sibling = node->parent != NULL ? atomic_load_explicit(&node->parent->best_index,
+                                                                         memory_order_acquire)
+                                                  : -1,
+        .next_sibling      = 0,
+        .preferred_pending = true,
+    };
+}
+
+/**
+ * @brief Reconstructs the next sibling position from the parent's immutable position and moves.
+ *
+ * On the first call, consumes `preferred_pending` and attempts `preferred_sibling`. Then scans
+ * the parent's final move list using `next_sibling`, skipping the already attempted preferred
+ * index. Both paths skip out-of-range indices and `node->parent_move_index`, which identifies the
+ * current node's own branch. Copies the parent position into `position` before applying a move;
+ * a failed `xq_position_make_move()` advances to the next candidate rather than ending the scan.
+ *
+ * Success means only that a candidate was constructed. Parent move lists may be pseudo-legal, so
+ * the result can still expose the mover's king or lack a king. This function does not validate
+ * those conditions, compare position hashes, query the table, charge query budget or check time.
+ * Different indices can still yield duplicate position keys; the shared consumer filters them.
+ * It never reads a sibling's live `Node` or changes the borrowed parent position or move list.
+ *
+ * The iterator must belong to a non-root node with a live parent. All borrowed node data must
+ * remain stable, and `position` must be private output that does not alias that data. Each call
+ * advances the iterator; only a `true` return makes the output a usable candidate.
+ *
+ * @param iterator Non-null iterator initialized by `parallel_similar_positions()` for a non-root
+ *                 node; its sibling traversal state is updated in place.
+ * @param position Non-null caller-owned output; contents are unspecified when returning `false`.
+ * @return         `true` after constructing a sibling candidate; `false` after all sibling indices
+ *                 have been exhausted, including indices skipped or failing move construction.
+ */
+static bool parallel_similar_sibling_next(SimilarPositionIterator *iterator,
+                                          XqPosition              *position)
+{
+    const Node *parent = iterator->node->parent;
+    for (;;)
+    {
+        int index;
+        if (iterator->preferred_pending)
+        {
+            iterator->preferred_pending = false;
+            index                       = iterator->preferred_sibling;
+        }
+        else
+        {
+            if (iterator->next_sibling >= parent->moves.count)
+                return false;
+            index = iterator->next_sibling++;
+            if (index == iterator->preferred_sibling)
+                continue;
+        }
+        if (index < 0 || index >= parent->moves.count || index == iterator->node->parent_move_index)
+            continue;
+        *position = parent->position;
+        if (xq_position_make_move(position, parent->moves.moves[index]))
+            return true;
+    }
+}
+
+/**
+ * @brief Enumerates neighboring-position candidates lazily across the available source types.
+ *
+ * Dispatches according to `iterator->source`, currently only `SIMILAR_POSITION_SIBLING`. A source
+ * yielding a candidate returns immediately and remains selected for the next call. When that
+ * source is exhausted, advances `source` and tries the next one within the same call. Reaching
+ * `SIMILAR_POSITION_SOURCE_COUNT` ends enumeration; an iterator initialized for a root is already
+ * at this sentinel and produces no candidates.
+ *
+ * This is the extension point for additional neighboring-position sources. Sources only construct
+ * candidates: the consumer `parallel_order_similar_moves()` performs shared position filtering,
+ * key deduplication, bounded table queries and move-hint acceptance. Enumeration itself performs
+ * no table access, query accounting or time checks, and a returned candidate need not be legal.
+ * New sources must keep each enumeration step bounded so the consumer can check cancellation
+ * between calls.
+ *
+ * Keep the iterator's borrowed node and parent chain alive with their shared metadata unchanged.
+ * Output must be private to the caller and must not alias borrowed positions. No candidate is
+ * retained by the iterator; the caller may reuse `position` on the next call.
+ *
+ * @param iterator Non-null initialized iterator; source and source-specific state advance in place.
+ * @param position Non-null caller-owned output; contents are unspecified when returning `false`.
+ * @return         `true` when a source yields a candidate; `false` when all sources are exhausted.
+ */
+static bool parallel_similar_position_next(SimilarPositionIterator *iterator,
+                                           XqPosition              *position)
+{
+    while (iterator->source < SIMILAR_POSITION_SOURCE_COUNT)
+    {
+        switch (iterator->source)
+        {
+        case SIMILAR_POSITION_SIBLING:
+            if (parallel_similar_sibling_next(iterator, position))
+                return true;
+            break;
+        case SIMILAR_POSITION_SOURCE_COUNT:
+            return false;
+        }
+        ++iterator->source;
+    }
+    return false;
+}
+
+/**
+ * @brief Borrows quiet-move ordering hints from a bounded number of neighboring positions.
+ *
+ * Called while the executing thread exclusively owns `node`, after `parallel_order_moves()` and
+ * before matching-position TT/PV promotion or task splitting. Returns `0` without enumeration when
+ * `PARALLEL_MAX_SIMILAR_POSITION_QUERIES == 0`, `node->parent == NULL`, `node->depth == 0` or
+ * `search->options.transposition_table == NULL`. Otherwise all sources share one per-call query
+ * budget, including nodes that already have a matching-position cache or previous-iteration PV hint.
+ *
+ * Enumerates candidates through `parallel_similar_position_next()`. Before charging a query,
+ * rejects a different `side_to_move`, a missing king, a position leaving the previous mover in
+ * check, `current_key` and keys already recorded in `queried_keys`. Each remaining candidate is
+ * recorded and consumes one query before `parallel_tt_peek()` is attempted. Misses, busy buckets
+ * and unusable hits therefore consume budget too. Neighboring reads neither refresh entry
+ * generations nor contribute to ordinary TT counters.
+ *
+ * Only `XQ_SEARCH_SCORE_EXACT` and `XQ_SEARCH_SCORE_LOWER_BOUND` entries may supply hints; their
+ * depths need not cover `node->depth`. Matches `cached.best_move` against the current list by
+ * `from`, `to` and `piece`, requiring `captured == XQ_EMPTY_PIECE`. Copies the current move's
+ * complete record into `hints`, never stale metadata from the entry. Deduplicates hints by
+ * `from`/`to`, separately from candidate-key deduplication. Cached scores, bounds and PVs are not
+ * reused to evaluate the current position or justify a cutoff.
+ *
+ * Places accepted hints in discovery order at the start of the quiet-move segment, immediately
+ * after all captures. Shifts intervening moves with `memmove()` so captures and unhinted quiet
+ * moves keep their relative order; the move count is unchanged. Subsequent TT/PV promotion retains
+ * precedence over these hints. A generated quiet move is an ordering candidate, not proof of
+ * legality; ordinary search still applies its existing terminal and self-check rules.
+ *
+ * Before requesting each candidate, calls `search_check_time()` and `check_node()`. These checks
+ * may update shared time state, tighten `node`'s `alpha`/`beta` window or publish completion or
+ * cancellation. If a checkpoint reports that the node has stopped, no further candidates are
+ * requested. Already collected hints may still be reordered before returning, so the caller must
+ * inspect node state before dispatching tasks. The node and its parent chain must remain alive,
+ * and the table must remain valid under the search's existing concurrency contract.
+ *
+ * @param search Non-null shared search state supplying the borrowed table and time controls.
+ * @param node   Non-null, exclusively owned node with its current moves stably capture-ordered;
+ *               the move list and checkpoint-related atomic state may be updated in place.
+ * @return       Number of neighboring TT lookup attempts, at most
+ *               `PARALLEL_MAX_SIMILAR_POSITION_QUERIES`; `0` when disabled, inapplicable, stopped
+ *               before the first lookup or no candidate survives filtering. Not the hint count.
+ */
+static unsigned parallel_order_similar_moves(Search *search,
+                                             Node   *node)
+{
+    const unsigned limit = PARALLEL_MAX_SIMILAR_POSITION_QUERIES;
+    if (limit == 0 || node->parent == NULL || node->depth == 0 ||
+        search->options.transposition_table == NULL)
+        return 0;
+
+    /* Keep zero-limit builds valid C11 without zero-sized arrays. */
+    uint64_t queried_keys[PARALLEL_MAX_SIMILAR_POSITION_QUERIES > 0
+                              ? PARALLEL_MAX_SIMILAR_POSITION_QUERIES
+                              : 1];
+    XqMove   hints[PARALLEL_MAX_SIMILAR_POSITION_QUERIES > 0 ? PARALLEL_MAX_SIMILAR_POSITION_QUERIES
+                                                             : 1];
+    unsigned queries                 = 0;
+    unsigned hint_count              = 0;
+    uint64_t current_key             = xq_position_hash(&node->position);
+    SimilarPositionIterator iterator = parallel_similar_positions(node);
+    XqPosition              candidate;
+    while (queries < limit)
+    {
+        (void)search_check_time(search);
+        if (check_node(search, node) || !parallel_similar_position_next(&iterator, &candidate))
+            break;
+        if (candidate.side_to_move != node->position.side_to_move ||
+            xq_position_king_square(&candidate, XQ_RED) == XQ_NO_SQUARE ||
+            xq_position_king_square(&candidate, XQ_BLACK) == XQ_NO_SQUARE ||
+            xq_position_in_check(&candidate, xq_color_opponent(candidate.side_to_move)))
+            continue;
+        uint64_t key       = xq_position_hash(&candidate);
+        bool     duplicate = key == current_key;
+        for (unsigned i = 0; i < queries && !duplicate; ++i)
+            duplicate = queried_keys[i] == key;
+        if (duplicate)
+            continue;
+
+        queried_keys[queries++] = key;
+        ParallelTtEntry cached;
+        if (!parallel_tt_peek(search->options.transposition_table, key, &cached) ||
+            (cached.score_kind != XQ_SEARCH_SCORE_EXACT &&
+             cached.score_kind != XQ_SEARCH_SCORE_LOWER_BOUND))
+            continue;
+        for (int i = 0; i < node->moves.count; ++i)
+        {
+            XqMove move = node->moves.moves[i];
+            if (move.from != cached.best_move.from || move.to != cached.best_move.to ||
+                move.piece != cached.best_move.piece || move.captured != XQ_EMPTY_PIECE)
+                continue;
+            bool repeated = false;
+            for (unsigned j = 0; j < hint_count && !repeated; ++j)
+                repeated = hints[j].from == move.from && hints[j].to == move.to;
+            if (!repeated)
+                hints[hint_count++] = move;
+            break;
+        }
+    }
+
+    int insertion = 0;
+    while (insertion < node->moves.count && node->moves.moves[insertion].captured != XQ_EMPTY_PIECE)
+        ++insertion;
+    for (unsigned i = 0; i < hint_count; ++i)
+    {
+        for (int j = insertion; j < node->moves.count; ++j)
+        {
+            if (node->moves.moves[j].from != hints[i].from ||
+                node->moves.moves[j].to != hints[i].to)
+                continue;
+            XqMove move = node->moves.moves[j];
+            memmove(node->moves.moves + insertion + 1, node->moves.moves + insertion,
+                    (size_t)(j - insertion) * sizeof(move));
+            node->moves.moves[insertion++] = move;
+            break;
+        }
+    }
+    return queries;
+}
+
 typedef struct QuiescenceResult
 {
     int  score;
@@ -1708,6 +2048,7 @@ static void retain_root_order(Search     *search,
 static Interval search_node(Search *,
                             const XqPosition *,
                             Node *,
+                            int,
                             unsigned,
                             XqMove *,
                             const XqMove *,
@@ -1761,7 +2102,7 @@ static void search_range(Search            *search,
         if (stats->sampling != NULL)
             xq_sampling_push(stats->sampling, node->moves.moves[i], false);
         ParallelPv child_pv = {0};
-        Interval   child    = search_node(search, &child_position, node, node->depth - 1, NULL,
+        Interval   child    = search_node(search, &child_position, node, i, node->depth - 1, NULL,
                                           child_hint, child_hint_count, &child_pv, stats);
         if (stats->sampling != NULL)
             xq_sampling_pop(stats->sampling, false);
@@ -1986,11 +2327,13 @@ static SearchRange split_node(Search           *search,
  * previous root ordering. Cached deeper results may change fixed-depth scores. Exact cache cutoffs
  * reconstruct a PV prefix from guarded snapshots; bound-only cutoffs return an empty PV.
  *
- * Continuing descendants apply stable capture ordering, then promote the cache move. The root keeps
- * its prepared or retained ordering. Both promote the matched previous-iteration PV move. Hints are
- * matched by `from`/`to` and only the matching child inherits their suffix. All ordering and hint
- * metadata is finalized before splitting. Quiescence uses only its own basic capture ordering;
- * terminal and cache-cutoff paths skip this sorting work.
+ * Continuing descendants apply stable capture ordering, borrow quiet hints from a bounded number of
+ * similar positions, then promote the cache move. Similar-position sources currently enumerate
+ * siblings; their scores, bounds and PVs are never reused. The root keeps its prepared or retained
+ * ordering. Both promote the matched previous-iteration PV move. Hints are matched by `from`/`to`
+ * and only the matching child inherits their suffix. All ordering and hint metadata is finalized
+ * before splitting. Quiescence uses only its own basic capture ordering; terminal and cache-cutoff
+ * paths skip this sorting work.
  *
  * For a continuing node, initializes all child intervals as unknown and calls `split_node()` once
  * to assign helper batches using the configured strategy if the remaining normal-search depth meets
@@ -2016,27 +2359,30 @@ static SearchRange split_node(Search           *search,
  * parent chain must remain valid throughout the call. Custom evaluation callbacks must support
  * concurrent invocation.
  *
- * @param search        Initialized shared search state; must not be null.
- * @param position      Position to search; must not be null and must remain unchanged during the
- *                      call.
- * @param parent        Parent node, or `NULL` for the root.
- * @param depth         Remaining normal-search depth; `0` enters quiescence at a non-terminal leaf.
- * @param best_move     Optional root candidate output, valid when `iteration.move_available` is
- *                      `true`, even if the root was cancelled. Pass `NULL` for recursive child
- *                      searches.
- * @param pv_hint       Read-only previous-iteration PV, or `NULL` for an unmatched path. Its
- *                      storage must outlive this call and all helpers and must not overlap
- *                      `pv_out`.
- * @param pv_hint_count Number of available hint moves, in `0..PARALLEL_MAX_PV_MOVES`.
- * @param pv_out        Required caller-owned output, cleared on entry; terminal/leaf/cancelled
- *                      results leave it empty. Bound cutoffs may truncate a searched line.
- * @param stats         Cache counters owned by the executing thread throughout this recursion.
- * @return              Proven interval, exact or bounded, if `cancelled` is `false`; otherwise a
- *                      cancellation marker whose score bounds must not be used.
+ * @param search            Initialized shared search state; must not be null.
+ * @param position          Position to search; must not be null and must remain unchanged during
+ *                          the call.
+ * @param parent            Parent node, or `NULL` for the root.
+ * @param parent_move_index Index of the move in the parent's final list, or `-1` for the root.
+ * @param depth             Remaining normal-search depth; `0` enters quiescence at a non-terminal
+ *                          leaf.
+ * @param best_move         Optional root candidate output, valid when `iteration.move_available` is
+ *                          `true`, even if the root was cancelled. Pass `NULL` for recursive child
+ *                          searches.
+ * @param pv_hint           Read-only previous-iteration PV, or `NULL` for an unmatched path. Its
+ *                          storage must outlive this call and all helpers and must not overlap
+ *                          `pv_out`.
+ * @param pv_hint_count     Number of available hint moves, in `0..PARALLEL_MAX_PV_MOVES`.
+ * @param pv_out            Required caller-owned output, cleared on entry; terminal/leaf/cancelled
+ *                          results leave it empty. Bound cutoffs may truncate a searched line.
+ * @param stats             Cache counters owned by the executing thread throughout this recursion.
+ * @return                  Proven interval, exact or bounded, if `cancelled` is `false`; otherwise
+ *                          a cancellation marker whose score bounds must not be used.
  */
 static Interval search_node(Search            *search,
                             const XqPosition  *position,
                             Node              *parent,
+                            int                parent_move_index,
                             unsigned           depth,
                             XqMove            *best_move,
                             const XqMove      *pv_hint,
@@ -2047,6 +2393,7 @@ static Interval search_node(Search            *search,
     Node node                = {0};
     pv_out->count            = 0;
     node.parent              = parent;
+    node.parent_move_index   = parent_move_index;
     node.position            = *position;
     node.depth               = depth;
     node.maximizing          = position->side_to_move == search->root_color;
@@ -2179,7 +2526,12 @@ static Interval search_node(Search            *search,
         }
     }
     if (parent != NULL)
+    {
         parallel_order_moves(position, &node.moves);
+        (void)parallel_order_similar_moves(search, &node);
+        if (check_node(search, &node))
+            return node_value(&node);
+    }
     if (has_hash_move)
         (void)parallel_prioritize_move(&node.moves, hash_move);
     if (pv_hint != NULL && pv_hint_count > 0 && parallel_prioritize_move(&node.moves, pv_hint[0]))
@@ -2672,7 +3024,7 @@ XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter  
             XqMove     best       = {0};
             if (search.stats.sampling != NULL)
                 xq_sampling_begin(search.stats.sampling, current_depth, progress, progress_user);
-            (void)search_node(&search, pos, NULL, current_depth, &best, previous_pv.moves,
+            (void)search_node(&search, pos, NULL, -1, current_depth, &best, previous_pv.moves,
                               previous_pv.count, &current_pv, &search.stats);
             if (search.stats.sampling != NULL)
                 xq_sampling_state(search.stats.sampling, XQ_SEARCH_THREAD_IDLE);
