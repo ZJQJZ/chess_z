@@ -124,11 +124,17 @@ static ParallelTtEntry *entry_for(XqParallelTranspositionTable *table, uint64_t 
     return NULL;
 }
 
-static void store_hint(Fixture *fixture, int index, XqSearchScoreKind kind, XqMove move)
+static void store_scored_hint(Fixture *fixture, int index, int score,
+                              XqSearchScoreKind kind, XqMove move)
 {
     XqTranspositionStats ignored = {0};
     parallel_tt_store(fixture->search.options.transposition_table, sibling_key(fixture, index),
-                      1, 12345, kind, move, &ignored);
+                      1, score, kind, move, &ignored);
+}
+
+static void store_hint(Fixture *fixture, int index, XqSearchScoreKind kind, XqMove move)
+{
+    store_scored_hint(fixture, index, 12345, kind, move);
 }
 
 static void check_moves(const XqMoveList *actual, const XqMoveList *expected)
@@ -136,6 +142,20 @@ static void check_moves(const XqMoveList *actual, const XqMoveList *expected)
     CHECK(actual->count == expected->count);
     for (int i = 0; i < actual->count; ++i)
         CHECK(equal_move(actual->moves[i], expected->moves[i]));
+}
+
+/* Retain end-to-end hint tests while checking that collection never changes move order. */
+static unsigned collect_and_apply(Search *search, Node *node, unsigned *winning_count)
+{
+    XqMoveList original = node->moves;
+    SimilarMoveHints hints = {.quiet_count = 123, .winning_count = 123};
+    unsigned queries = parallel_collect_similar_hints(search, node, &hints);
+    check_moves(&node->moves, &original);
+    CHECK(hints.quiet_count <= queries && hints.winning_count <= queries);
+    if (winning_count != NULL)
+        *winning_count = hints.winning_count;
+    parallel_apply_move_hints(node, &hints, NULL, NULL, 0);
+    return queries;
 }
 
 static void iterator_order(void)
@@ -211,31 +231,111 @@ static void disabled_or_inapplicable(void)
     fixture_init(&fixture);
     store_hint(&fixture, 1, XQ_SEARCH_SCORE_EXACT, fixture.quiet[4]);
     XqMoveList original = fixture.node.moves;
+    unsigned winning = 123;
 #if XQ_TEST_SIMILARITY_QUERY_LIMIT == 0
     uint64_t first_key = sibling_key(&fixture, 1);
     ParallelTtBucket *busy = &fixture.search.options.transposition_table->buckets[
         first_key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
     atomic_store(&busy->occupied, 1);
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 0);
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, &winning) == 0);
+    CHECK(winning == 0);
     check_moves(&fixture.node.moves, &original);
     CHECK(atomic_load(&busy->occupied) == 1);
     atomic_store(&busy->occupied, 0);
 #endif
     fixture.node.depth = 0;
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 0);
+    winning = 123;
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, &winning) == 0);
+    CHECK(winning == 0);
     fixture.node.depth = 4;
     XqParallelTranspositionTable *table = fixture.search.options.transposition_table;
     fixture.search.options.transposition_table = NULL;
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 0);
+    winning = 123;
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, &winning) == 0);
+    CHECK(winning == 0);
     fixture.search.options.transposition_table = table;
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.parent) == 0);
+    winning = 123;
+    CHECK(collect_and_apply(&fixture.search, &fixture.parent, &winning) == 0);
+    CHECK(winning == 0);
     atomic_store(&fixture.parent.state, NODE_CANCELLED);
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 0);
+    winning = 123;
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, &winning) == 0);
+    CHECK(winning == 0);
     check_moves(&fixture.node.moves, &original);
     fixture_destroy(&fixture);
 }
 
 #if XQ_TEST_SIMILARITY_QUERY_LIMIT > 0
+static void collection_preserves_moves(void)
+{
+    Fixture fixture;
+    fixture_init(&fixture);
+    XqMoveList original = fixture.node.moves;
+    XqMove stale_quiet = fixture.quiet[3];
+    stale_quiet.captured = xq_make_piece(XQ_RED, XQ_ROOK);
+    XqMove stale_winner = fixture.captures[1];
+    stale_winner.captured = XQ_EMPTY_PIECE;
+    store_hint(&fixture, 1, XQ_SEARCH_SCORE_EXACT, stale_quiet);
+    store_scored_hint(&fixture, 2, WIN, XQ_SEARCH_SCORE_LOWER_BOUND, stale_winner);
+    SimilarMoveHints hints = {.quiet_count = 123, .winning_count = 123};
+    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, &hints) == 2);
+    check_moves(&fixture.node.moves, &original);
+    CHECK(hints.quiet_count == 1 && hints.winning_count == 1);
+    CHECK(equal_move(hints.quiet_moves[0], fixture.quiet[3]));
+    CHECK(equal_move(hints.winning_moves[0], fixture.captures[1]));
+    CHECK(fixture.node.pv_hint == NULL && fixture.node.pv_hint_count == 0);
+    fixture_destroy(&fixture);
+}
+
+static void unified_hint_precedence(void)
+{
+    Fixture fixture;
+    fixture_init(&fixture);
+    XqMoveList original = fixture.node.moves;
+    SimilarMoveHints hints = {
+        .quiet_moves = {fixture.quiet[3]},
+        .quiet_count = 1,
+        .winning_moves = {fixture.quiet[4], fixture.captures[1]},
+        .winning_count = 2,
+    };
+    XqMove hash_move = fixture.quiet[1];
+    XqMove pv_hint[] = {fixture.quiet[2], fixture.quiet[0]};
+    parallel_apply_move_hints(&fixture.node, &hints, &hash_move, pv_hint, 2);
+    XqMoveList expected = {
+        .moves = {fixture.quiet[2], fixture.quiet[4], fixture.captures[1],
+                  fixture.quiet[1], fixture.captures[0], fixture.quiet[3], fixture.quiet[0]},
+        .count = 7,
+    };
+    check_moves(&fixture.node.moves, &expected);
+    CHECK(fixture.node.pv_hint == pv_hint && fixture.node.pv_hint_count == 2);
+
+    /* Absent, empty or invalid PVs clear old suffixes and leave the complete WIN prefix first. */
+    for (int mode = 0; mode < 3; ++mode)
+    {
+        fixture.node.moves = original;
+        fixture.node.pv_hint = pv_hint;
+        fixture.node.pv_hint_count = 2;
+        XqMove invalid = {.from = XQ_SQUARES};
+        parallel_apply_move_hints(&fixture.node, &hints, &hash_move,
+                                  mode == 0 ? NULL : mode == 1 ? pv_hint : &invalid,
+                                  mode == 1 ? 0 : 1);
+        CHECK(fixture.node.pv_hint == NULL && fixture.node.pv_hint_count == 0);
+        CHECK(equal_move(fixture.node.moves.moves[0], hints.winning_moves[0]));
+        CHECK(equal_move(fixture.node.moves.moves[1], hints.winning_moves[1]));
+        CHECK(equal_move(fixture.node.moves.moves[2], hash_move));
+    }
+
+    /* A WIN/PV overlap is promoted only once in the final order and retains its PV suffix. */
+    fixture.node.moves = original;
+    pv_hint[0] = hints.winning_moves[1];
+    parallel_apply_move_hints(&fixture.node, &hints, &hash_move, pv_hint, 2);
+    CHECK(equal_move(fixture.node.moves.moves[0], pv_hint[0]));
+    CHECK(equal_move(fixture.node.moves.moves[1], hints.winning_moves[0]));
+    CHECK(equal_move(fixture.node.moves.moves[2], hash_move));
+    CHECK(fixture.node.pv_hint == pv_hint && fixture.node.pv_hint_count == 2);
+    fixture_destroy(&fixture);
+}
+
 static void ordering_and_hints(void)
 {
     Fixture fixture;
@@ -250,7 +350,7 @@ static void ordering_and_hints(void)
     table->generation = 12;
     XqTranspositionStats before = table->stats;
     XqTranspositionStats thread_before = fixture.search.stats.cache;
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 2);
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 2);
     XqMoveList expected = original;
     const int quiet_order[] = {3, 1, 0, 2, 4};
     for (int i = 0; i < 5; ++i)
@@ -264,9 +364,14 @@ static void ordering_and_hints(void)
     CHECK(atomic_load(&fixture.node.value.lower) == -WIN);
     CHECK(atomic_load(&fixture.node.value.upper) == WIN);
     CHECK(fixture.node.owner_pv.child_pv.count == 0);
-    /* The existing promotions run after the similar-position ordering. */
-    CHECK(parallel_prioritize_move(&fixture.node.moves, fixture.quiet[4]));
-    CHECK(parallel_prioritize_move(&fixture.node.moves, fixture.quiet[2]));
+    /* The unified stage applies cache and PV hints together with collected hints. */
+    fixture.node.moves = original;
+    SimilarMoveHints hints;
+    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, &hints) == 2);
+    XqMove hash_move = fixture.quiet[4];
+    XqMove pv_hint[] = {fixture.quiet[2]};
+    parallel_apply_move_hints(&fixture.node, &hints, &hash_move, pv_hint, 1);
+    CHECK(fixture.node.pv_hint == pv_hint && fixture.node.pv_hint_count == 1);
     expected.moves[0] = fixture.quiet[2];
     expected.moves[1] = fixture.quiet[4];
     expected.moves[2] = original.moves[0];
@@ -307,8 +412,146 @@ static void query_budget(void)
                 key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
             atomic_store(&busy->occupied, 1);
         }
-        CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 2);
+        CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 2);
         check_moves(&fixture.node.moves, &original);
+        if (busy != NULL)
+        {
+            CHECK(atomic_load(&busy->occupied) == 1);
+            atomic_store(&busy->occupied, 0);
+        }
+        fixture_destroy(&fixture);
+    }
+}
+
+static void winning_hints(void)
+{
+    /* Winning scores are side-to-move scores, including for root-side MIN nodes. */
+    for (int scenario = 0; scenario < 3; ++scenario)
+    {
+        Fixture fixture;
+        fixture_init(&fixture);
+        CHECK(!fixture.node.maximizing);
+        XqMoveList expected = fixture.node.moves;
+        XqMove winner = scenario == 2 ? fixture.captures[1] : fixture.quiet[4];
+        XqMove stale = winner;
+        stale.captured = scenario == 2 ? XQ_EMPTY_PIECE : xq_make_piece(XQ_RED, XQ_ROOK);
+        store_scored_hint(&fixture, 1, WIN,
+            scenario == 1 ? XQ_SEARCH_SCORE_LOWER_BOUND : XQ_SEARCH_SCORE_EXACT, stale);
+        /* Every distinct winning hint is retained, in source discovery order. */
+        XqMove later_winner = fixture.quiet[3];
+        store_scored_hint(&fixture, 2, WIN, XQ_SEARCH_SCORE_EXACT, later_winner);
+        unsigned winning = 123;
+        CHECK(collect_and_apply(&fixture.search, &fixture.node, &winning) == 2);
+        CHECK(winning == 2 && equal_move(fixture.node.moves.moves[0], winner));
+        CHECK(equal_move(fixture.node.moves.moves[1], later_winner));
+        CHECK(parallel_prioritize_move(&expected, later_winner));
+        CHECK(parallel_prioritize_move(&expected, winner));
+        check_moves(&fixture.node.moves, &expected);
+        CHECK(atomic_load(&fixture.node.state) == NODE_RUNNING);
+        CHECK(atomic_load(&fixture.node.value.lower) == -WIN);
+        CHECK(atomic_load(&fixture.node.value.upper) == WIN);
+        CHECK(atomic_load(&fixture.node.submitted_count) == 0);
+        CHECK(fixture.node.owner_pv.child_pv.count == 0);
+        fixture_destroy(&fixture);
+    }
+
+    /* Negative wins remain ordinary hints; an UPPER_BOUND positive win is not accepted. */
+    for (int upper = 0; upper < 2; ++upper)
+    {
+        Fixture fixture;
+        fixture_init(&fixture);
+        XqMoveList original = fixture.node.moves;
+        store_scored_hint(&fixture, 1, upper ? WIN : -WIN,
+            upper ? XQ_SEARCH_SCORE_UPPER_BOUND : XQ_SEARCH_SCORE_EXACT, fixture.quiet[4]);
+        unsigned winning = 123;
+        CHECK(collect_and_apply(&fixture.search, &fixture.node, &winning) == 2);
+        CHECK(winning == 0);
+        CHECK(equal_move(fixture.node.moves.moves[0], original.moves[0]));
+        if (upper)
+            check_moves(&fixture.node.moves, &original);
+        else
+            CHECK(equal_move(fixture.node.moves.moves[2], fixture.quiet[4]));
+        fixture_destroy(&fixture);
+    }
+
+    /* A terminal score with no matching current move does not end enumeration. */
+    for (int wrong_piece = 0; wrong_piece < 2; ++wrong_piece)
+    {
+        Fixture fixture;
+        fixture_init(&fixture);
+        XqMove rejected = fixture.quiet[4];
+        if (wrong_piece)
+            rejected.piece = xq_make_piece(XQ_BLACK, XQ_ROOK);
+        else
+            rejected.to = XQ_SQUARES;
+        store_scored_hint(&fixture, 1, WIN, XQ_SEARCH_SCORE_EXACT, rejected);
+        store_scored_hint(&fixture, 2, WIN, XQ_SEARCH_SCORE_LOWER_BOUND, fixture.quiet[2]);
+        unsigned winning = 123;
+        CHECK(collect_and_apply(&fixture.search, &fixture.node, &winning) == 2);
+        CHECK(winning == 1 && equal_move(fixture.node.moves.moves[0], fixture.quiet[2]));
+        fixture_destroy(&fixture);
+    }
+
+    /* Preserve earlier ordinary hints and current metadata, even when a winner duplicates one. */
+    for (int same_move = 0; same_move < 2; ++same_move)
+    {
+        Fixture fixture;
+        fixture_init(&fixture);
+        XqMoveList expected = fixture.node.moves;
+        XqMove ordinary = fixture.quiet[3];
+        XqMove winner = same_move ? ordinary : fixture.quiet[4];
+        XqMove stale = winner;
+        stale.captured = xq_make_piece(XQ_RED, XQ_ROOK);
+        store_hint(&fixture, 1, XQ_SEARCH_SCORE_EXACT, ordinary);
+        store_scored_hint(&fixture, 2, WIN, XQ_SEARCH_SCORE_EXACT, stale);
+        /* Apply the same stable, quiet-region promotion expected before the winning promotion. */
+        memmove(expected.moves + 3, expected.moves + 2, 3 * sizeof(XqMove));
+        expected.moves[2] = ordinary;
+        CHECK(parallel_prioritize_move(&expected, winner));
+        unsigned winning = 123;
+        CHECK(collect_and_apply(&fixture.search, &fixture.node, &winning) == 2);
+        CHECK(winning == 1);
+        check_moves(&fixture.node.moves, &expected);
+        fixture_destroy(&fixture);
+    }
+
+    /* A win never stops enumeration: later hints and unusable outcomes still use the budget. */
+    for (int scenario = 0; scenario < 6; ++scenario)
+    {
+        Fixture fixture;
+        fixture_init(&fixture);
+        XqMoveList expected = fixture.node.moves;
+        XqMove winner = fixture.quiet[4];
+        store_scored_hint(&fixture, 1, WIN, XQ_SEARCH_SCORE_EXACT, winner);
+        /* A third winner must remain unseen once the two-query budget is exhausted. */
+        store_scored_hint(&fixture, 3, WIN, XQ_SEARCH_SCORE_EXACT, fixture.quiet[2]);
+        if (scenario == 0 || scenario == 2)
+            store_hint(&fixture, 2, XQ_SEARCH_SCORE_LOWER_BOUND, fixture.quiet[3]);
+        else if (scenario == 3)
+            store_scored_hint(&fixture, 2, WIN, XQ_SEARCH_SCORE_UPPER_BOUND, fixture.quiet[3]);
+        else if (scenario == 4)
+            store_scored_hint(&fixture, 2, WIN, XQ_SEARCH_SCORE_LOWER_BOUND, winner);
+        else if (scenario == 5)
+            fixture.parent.moves.count = 2;
+        ParallelTtBucket *busy = NULL;
+        if (scenario == 2)
+        {
+            uint64_t key = sibling_key(&fixture, 2);
+            busy = &fixture.search.options.transposition_table->buckets[
+                key & (PARALLEL_TT_BUCKET_COUNT - 1u)];
+            atomic_store(&busy->occupied, 1);
+        }
+        if (scenario == 0)
+        {
+            memmove(expected.moves + 3, expected.moves + 2, 3 * sizeof(XqMove));
+            expected.moves[2] = fixture.quiet[3];
+        }
+        CHECK(parallel_prioritize_move(&expected, winner));
+        unsigned winning = 123;
+        CHECK(collect_and_apply(&fixture.search, &fixture.node, &winning) ==
+              (scenario == 5 ? 1u : 2u));
+        CHECK(winning == 1);
+        check_moves(&fixture.node.moves, &expected);
         if (busy != NULL)
         {
             CHECK(atomic_load(&busy->occupied) == 1);
@@ -333,7 +576,7 @@ static void duplicate_candidates_and_hints(void)
     fixture.parent.moves.moves[5] = fixture.parent.moves.moves[0];
     store_hint(&fixture, 2, XQ_SEARCH_SCORE_EXACT, fixture.quiet[4]);
     store_hint(&fixture, 4, XQ_SEARCH_SCORE_LOWER_BOUND, fixture.quiet[2]);
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 2);
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 2);
     CHECK(equal_move(fixture.node.moves.moves[2], fixture.quiet[4]));
     CHECK(equal_move(fixture.node.moves.moves[3], fixture.quiet[2]));
     xq_parallel_transposition_table_clear(fixture.search.options.transposition_table);
@@ -342,7 +585,7 @@ static void duplicate_candidates_and_hints(void)
     fixture.node.moves.count = 5;
     for (int i = 0; i < 5; ++i)
         fixture.node.moves.moves[i] = fixture.quiet[i];
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 2);
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 2);
     const int expected[] = {4, 0, 1, 2, 3};
     for (int i = 0; i < 5; ++i)
         CHECK(equal_move(fixture.node.moves.moves[i], fixture.quiet[expected[i]]));
@@ -359,7 +602,7 @@ static void invalid_candidates(void)
         &fixture.parent.position, XQ_BLACK);
     store_hint(&fixture, 3, XQ_SEARCH_SCORE_EXACT, fixture.quiet[3]);
     store_hint(&fixture, 4, XQ_SEARCH_SCORE_EXACT, fixture.quiet[4]);
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 2);
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 2);
     CHECK(equal_move(fixture.node.moves.moves[2], fixture.quiet[3]));
     CHECK(equal_move(fixture.node.moves.moves[3], fixture.quiet[4]));
     fixture_destroy(&fixture);
@@ -375,10 +618,10 @@ static void invalid_candidates(void)
     fixture.node.position = sibling_position(&fixture, 0);
     xq_generate_pseudo_legal(&fixture.node.position, &fixture.node.moves);
     parallel_order_moves(&fixture.node.position, &fixture.node.moves);
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 1);
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 1);
     /* A source whose resulting side differs from this node is ignored. */
     fixture.node.position.side_to_move = XQ_RED;
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 0);
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 0);
     fixture_destroy(&fixture);
 }
 
@@ -389,7 +632,7 @@ static void timing_and_cutoff_isolation(void)
     fixture.search.options.time_limit_ms = 1;
     CHECK(parallel_clock_ms(&fixture.search.start_ms));
     fixture.search.deadline_ms = fixture.search.start_ms;
-    CHECK(parallel_order_similar_moves(&fixture.search, &fixture.node) == 0);
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 0);
     CHECK(atomic_load(&fixture.search.time_state) == TIME_STOP);
     fixture_destroy(&fixture);
 
@@ -406,6 +649,93 @@ static void timing_and_cutoff_isolation(void)
     CHECK(stats.nodes > 1 && stats.cache.cutoffs == 0);
     CHECK(value.lower != -12345 && value.upper != -12345);
     fixture_destroy(&fixture);
+}
+
+typedef struct OrderingTrace
+{
+    XqSearchSampler *sampler;
+    XqMove first[2];
+    bool recorded[2];
+    XqMove branches[4];
+    unsigned branch_count;
+} OrderingTrace;
+
+static void trace_ordering(const XqSearchProgress *event, void *user)
+{
+    OrderingTrace *trace = user;
+    if (event->event == XQ_SEARCH_PATH_SAMPLE)
+    {
+        const XqSearchSample *sample = event->sample;
+        if (sample->normal_ply > 0 && trace->branch_count < 4 &&
+            (trace->branch_count == 0 ||
+             !equal_move(trace->branches[trace->branch_count - 1], sample->path[0])))
+            trace->branches[trace->branch_count++] = sample->path[0];
+        for (unsigned i = 0; i < 2; ++i)
+            if (!trace->recorded[i] && sample->normal_ply > i)
+            {
+                CHECK(sample->path_length > i);
+                trace->first[i] = sample->path[i];
+                trace->recorded[i] = true;
+            }
+    }
+    xq_search_sampler_request(trace->sampler);
+}
+
+static void winning_search_order_and_pv(void)
+{
+    XqMove baseline_reply = {0};
+    for (int mode = 0; mode < 4; ++mode)
+    {
+        Fixture fixture;
+        fixture_init(&fixture);
+        XqMove winner = fixture.quiet[4];
+        XqMove later_winner = fixture.quiet[3];
+        store_scored_hint(&fixture, 1, WIN, XQ_SEARCH_SCORE_EXACT, winner);
+        store_scored_hint(&fixture, 2, WIN, XQ_SEARCH_SCORE_LOWER_BOUND, later_winner);
+        XqTranspositionStats ignored = {0};
+        /* Same-position TT disagrees; PV is absent, conflicting, matching, or invalid. */
+        parallel_tt_store(fixture.search.options.transposition_table,
+            xq_position_hash(&fixture.node.position), 1, 12345, XQ_SEARCH_SCORE_EXACT,
+            fixture.quiet[1], &ignored);
+        XqPosition child = fixture.node.position;
+        CHECK(xq_position_make_move(&child, winner));
+        XqMove pv_hint[2] = {
+            mode == 2 ? winner : mode == 3 ? (XqMove){0} : fixture.quiet[2],
+            find_move(&child, 0, 4, 0, 5)
+        };
+        OrderingTrace trace = {0};
+        trace.sampler = xq_search_sampler_create(1);
+        CHECK(trace.sampler != NULL);
+        SearchThreadStats stats = {0};
+        stats.sampling = xq_sampling_thread(trace.sampler, 0);
+        xq_sampling_begin(stats.sampling, 2, trace_ordering, &trace);
+        xq_search_sampler_request(trace.sampler);
+        ParallelPv pv = {0};
+        Interval value = search_node(&fixture.search, &fixture.node.position, &fixture.parent,
+            0, 2, NULL, mode == 0 ? NULL : pv_hint, mode == 0 ? 0 : 2, &pv, &stats);
+        CHECK(!value.cancelled);
+        CHECK(stats.nodes > 2 && stats.cache.cutoffs == 0);
+        CHECK(value.lower > -WIN && value.upper < WIN);
+        CHECK(trace.recorded[0] && trace.recorded[1]);
+        CHECK(equal_move(trace.first[0], mode == 1 ? pv_hint[0] : winner));
+        /* PV may lead, but the complete winning prefix must stay ahead of the TT move. */
+        unsigned offset = mode == 1 ? 1 : 0;
+        CHECK(trace.branch_count >= offset + 3);
+        CHECK(equal_move(trace.branches[offset], winner));
+        CHECK(equal_move(trace.branches[offset + 1], later_winner));
+        CHECK(equal_move(trace.branches[offset + 2], fixture.quiet[1]));
+        if (mode == 0)
+        {
+            baseline_reply = trace.first[1];
+            CHECK(!equal_move(baseline_reply, pv_hint[1]));
+        }
+        else if (mode == 3)
+            CHECK(equal_move(trace.first[1], baseline_reply));
+        else
+            CHECK(equal_move(trace.first[1], pv_hint[1]));
+        xq_search_sampler_destroy(trace.sampler);
+        fixture_destroy(&fixture);
+    }
 }
 #endif
 
@@ -519,11 +849,15 @@ int main(void)
     readonly_peek();
     disabled_or_inapplicable();
 #if XQ_TEST_SIMILARITY_QUERY_LIMIT > 0
+    collection_preserves_moves();
+    unified_hint_precedence();
     ordering_and_hints();
     query_budget();
+    winning_hints();
     duplicate_candidates_and_hints();
     invalid_candidates();
     timing_and_cutoff_isolation();
+    winning_search_order_and_pv();
 #endif
     searches_and_sampling();
     puts("parallel similarity checks passed");

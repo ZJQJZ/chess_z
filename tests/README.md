@@ -12,7 +12,8 @@ The CMake build registers the following CTest cases when `BUILD_TESTING` is on:
 - `sampling_allocation_failures`: inject failures into controller, collector and
   report allocations. Warnings are intentional; the observer must degrade safely.
 - `parallel_similarity`: white-box coverage of sibling enumeration, shared query
-  budgets, invalid/duplicate positions, quiet-move ordering and read-only TT
+  budgets, invalid/duplicate positions, read-only hint collection, unified
+  winning/quiet-move ordering and read-only TT
   snapshots, plus serial and parallel search, sampling and cancellation checks.
 - `parallel_similarity_disabled`: the same driver with a query limit of `0` to check
   disabled behavior. The enabled driver uses a limit of `2`; both drivers use a
@@ -22,7 +23,7 @@ The CMake build registers the following CTest cases when `BUILD_TESTING` is on:
 
 To configure production similarity lookups, edit the
 `PARALLEL_MAX_SIMILAR_POSITION_QUERIES` enum value in `src/parallel_search.c`;
-its default is `2`, and `0` disables them. These constants have no `-D` overrides.
+`0` disables them. These constants have no `-D` overrides.
 
 For example:
 
@@ -38,8 +39,23 @@ remain active in Release builds. The report module also supports the compile-tim
 test override `CLI_SAMPLE_ITERATION_BYTES=4096` to exercise bounded statistics.
 Similarity-query tests count misses, busy buckets and unusable entries against the
 budget, and check that neighborhood reads neither refresh generations nor change
-the ordinary TT statistics. They also check that hints preserve PV/cache/capture
-priority and current-move metadata, and cannot directly cause a search cutoff.
+the ordinary TT statistics. Ordinary similar-position hints remain quiet moves below
+PV/cache/capture priority. A matching `XQ_SEARCH_SCORE_EXACT` or
+`XQ_SEARCH_SCORE_LOWER_BOUND` entry with `score == WIN` (`30000`, from the candidate's
+side-to-move perspective) can instead promote a capture or quiet move below PV but
+ahead of same-position cache moves. Winning hints do not end enumeration: later
+winning and ordinary hints are collected until the query budget or sources are
+exhausted, or the node stops. Distinct winning hints retain their discovery order.
+`parallel_collect_similar_hints()` returns complete current-move records without
+reordering the list. `parallel_apply_move_hints()` applies all collected, cache and PV
+hints in one stage, after stable capture ordering and before task splitting.
+Tests check collection leaves move order unchanged, the full
+`PV > WIN > TT > captures > similar quiet > other quiet` precedence, continuation
+after wins, post-win misses, busy buckets and unusable hits against the budget,
+duplicate hints, source exhaustion, exact `from`/`to`/`piece` matching, and
+current-move metadata. They also check PV suffix propagation for valid matching or
+conflicting PV first moves and suffix clearing for absent, empty or invalid PV hints.
+Similar scores determine ordering priority only and cannot directly cause a search cutoff.
 
 To inspect memory/thread safety, compile the native test drivers with
 `-fsanitize=address,undefined` or `-fsanitize=thread` on a supported compiler.

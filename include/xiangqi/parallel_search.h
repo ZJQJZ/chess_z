@@ -95,23 +95,31 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Node counts include normal and quiescence entries (the shared leaf counts once for each);
  * reported depths exclude extensions and progress still counts only root candidates.
  * The first root iteration and internal nodes use the built-in stable capture ordering. With a
- * table, non-root normal-search nodes that do not return early also borrow quiet-move hints from
+ * table, non-root normal-search nodes that do not return early also borrow move-ordering hints from
  * similar positions, even when a matching cache or PV move exists. Initially these positions are
  * legal siblings: the parent's current best branch first, then its ordered move list, excluding
  * the current branch and duplicate positions. Other sources can share the same per-node budget.
- * The PARALLEL_MAX_SIMILAR_POSITION_QUERIES enum constant in parallel_search.c (default 2;
- * change its value to 0 to disable) limits actual lookup attempts, including misses, busy buckets
- * and unusable hits;
- * rejected candidate positions do not consume the budget. Only EXACT/LOWER_BOUND entries supply
- * hints, regardless of depth; quiet hints must match a current move's squares and piece color/type.
- * The current move's complete data is retained. Similar-position scores, bounds and PVs are never
- * reused to score or cut off the current node. Ordering precedence is previous-iteration PV,
- * matching-position cache move, captures, similar-position quiet hints in
- * discovery order, then other quiet moves; unaffected moves retain their relative order. Later root
- * iterations retain the previous root ordering. PV suffixes follow only matching moves; up to 64
- * moves are retained even without a table, without limiting search depth. Exact cache cutoffs may
- * rebuild a PV prefix; terminal positions, cache bounds/misses/contention or invalid moves can
- * shorten it.
+ * The `PARALLEL_MAX_SIMILAR_POSITION_QUERIES` enum constant in `parallel_search.c` (set to `0`
+ * to disable) limits actual lookup attempts, including misses, busy buckets and unusable hits;
+ * rejected candidate positions do not consume the budget. Only `XQ_SEARCH_SCORE_EXACT` or
+ * `XQ_SEARCH_SCORE_LOWER_BOUND` entries supply hints, regardless of depth. Hints must match a current
+ * move's `from`, `to` and `piece` (including color/type); the current move's complete data is retained.
+ * An entry with `score == WIN` (`30000`, from the candidate's side-to-move perspective) supplies a
+ * winning hint, which may be a capture or quiet move. Winning hints do not stop similar-position
+ * queries: enumeration continues until the budget or sources are exhausted, or the node stops.
+ * Distinct winning hints are retained in discovery order, along with ordinary quiet hints.
+ * Other accepted entries supply quiet hints only. Similar-position scores identify hint priority
+ * only; their scores, bounds and PVs are never reused to score or cut off the current node.
+ * Hint collection does not reorder moves. After collection, one ordering stage applies ordinary
+ * quiet hints, the matching-position cache move, winning hints and the PV hint together, before
+ * task splitting. Ordering precedence is previous-iteration PV, winning hints in discovery order,
+ * matching-position cache move, captures, ordinary similar-position quiet hints in discovery order,
+ * then other quiet moves; unaffected moves retain their relative order. Later root iterations retain
+ * the previous root ordering. A valid PV first move retains its matching suffix even when a
+ * different winning hint exists; an invalid or absent PV first move clears any retained suffix.
+ * Up to 64 moves are retained even without a table, without limiting search depth. Exact cache
+ * cutoffs may rebuild a PV prefix; terminal positions, cache bounds/misses/contention or invalid
+ * moves can shorten it.
  * PV hints affect ordering only and are not exposed in the result. No custom move scorer is used.
  * Similar-position lookups skip busy buckets without waiting and do not refresh entry generations.
  * TT statistics accumulate on the table, excluding PV reconstruction and similar-position lookups;

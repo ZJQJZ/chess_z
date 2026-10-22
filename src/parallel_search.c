@@ -185,7 +185,7 @@ enum
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
     PARALLEL_TT_BUCKET_COUNT                    = 1 << 24,
-    PARALLEL_MAX_SIMILAR_POSITION_QUERIES       = 2,
+    PARALLEL_MAX_SIMILAR_POSITION_QUERIES       = 8,
     PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT = 15
 };
 
@@ -728,7 +728,7 @@ release:
 }
 
 /**
- * @brief Moves a matching cache or PV hint to the front of the generated move list.
+ * @brief Moves a matching move-order hint to the front of the generated move list.
  *
  * Follows `engine.c`'s `prioritize_move` behavior: matches only the `from`/`to` squares and
  * promotes the first match, shifting preceding moves one position to the right. Retains the
@@ -1121,6 +1121,19 @@ typedef struct SimilarPositionIterator
     int                   next_sibling;
     bool                  preferred_pending;
 } SimilarPositionIterator;
+
+/* Keep disabled builds valid C11 without zero-sized hint arrays. */
+typedef struct SimilarMoveHints
+{
+    XqMove   quiet_moves[PARALLEL_MAX_SIMILAR_POSITION_QUERIES > 0
+                             ? PARALLEL_MAX_SIMILAR_POSITION_QUERIES
+                             : 1];
+    unsigned quiet_count;
+    XqMove   winning_moves[PARALLEL_MAX_SIMILAR_POSITION_QUERIES > 0
+                               ? PARALLEL_MAX_SIMILAR_POSITION_QUERIES
+                               : 1];
+    unsigned winning_count;
+} SimilarMoveHints;
 
 typedef enum WorkerState
 {
@@ -1533,17 +1546,17 @@ static SimilarPositionIterator parallel_similar_positions(const Node *node)
 /**
  * @brief Reconstructs the next sibling position from the parent's immutable position and moves.
  *
- * On the first call, consumes `preferred_pending` and attempts `preferred_sibling`. Then scans
- * the parent's final move list using `next_sibling`, skipping the already attempted preferred
- * index. Both paths skip out-of-range indices and `node->parent_move_index`, which identifies the
- * current node's own branch. Copies the parent position into `position` before applying a move;
- * a failed `xq_position_make_move()` advances to the next candidate rather than ending the scan.
+ * On the first call, consumes `preferred_pending` and attempts `preferred_sibling`. Then scans the
+ * parent's final move list using `next_sibling`, skipping the already attempted preferred index.
+ * Both paths skip out-of-range indices and `node->parent_move_index`, which identifies the current
+ * node's own branch. Copies the parent position into `position` before applying a move; a failed
+ * `xq_position_make_move()` advances to the next candidate rather than ending the scan.
  *
  * Success means only that a candidate was constructed. Parent move lists may be pseudo-legal, so
  * the result can still expose the mover's king or lack a king. This function does not validate
  * those conditions, compare position hashes, query the table, charge query budget or check time.
- * Different indices can still yield duplicate position keys; the shared consumer filters them.
- * It never reads a sibling's live `Node` or changes the borrowed parent position or move list.
+ * Different indices can still yield duplicate position keys; the shared consumer filters them. It
+ * never reads a sibling's live `Node` or changes the borrowed parent position or move list.
  *
  * The iterator must belong to a non-root node with a live parent. All borrowed node data must
  * remain stable, and `position` must be private output that does not alias that data. Each call
@@ -1587,17 +1600,17 @@ static bool parallel_similar_sibling_next(SimilarPositionIterator *iterator,
  * @brief Enumerates neighboring-position candidates lazily across the available source types.
  *
  * Dispatches according to `iterator->source`, currently only `SIMILAR_POSITION_SIBLING`. A source
- * yielding a candidate returns immediately and remains selected for the next call. When that
- * source is exhausted, advances `source` and tries the next one within the same call. Reaching
+ * yielding a candidate returns immediately and remains selected for the next call. When that source
+ * is exhausted, advances `source` and tries the next one within the same call. Reaching
  * `SIMILAR_POSITION_SOURCE_COUNT` ends enumeration; an iterator initialized for a root is already
  * at this sentinel and produces no candidates.
  *
  * This is the extension point for additional neighboring-position sources. Sources only construct
- * candidates: the consumer `parallel_order_similar_moves()` performs shared position filtering,
- * key deduplication, bounded table queries and move-hint acceptance. Enumeration itself performs
- * no table access, query accounting or time checks, and a returned candidate need not be legal.
- * New sources must keep each enumeration step bounded so the consumer can check cancellation
- * between calls.
+ * candidates: the consumer `parallel_collect_similar_hints()` performs shared position filtering,
+ * key deduplication, bounded table queries and move-hint acceptance. Enumeration itself performs no
+ * table access, query accounting or time checks, and a returned candidate need not be legal. New
+ * sources must keep each enumeration step bounded so the consumer can check cancellation between
+ * calls.
  *
  * Keep the iterator's borrowed node and parent chain alive with their shared metadata unchanged.
  * Output must be private to the caller and must not alias borrowed positions. No candidate is
@@ -1627,13 +1640,14 @@ static bool parallel_similar_position_next(SimilarPositionIterator *iterator,
 }
 
 /**
- * @brief Borrows quiet-move ordering hints from a bounded number of neighboring positions.
+ * @brief Collects neighboring move-order hints without changing the current move list.
  *
  * Called while the executing thread exclusively owns `node`, after `parallel_order_moves()` and
- * before matching-position TT/PV promotion or task splitting. Returns `0` without enumeration when
+ * before `parallel_apply_move_hints()` or task splitting. Returns `0` without enumeration when
  * `PARALLEL_MAX_SIMILAR_POSITION_QUERIES == 0`, `node->parent == NULL`, `node->depth == 0` or
  * `search->options.transposition_table == NULL`. Otherwise all sources share one per-call query
- * budget, including nodes that already have a matching-position cache or previous-iteration PV hint.
+ * budget, including nodes that already have a matching-position cache or previous-iteration PV
+ * hint.
  *
  * Enumerates candidates through `parallel_similar_position_next()`. Before charging a query,
  * rejects a different `side_to_move`, a missing king, a position leaving the previous mover in
@@ -1644,49 +1658,54 @@ static bool parallel_similar_position_next(SimilarPositionIterator *iterator,
  *
  * Only `XQ_SEARCH_SCORE_EXACT` and `XQ_SEARCH_SCORE_LOWER_BOUND` entries may supply hints; their
  * depths need not cover `node->depth`. Matches `cached.best_move` against the current list by
- * `from`, `to` and `piece`, requiring `captured == XQ_EMPTY_PIECE`. Copies the current move's
- * complete record into `hints`, never stale metadata from the entry. Deduplicates hints by
- * `from`/`to`, separately from candidate-key deduplication. Cached scores, bounds and PVs are not
- * reused to evaluate the current position or justify a cutoff.
+ * `from`, `to` and `piece`. An accepted entry with `cached.score == WIN` proves a win for the
+ * neighbor's side to move: retains the matching move, whether a capture or quiet move, and keeps
+ * querying the remaining candidates within the budget. Winning hints are deduplicated by
+ * `from`/`to` and retain discovery order. They are only ordering signals, not proof of a win in the
+ * current position. Non-winning hints still require `captured == XQ_EMPTY_PIECE` and are
+ * deduplicated by `from`/`to`, separately from candidate-key deduplication. All hints use the
+ * current list's complete move records, never stale entry metadata. Neighbor scores, bounds and PVs
+ * are not reused to evaluate the current position or justify a cutoff.
  *
- * Places accepted hints in discovery order at the start of the quiet-move segment, immediately
- * after all captures. Shifts intervening moves with `memmove()` so captures and unhinted quiet
- * moves keep their relative order; the move count is unchanged. Subsequent TT/PV promotion retains
- * precedence over these hints. A generated quiet move is an ordering candidate, not proof of
+ * Stores accepted hints in `hints->quiet_moves` or `hints->winning_moves`, each in discovery order.
+ * Does not change `node->position` or `node->moves`; `parallel_apply_move_hints()` performs the
+ * complete ordering stage afterward. A generated move is an ordering candidate, not proof of
  * legality; ordinary search still applies its existing terminal and self-check rules.
  *
  * Before requesting each candidate, calls `search_check_time()` and `check_node()`. These checks
  * may update shared time state, tighten `node`'s `alpha`/`beta` window or publish completion or
  * cancellation. If a checkpoint reports that the node has stopped, no further candidates are
- * requested. Already collected hints may still be reordered before returning, so the caller must
- * inspect node state before dispatching tasks. The node and its parent chain must remain alive,
- * and the table must remain valid under the search's existing concurrency contract.
+ * requested. The caller must inspect node state before applying hints or dispatching tasks. The
+ * node and its parent chain must remain alive, and the table must remain valid under the search's
+ * existing concurrency contract.
  *
  * @param search Non-null shared search state supplying the borrowed table and time controls.
  * @param node   Non-null, exclusively owned node with its current moves stably capture-ordered;
- *               the move list and checkpoint-related atomic state may be updated in place.
+ *               checkpoint-related atomic state may be updated in place.
+ * @param hints  Non-null caller-owned output; both counts are reset on entry, including when
+ *               neighboring queries are disabled or inapplicable.
  * @return       Number of neighboring TT lookup attempts, at most
  *               `PARALLEL_MAX_SIMILAR_POSITION_QUERIES`; `0` when disabled, inapplicable, stopped
  *               before the first lookup or no candidate survives filtering. Not the hint count.
  */
-static unsigned parallel_order_similar_moves(Search *search,
-                                             Node   *node)
+static unsigned parallel_collect_similar_hints(Search           *search,
+                                               Node             *node,
+                                               SimilarMoveHints *hints)
 {
+    hints->quiet_count   = 0;
+    hints->winning_count = 0;
     const unsigned limit = PARALLEL_MAX_SIMILAR_POSITION_QUERIES;
     if (limit == 0 || node->parent == NULL || node->depth == 0 ||
         search->options.transposition_table == NULL)
         return 0;
 
     /* Keep zero-limit builds valid C11 without zero-sized arrays. */
-    uint64_t queried_keys[PARALLEL_MAX_SIMILAR_POSITION_QUERIES > 0
-                              ? PARALLEL_MAX_SIMILAR_POSITION_QUERIES
-                              : 1];
-    XqMove   hints[PARALLEL_MAX_SIMILAR_POSITION_QUERIES > 0 ? PARALLEL_MAX_SIMILAR_POSITION_QUERIES
-                                                             : 1];
-    unsigned queries                 = 0;
-    unsigned hint_count              = 0;
-    uint64_t current_key             = xq_position_hash(&node->position);
-    SimilarPositionIterator iterator = parallel_similar_positions(node);
+    uint64_t                queried_keys[PARALLEL_MAX_SIMILAR_POSITION_QUERIES > 0
+                                             ? PARALLEL_MAX_SIMILAR_POSITION_QUERIES
+                                             : 1];
+    unsigned                queries     = 0;
+    uint64_t                current_key = xq_position_hash(&node->position);
+    SimilarPositionIterator iterator    = parallel_similar_positions(node);
     XqPosition              candidate;
     while (queries < limit)
     {
@@ -1715,26 +1734,70 @@ static unsigned parallel_order_similar_moves(Search *search,
         {
             XqMove move = node->moves.moves[i];
             if (move.from != cached.best_move.from || move.to != cached.best_move.to ||
-                move.piece != cached.best_move.piece || move.captured != XQ_EMPTY_PIECE)
+                move.piece != cached.best_move.piece)
+                continue;
+            if (cached.score == WIN)
+            {
+                bool repeated = false;
+                for (unsigned j = 0; j < hints->winning_count && !repeated; ++j)
+                    repeated = hints->winning_moves[j].from == move.from &&
+                               hints->winning_moves[j].to == move.to;
+                if (!repeated)
+                    hints->winning_moves[hints->winning_count++] = move;
+                break;
+            }
+            if (move.captured != XQ_EMPTY_PIECE)
                 continue;
             bool repeated = false;
-            for (unsigned j = 0; j < hint_count && !repeated; ++j)
-                repeated = hints[j].from == move.from && hints[j].to == move.to;
+            for (unsigned j = 0; j < hints->quiet_count && !repeated; ++j)
+                repeated =
+                    hints->quiet_moves[j].from == move.from && hints->quiet_moves[j].to == move.to;
             if (!repeated)
-                hints[hint_count++] = move;
+                hints->quiet_moves[hints->quiet_count++] = move;
             break;
         }
     }
 
+    return queries;
+}
+
+/**
+ * @brief Applies all move-order hints once, before the node is shared or split.
+ *
+ * Starts from a stably capture-ordered internal-node list, or the root's prepared list with empty
+ * neighboring hints. Inserts `hints->quiet_moves` after the captures in discovery order, then
+ * promotes `hash_move`, `hints->winning_moves` and a matching `pv_hint[0]` in that order. The final
+ * precedence is PV, neighboring WIN hints, matching-position TT, captures, neighboring quiet hints,
+ * then other quiet moves. Reverse promotion keeps winning hints in discovery order. Each move uses
+ * its current complete record; captures and unhinted moves retain their relative order unless
+ * explicitly promoted by another hint. The move count is unchanged.
+ *
+ * Sets `node->pv_hint` and `node->pv_hint_count` only when the first PV move matches the current
+ * list and is promoted to its front; otherwise clears both fields. This keeps `search_range()` from
+ * passing an unrelated PV suffix to the first child. Performs no table access or stop checks and
+ * never changes node scores or bounds.
+ *
+ * @param node          Non-null, exclusively owned node whose moves and PV metadata are updated.
+ * @param hints         Non-null collected neighboring hints; empty when inapplicable.
+ * @param hash_move     Optional matching-position TT move; `NULL` when unavailable.
+ * @param pv_hint       Optional borrowed previous-iteration PV; must outlive the node's search.
+ * @param pv_hint_count Number of available PV moves; non-positive values disable the hint.
+ */
+static void parallel_apply_move_hints(Node                   *node,
+                                      const SimilarMoveHints *hints,
+                                      const XqMove           *hash_move,
+                                      const XqMove           *pv_hint,
+                                      int                     pv_hint_count)
+{
     int insertion = 0;
     while (insertion < node->moves.count && node->moves.moves[insertion].captured != XQ_EMPTY_PIECE)
         ++insertion;
-    for (unsigned i = 0; i < hint_count; ++i)
+    for (unsigned i = 0; i < hints->quiet_count; ++i)
     {
         for (int j = insertion; j < node->moves.count; ++j)
         {
-            if (node->moves.moves[j].from != hints[i].from ||
-                node->moves.moves[j].to != hints[i].to)
+            if (node->moves.moves[j].from != hints->quiet_moves[i].from ||
+                node->moves.moves[j].to != hints->quiet_moves[i].to)
                 continue;
             XqMove move = node->moves.moves[j];
             memmove(node->moves.moves + insertion + 1, node->moves.moves + insertion,
@@ -1743,7 +1806,14 @@ static unsigned parallel_order_similar_moves(Search *search,
             break;
         }
     }
-    return queries;
+    if (hash_move != NULL)
+        (void)parallel_prioritize_move(&node->moves, *hash_move);
+    for (unsigned i = hints->winning_count; i > 0; --i)
+        (void)parallel_prioritize_move(&node->moves, hints->winning_moves[i - 1]);
+    bool pv_move_found =
+        pv_hint != NULL && pv_hint_count > 0 && parallel_prioritize_move(&node->moves, pv_hint[0]);
+    node->pv_hint       = pv_move_found ? pv_hint : NULL;
+    node->pv_hint_count = pv_move_found ? pv_hint_count : 0;
 }
 
 typedef struct QuiescenceResult
@@ -2327,13 +2397,16 @@ static SearchRange split_node(Search           *search,
  * previous root ordering. Cached deeper results may change fixed-depth scores. Exact cache cutoffs
  * reconstruct a PV prefix from guarded snapshots; bound-only cutoffs return an empty PV.
  *
- * Continuing descendants apply stable capture ordering, borrow quiet hints from a bounded number of
- * similar positions, then promote the cache move. Similar-position sources currently enumerate
- * siblings; their scores, bounds and PVs are never reused. The root keeps its prepared or retained
- * ordering. Both promote the matched previous-iteration PV move. Hints are matched by `from`/`to`
- * and only the matching child inherits their suffix. All ordering and hint metadata is finalized
- * before splitting. Quiescence uses only its own basic capture ordering; terminal and cache-cutoff
- * paths skip this sorting work.
+ * Continuing descendants apply stable capture ordering and collect hints from a bounded number of
+ * similar positions without reordering the list. Similar-position sources currently enumerate
+ * siblings. `parallel_apply_move_hints()` then applies ordinary quiet hints, the cache move,
+ * neighboring WIN hints in discovery order and the previous-iteration PV move in one stage. A
+ * matching PV move takes first priority, followed by WIN hints and the cache move. The neighboring
+ * score identifies ordering priority only; no neighboring score, bound or PV resolves the current
+ * node. The root keeps its prepared or retained ordering and promotes the matching PV move. A
+ * previous-iteration hint's suffix is retained only when its first move matches the final move at
+ * index `0`. All ordering and hint metadata is finalized before splitting. Quiescence uses only its
+ * own basic capture ordering; terminal and cache-cutoff paths skip this sorting work.
  *
  * For a continuing node, initializes all child intervals as unknown and calls `split_node()` once
  * to assign helper batches using the configured strategy if the remaining normal-search depth meets
@@ -2525,20 +2598,16 @@ static Interval search_node(Search            *search,
             has_hash_move = true;
         }
     }
+    SimilarMoveHints hints = {0};
     if (parent != NULL)
     {
         parallel_order_moves(position, &node.moves);
-        (void)parallel_order_similar_moves(search, &node);
+        (void)parallel_collect_similar_hints(search, &node, &hints);
         if (check_node(search, &node))
             return node_value(&node);
     }
-    if (has_hash_move)
-        (void)parallel_prioritize_move(&node.moves, hash_move);
-    if (pv_hint != NULL && pv_hint_count > 0 && parallel_prioritize_move(&node.moves, pv_hint[0]))
-    {
-        node.pv_hint       = pv_hint;
-        node.pv_hint_count = pv_hint_count;
-    }
+    parallel_apply_move_hints(&node, &hints, has_hash_move ? &hash_move : NULL, pv_hint,
+                              pv_hint_count);
     for (int i = 0; i < node.moves.count; ++i)
         node.children[i] = (Interval){-WIN, WIN, false};
     if (search->progress != NULL && parent == NULL)
@@ -2712,26 +2781,28 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * POSIX platforms, creates `thread_count - 1` helpers before starting the search and reuses them
  * across iterations from depth 1 through `options.depth`. Completed root scores order the next
  * iteration even without a table. Internal nodes and the first root iteration use the built-in
- * capture ordering, with cache and then previous-PV moves promoted to the front. PV hints are
- * retained for up to 64 moves and passed only along matching paths; they may end early at terminal
- * positions or cache bounds/misses/contention. This does not limit search depth or alter
- * score-bound semantics. An enabled table retains entries and advances its generation each
- * iteration. Stops at the maximum depth, a terminal root, a proven winning move, or a time stop, as
- * in the built-in search. Each iteration waits for all its helper work before the next begins.
- * `CONTIGUOUS` assigns a tail batch by percentage; zero disables splitting, not helper creation.
- * `INTERLEAVED` distributes sorted indices round-robin among the owner and prepared helpers, up to
- * `PARALLEL_INTERLEAVED_SPLIT_THREADS` total participants, ignoring the percentage even when zero.
- * With N actual participants, the owner takes `0,N,...` and helper k takes `k,k+N,...`. N shrinks
- * when moves, idle workers or completion resources are insufficient; a limit of one is serial. Both
- * strategies require remaining normal-search depth of at least `PARALLEL_MIN_SPLIT_DEPTH` and an
- * idle helper; otherwise all moves stay with the current thread. The search is synchronous;
- * depth-zero leaves run thread-local quiescence for captures and legal check evasions, with at most
- * 500 extension plies. Quiescence shares the time budget and ancestor cancellation, but neither
- * splits tasks nor accesses the table or PV. Node counts include both normal and quiescence
- * entries, including their shared leaf; reported depths exclude extensions. Real-game history
- * removes root candidates that close a third identical cycle before any helper tasks are
- * dispatched. No search-tree history is kept. A nonzero time budget uses a monotonic deadline
- * shared across preparation and all iterations; an unfinished iteration above
+ * capture ordering, with cache and then previous-PV moves promoted to the front. Non-root nodes
+ * also borrow neighboring ordering hints; an eligible neighboring win's move takes precedence over
+ * the cache move while remaining below a matching PV move, without reusing its score as proof for
+ * the current position. PV hints are retained for up to 64 moves and passed only along matching
+ * paths; they may end early at terminal positions or cache bounds/misses/contention. This does not
+ * limit search depth or alter score-bound semantics. An enabled table retains entries and advances
+ * its generation each iteration. Stops at the maximum depth, a terminal root, a proven winning
+ * move, or a time stop, as in the built-in search. Each iteration waits for all its helper work
+ * before the next begins. `CONTIGUOUS` assigns a tail batch by percentage; zero disables splitting,
+ * not helper creation. `INTERLEAVED` distributes sorted indices round-robin among the owner and
+ * prepared helpers, up to `PARALLEL_INTERLEAVED_SPLIT_THREADS` total participants, ignoring the
+ * percentage even when zero. With N actual participants, the owner takes `0,N,...` and helper k
+ * takes `k,k+N,...`. N shrinks when moves, idle workers or completion resources are insufficient; a
+ * limit of one is serial. Both strategies require remaining normal-search depth of at least
+ * `PARALLEL_MIN_SPLIT_DEPTH` and an idle helper; otherwise all moves stay with the current thread.
+ * The search is synchronous; depth-zero leaves run thread-local quiescence for captures and legal
+ * check evasions, with at most 500 extension plies. Quiescence shares the time budget and ancestor
+ * cancellation, but neither splits tasks nor accesses the table or PV. Node counts include both
+ * normal and quiescence entries, including their shared leaf; reported depths exclude extensions.
+ * Real-game history removes root candidates that close a third identical cycle before any helper
+ * tasks are dispatched. No search-tree history is kept. A nonzero time budget uses a monotonic
+ * deadline shared across preparation and all iterations; an unfinished iteration above
  * `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
  * returning.
  *
