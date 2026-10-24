@@ -183,7 +183,7 @@ typedef struct ScoredMove
  * extension decision.
  *
  * `iteration_total_moves` is the number of root candidate moves to search in each depth iteration,
- * taken from the legal root-move list after `xq_history_filter_root_cycles()`. It remains unchanged
+ * taken from the legal root-move list after `xq_history_filter_cycles()`. It remains unchanged
  * across depth iterations because they search the same candidate list. Descendant nodes do not
  * contribute to this total. For example, `iteration_completed_moves == 6` and
  * `iteration_total_moves == 10` mean that `60%` of the root candidates have completed their
@@ -2164,7 +2164,7 @@ static bool builtin_search(const XqEngineAdapter *engine,
 
     *best_move = list.moves[0];
     bool filtered_cycles =
-        xq_history_filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
+        xq_history_filter_cycles(engine != NULL ? engine->history : NULL, pos, &list);
     context.iteration_total_moves = (unsigned)list.count;
     if (stats != NULL)
         stats->iteration_total_moves = (unsigned)list.count;
@@ -3401,7 +3401,7 @@ static bool builtin_search_for_explain(const XqEngineAdapter *engine,
 
     *best_move = list.moves[0];
     bool filtered_cycles =
-        xq_history_filter_root_cycles(engine != NULL ? engine->history : NULL, pos, &list);
+        xq_history_filter_cycles(engine != NULL ? engine->history : NULL, pos, &list);
     context.iteration_total_moves = (unsigned)list.count;
     if (stats != NULL)
         stats->iteration_total_moves = (unsigned)list.count;

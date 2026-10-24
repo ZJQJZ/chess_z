@@ -25,7 +25,7 @@
 #endif
 
 #ifndef CLI_SAMPLE_ITERATION_BYTES
-#define CLI_SAMPLE_ITERATION_BYTES (64u * 1024u * 1024u)
+#define CLI_SAMPLE_ITERATION_BYTES (512 * 1024u * 1024u)
 #endif
 #ifndef PATH_MAX
 #define PATH_MAX 4096

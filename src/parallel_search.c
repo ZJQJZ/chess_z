@@ -1867,17 +1867,21 @@ static bool quiescence_should_stop(Search *search,
  * pat. The ordinary caller handles missing kings before entry; here an attacked opponent king is
  * scored as a win before any king-capture move is played. All move lists are pseudo-legal: the move
  * loop skips non-captures outside check, and after making a candidate in check rejects it if the
- * original mover is still in check. If no evasion survives, the position is a loss. King,
- * empty-list and missing evasion checks take precedence over the extension limit. Outside check, no
- * separate test for a legal continuation is performed before stand pat. At the extension limit, an
- * in-check position must have an evasion before static evaluation of the original position is used.
+ * original mover is still in check. Candidates closing a third identical cycle in this quiescence
+ * path are losses for the mover and are filtered using the root-cycle rule. If no evasion survives,
+ * the position is a loss. King, empty-list and missing evasion checks take precedence over the
+ * extension limit. Outside check, no separate test for a legal continuation is performed before
+ * stand pat. At the extension limit, an in-check position must have an evasion that is not a cycle
+ * loss before static evaluation of the original position is used.
  *
  * `position` is a private mutable copy owned by the ordinary leaf. Every made move is unmade before
  * inspecting cancellation or returning. Recursion uses only local windows and move lists, not the
  * larger shared `Node` structure. The ordinary leaf is used solely for time/ancestor stop checks.
  * No table, PV or progress updates occur here; each entry contributes to the executing thread's
  * node count. Time and ancestor cancellation are checked once at entry. A child's stopped result
- * propagates after restoring the move; the ordinary caller performs the final stop check.
+ * propagates after restoring the move and history; the ordinary caller performs the final stop
+ * check. The private history starts at this quiescence subtree's entry, excluding real-game and
+ * ordinary-search history, and is restored between sibling branches.
  *
  * A stopped result has no usable score. Otherwise the score is fail-soft and must be classified
  * against the caller's original window before being published as a proven interval. A score <= the
@@ -1894,6 +1898,9 @@ static bool quiescence_should_stop(Search *search,
  *                 alive. Stop checks may tighten its window or publish its terminal state.
  * @param position Thread-private mutable position; restored before every return. The evaluator
  *                 borrows it read-only. No other thread may access it during this call.
+ * @param history  Thread-private history view ending at position, with count == ply + 1. Its fixed
+ *                 storage holds the entry position plus the maximum number of extension plies. Only
+ *                 this recursive path is recorded; count is restored before every return.
  * @param ply      Number of quiescence plies already played, starting at zero. Incremented on each
  *                 recursive move; the extension cap applies independently of normal-search depth.
  * @param alpha    Lower edge of the local side-to-move window. The initial window is converted from
@@ -1909,6 +1916,7 @@ static bool quiescence_should_stop(Search *search,
 static QuiescenceResult parallel_quiescence(Search            *search,
                                             Node              *leaf,
                                             XqPosition        *position,
+                                            XqHistory         *history,
                                             unsigned           ply,
                                             int                alpha,
                                             int                beta,
@@ -1930,6 +1938,8 @@ static QuiescenceResult parallel_quiescence(Search            *search,
 
     if (moves.count == 0)
         return (QuiescenceResult){-WIN, false};
+
+    (void)xq_history_filter_cycles(history, position, &moves);
 
     bool depth_limited = ply >= PARALLEL_MAX_QUIESCENCE_DEPTH;
     int  best          = -WIN; /* Without a legal evasion, an in-check node is a loss. */
@@ -1973,10 +1983,14 @@ static QuiescenceResult parallel_quiescence(Search            *search,
                 score = -STATIC_LIMIT;
             return (QuiescenceResult){score, false};
         }
+        history->entries[history->count] =
+            xq_history_next_entry(&history->entries[history->count - 1], moves.moves[i], position);
+        ++history->count;
         if (stats->sampling != NULL)
             xq_sampling_push(stats->sampling, moves.moves[i], true);
         QuiescenceResult child =
-            parallel_quiescence(search, leaf, position, ply + 1, -beta, -alpha, stats);
+            parallel_quiescence(search, leaf, position, history, ply + 1, -beta, -alpha, stats);
+        --history->count;
         if (stats->sampling != NULL)
             xq_sampling_pop(stats->sampling, true);
         xq_position_unmake_move(position, moves.moves[i]);
@@ -1993,6 +2007,47 @@ static QuiescenceResult parallel_quiescence(Search            *search,
     }
 
     return (QuiescenceResult){best, false};
+}
+
+/**
+ * @brief Starts quiescence at an ordinary leaf with an independent, bounded cycle history.
+ *
+ * Records the entry position as the start of a fresh path, excluding real-game history and the
+ * ordinary-search prefix. The recursive search reuses the root-cycle rule to reject moves that
+ * close a third identical cycle, restoring the path between sibling branches. Each invocation owns
+ * its history, so concurrent leaves never share or modify one another's path.
+ *
+ * The fixed stack buffer holds the entry position plus at most `PARALLEL_MAX_QUIESCENCE_DEPTH`
+ * moves. Keeping it in this entry wrapper avoids declaring a full buffer in every recursive search
+ * frame. The history view borrows this storage only until return; it must not be passed to
+ * allocation or destruction helpers. The recursive call starts at `ply == 0` and restores
+ * `position` before return, including when time or ancestor cancellation stops the search.
+ *
+ * @param search   Shared search state supplying the evaluator and time control.
+ * @param leaf     Ordinary depth-zero node owning this subtree and its stop checks. It and its
+ *                 ancestors must remain alive until the search returns.
+ * @param position Thread-private mutable entry position; restored before return.
+ * @param alpha    Lower edge of the entry window, converted to the side-to-move perspective.
+ * @param beta     Upper edge of the same window.
+ * @param stats    Executing thread's private node counters and optional sampling state.
+ * @return         Side-to-move fail-soft score, or `{0, true}` when stopped. The stopped score is a
+ *                 placeholder, not a draw; the caller must consult the ordinary leaf's interval.
+ */
+static QuiescenceResult parallel_quiescence_start(Search            *search,
+                                                  Node              *leaf,
+                                                  XqPosition        *position,
+                                                  int                alpha,
+                                                  int                beta,
+                                                  SearchThreadStats *stats)
+{
+    XqHistoryEntry entries[PARALLEL_MAX_QUIESCENCE_DEPTH + 1];
+    entries[0]        = (XqHistoryEntry){.key = xq_position_hash(position), .power = 1};
+    XqHistory history = {
+        .entries  = entries,
+        .count    = 1,
+        .capacity = sizeof(entries) / sizeof(entries[0]),
+    };
+    return parallel_quiescence(search, leaf, position, &history, 0, alpha, beta, stats);
 }
 
 /**
@@ -2520,9 +2575,9 @@ static Interval search_node(Search            *search,
         int alpha = atomic_load_explicit(&node.alpha, memory_order_relaxed);
         int beta  = atomic_load_explicit(&node.beta, memory_order_relaxed);
         /* Ordinary nodes use root-side intervals; quiescence uses the side-to-move window. */
-        QuiescenceResult quiet =
-            parallel_quiescence(search, &node, &node.position, 0, node.maximizing ? alpha : -beta,
-                                node.maximizing ? beta : -alpha, stats);
+        QuiescenceResult quiet = parallel_quiescence_start(search, &node, &node.position,
+                                                           node.maximizing ? alpha : -beta,
+                                                           node.maximizing ? beta : -alpha, stats);
         if (quiet.stopped || quiescence_should_stop(search, &node))
             return node_value(&node);
 
@@ -2801,10 +2856,11 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * cancellation, but neither splits tasks nor accesses the table or PV. Node counts include both
  * normal and quiescence entries, including their shared leaf; reported depths exclude extensions.
  * Real-game history removes root candidates that close a third identical cycle before any helper
- * tasks are dispatched. No search-tree history is kept. A nonzero time budget uses a monotonic
- * deadline shared across preparation and all iterations; an unfinished iteration above
- * `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
- * returning.
+ * tasks are dispatched. Each quiescence subtree applies the same cycle rule to its private path,
+ * excluding real-game and ordinary-search history. Ordinary-search repetitions are not checked. A
+ * nonzero time budget uses a monotonic deadline shared across preparation and all iterations; an
+ * unfinished iteration above `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline
+ * check may finish before returning.
  *
  * Only the adapter's `static_evaluate`, `user` and `history` are used; its `score_move` and serial
  * table are ignored. The parallel table remains in `options`. A null adapter or static evaluator
@@ -3015,7 +3071,7 @@ XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter  
         result->move_available = true;
         result->best_move      = moves->moves[0];
         search.filtered_cycles =
-            xq_history_filter_root_cycles(engine != NULL ? engine->history : NULL, pos, moves);
+            xq_history_filter_cycles(engine != NULL ? engine->history : NULL, pos, moves);
         search.root_total                   = (unsigned)moves->count;
         result->stats.iteration_total_moves = search.root_total;
         if (moves->count > 0)

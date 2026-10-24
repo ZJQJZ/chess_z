@@ -58,9 +58,9 @@ const char *xq_parallel_status_text(XqParallelStatus status);
 /* pos is never modified. NULL options selects defaults. Only engine->static_evaluate, user and
  * history are used; score_move and the built-in transposition_table are ignored. The parallel
  * table remains in options. NULL engine or static_evaluate selects the built-in evaluator with
- * NULL evaluator user data; NULL engine also disables history filtering. The evaluator and its
- * user data must support concurrent calls and must not modify positions. Opposite perspectives
- * must yield opposite evaluation scores. Cached evaluation must be deterministic for a position
+ * NULL evaluator user data; NULL engine also disables real-game root history filtering. The
+ * evaluator and its user data must support concurrent calls and must not modify positions. Opposite
+ * perspectives must yield opposite evaluation scores. Cached evaluation must be deterministic for a position
  * and perspective. Changing the effective evaluator or user pointer
  * clears the borrowed table; changing root color also clears it for custom evaluators. Clear it
  * explicitly after mutating evaluation parameters behind the same user pointer. Keep the adapter,
@@ -69,10 +69,10 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Before iterative deepening, real-game history filters legal root moves that close the third of
  * three consecutive identical even-length move sequences with four matching boundary position
  * hashes, using the same rule as built-in search. NULL, empty or mismatched history disables this
- * filtering. Search-tree repetitions are not checked and search moves are never appended to real
- * history. Progress totals include only surviving root moves. When all candidates are filtered,
- * return the original legal fallback without a score, at selected_move_depth == 0 and with no
- * iteration events. A root result with any filtered candidates is never stored in the position-only
+ * filtering. Normal-search paths are not checked for repetitions and search moves are never
+ * appended to real history. Progress totals include only surviving root moves. When all candidates
+ * are filtered, return the original legal fallback without a score, at selected_move_depth == 0 and
+ * with no iteration events. A root result with any filtered candidates is never stored in the position-only
  * table; history-independent descendant results remain cacheable.
  * Internal TT scores use the side-to-move perspective and may come from greater search depths;
  * the root probes only for move ordering in the first iteration. Searches depths 1..options.depth,
@@ -84,11 +84,14 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Depth-zero leaves run quiescence in the executing thread: stand pat plus captures when not in
  * check, all legal evasions without stand pat when in check. All move lists are pseudo-legal; the
  * move loop skips non-captures outside check and rejects moves that leave the original mover in
- * check when evading. An empty list or an in-check position with no legal evasion is a loss;
- * outside check there is no extra legal-move scan before stand pat. King and loss checks precede
- * the 500-ply extension cap; at the cap an in-check position must have a legal evasion before the
- * original position is statically evaluated. The evaluator receives the side to move, and its
- * result is clamped to +/-28999 for negamax.
+ * check when evading. Each depth-zero entry starts a private stack history at its entry position,
+ * excluding real-game history and the normal-search prefix. Quiescence filters moves that lose
+ * under the same three-cycle rule above, without sharing history between entries or branches.
+ * An originally empty list or an in-check position with no surviving legal evasion is a loss;
+ * outside check stand pat remains available, without an extra legal-move scan. King and loss
+ * checks and cycle filtering precede the 500-ply extension cap; at the cap an in-check position
+ * must have a surviving legal evasion before the original position is statically evaluated.
+ * The evaluator receives the side to move, and its result is clamped to +/-28999 for negamax.
  * Quiescence flips child scores and windows, then ordinary search converts its result back to
  * the root perspective. Wins/losses remain +/-30000. Quiescence shares time and ancestor cancellation checks,
  * preserves cutoff bounds and never splits tasks, accesses the table or extends PV hints.
