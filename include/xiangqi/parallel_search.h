@@ -87,9 +87,15 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * check when evading. Each depth-zero entry starts a private stack history at its entry position,
  * excluding real-game history and the normal-search prefix. Quiescence filters moves that lose
  * under the same three-cycle rule above, without sharing history between entries or branches.
+ * Six consecutive actual quiescence moves that give check (three per side) produce a draw scored
+ * as zero, unless the resulting position is checkmate. A non-checking move breaks the run; check
+ * at the entry position does not count. Checkmate takes precedence over this draw, which takes
+ * precedence over a cycle loss: legal moves completing the run survive cycle filtering. A parent
+ * may still choose another move with a better score.
  * An originally empty list or an in-check position with no surviving legal evasion is a loss;
  * outside check stand pat remains available, without an extra legal-move scan. King and loss
- * checks and cycle filtering precede the 500-ply extension cap; at the cap an in-check position
+ * checks, the six-check draw and cycle filtering precede the 500-ply extension cap. A draw reached
+ * at ply 500 is recognized, without extending to ply 501. At the cap an in-check position
  * must have a surviving legal evasion before the original position is statically evaluated.
  * The evaluator receives the side to move, and its result is clamped to +/-28999 for negamax.
  * Quiescence flips child scores and windows, then ordinary search converts its result back to

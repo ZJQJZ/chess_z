@@ -1,4 +1,5 @@
 #include "history_internal.h"
+#include "xiangqi/movegen.h"
 
 #include <stdlib.h>
 
@@ -60,8 +61,9 @@ bool xq_history_init(XqHistory *history, const XqPosition *initial)
  * @brief Starts a new game history while retaining any previously allocated storage.
  *
  * Entry zero stores the initial position hash, an empty path hash of zero, and a hash-base power of
- * one. Its move is zero-initialized and does not represent an actual move. Setting the count to one
- * discards the previous game logically; entries beyond that count are no longer valid.
+ * one. It records whether the side to move is in check. Its move is zero-initialized and does not
+ * represent an actual move. Setting the count to one discards the previous game logically; entries
+ * beyond that count are no longer valid.
  *
  * Storage is allocated only when none exists. On allocation failure, the history is unchanged.
  *
@@ -73,7 +75,11 @@ bool xq_history_reset(XqHistory *history, const XqPosition *initial)
 {
     if (history->capacity == 0 && !history_reserve(history))
         return false;
-    history->entries[0] = (XqHistoryEntry){.key = xq_position_hash(initial), .power = 1};
+    history->entries[0] = (XqHistoryEntry){
+        .key = xq_position_hash(initial),
+        .power = 1,
+        .in_check = xq_position_in_check(initial, initial->side_to_move),
+    };
     history->count = 1;
     return true;
 }
@@ -84,7 +90,8 @@ bool xq_history_reset(XqHistory *history, const XqPosition *initial)
  * The source and destination squares form a nonzero token for the rolling path hash. The entry
  * stores `previous_prefix * HISTORY_HASH_BASE + token` and the next power of the base. Unsigned
  * overflow intentionally computes these values modulo 2^64. The complete move is retained for
- * exact path comparison and replay; its piece and captured-piece fields are not hashed.
+ * exact path comparison and replay; its piece and captured-piece fields are not hashed. The entry
+ * also records whether the side to move in the resulting position is in check.
  *
  * The caller has already played the move. No legality, continuity or capacity checks are made;
  * neither the preceding entry nor the resulting position is modified, and no storage is allocated.
@@ -92,7 +99,7 @@ bool xq_history_reset(XqHistory *history, const XqPosition *initial)
  * @param previous Entry preceding the move; must not be null.
  * @param move     Move just played, including its piece and captured-piece information.
  * @param pos      Position after the move; must not be null and is left unchanged.
- * @return         Entry recording the resulting position and extended move-path hash.
+ * @return         Entry recording the resulting position, check state and extended move-path hash.
  */
 XqHistoryEntry xq_history_next_entry(const XqHistoryEntry *previous,
                                    XqMove                move,
@@ -105,6 +112,7 @@ XqHistoryEntry xq_history_next_entry(const XqHistoryEntry *previous,
         .prefix = previous->prefix * HISTORY_HASH_BASE + token,
         .power = previous->power * HISTORY_HASH_BASE,
         .move = move,
+        .in_check = xq_position_in_check(pos, pos->side_to_move),
     };
 }
 
@@ -118,7 +126,8 @@ XqHistoryEntry xq_history_next_entry(const XqHistoryEntry *previous,
  * stores `previous_prefix * HISTORY_HASH_BASE + token` and the next power of the base, allowing
  * equal-length path hashes to be compared in constant time. Unsigned overflow intentionally
  * computes these values modulo 2^64. The complete move is also retained for exact path comparison
- * and replay; its piece and captured-piece fields are not part of the rolling hash.
+ * and replay; its piece and captured-piece fields are not part of the rolling hash. Each entry also
+ * records whether the side to move in its resulting position is in check.
  *
  * Appending takes amortized constant time through geometric storage growth. On failure, the history
  * is unchanged, and the caller must handle the unrecorded move before continuing play.

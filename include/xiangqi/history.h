@@ -9,6 +9,7 @@ typedef struct XqHistoryEntry
     uint64_t prefix; /* Rolling hash of moves 1 through this entry. */
     uint64_t power;  /* Hash base raised to this entry's index. */
     XqMove move;
+    bool in_check; /* Side to move is in check in this entry's resulting position. */
 } XqHistoryEntry;
 
 /* Entry 0 is the initial position; entry i records the move reaching position i.
