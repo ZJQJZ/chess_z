@@ -67,6 +67,8 @@ if(BUILD_TESTING)
     if(XQ_VIEWER_NODE)
         add_test(NAME search_sample_viewer_model COMMAND ${XQ_VIEWER_NODE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/search_sample_viewer_tests.js)
+        add_test(NAME search_sample_compact_model COMMAND ${XQ_VIEWER_NODE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/search_sample_compact_model_tests.js)
         add_test(NAME search_sample_report_reader COMMAND ${XQ_VIEWER_NODE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/search_sample_report_reader_tests.js)
         add_test(NAME search_sample_viewer_ui COMMAND ${XQ_VIEWER_NODE}
@@ -75,7 +77,7 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/search_sample_timeline_tests.js)
         add_test(NAME search_sample_timeline_ui COMMAND ${XQ_VIEWER_NODE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/search_sample_timeline_ui_tests.js)
-        set_tests_properties(search_sample_viewer_model search_sample_report_reader search_sample_viewer_ui
+        set_tests_properties(search_sample_viewer_model search_sample_compact_model search_sample_report_reader search_sample_viewer_ui
             search_sample_timeline search_sample_timeline_ui PROPERTIES TIMEOUT 30)
     endif()
 endif()

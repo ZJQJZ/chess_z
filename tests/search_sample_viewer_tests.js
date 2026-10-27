@@ -348,6 +348,10 @@ test("per-thread samples preserve counts and reject duplicate or out-of-range ID
 });
 
 test("real saved reports replay every sampled endpoint and retain count invariants", () => {
+    if (process.argv.includes("--synthetic-only")) {
+        console.log("  saved-report replay skipped: --synthetic-only");
+        return;
+    }
     const reportRoot = path.join(__dirname, "../build/search_samples");
     if (!fs.existsSync(reportRoot)) {
         console.log("  saved-report replay skipped: build/search_samples does not exist");

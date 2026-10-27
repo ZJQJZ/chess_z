@@ -135,42 +135,73 @@
         return parsed;
     }
 
-    // Streaming readers discard each raw node after this normalization. Only
-    // the final model is retained, with no second array of raw report objects.
-    function createIterationBuilder(session) {
+    function normalizeNode(rawNode) {
+        var item = record(rawNode, "路径节点");
+        var node = {
+            id: uint(item.id, "节点 id"),
+            parent: item.parent === null ? null : uint(item.parent, "节点 parent"),
+            kind: item.kind, move: item.move,
+            inclusive: uint(item.inclusive, "节点 inclusive"),
+            self: uint(item.self, "节点 self"),
+            truncated_self: item.truncated_self === undefined ? 0 : uint(item.truncated_self, "节点 truncated_self"),
+            unrecorded_self: item.unrecorded_self === undefined ? 0 : uint(item.unrecorded_self, "节点 unrecorded_self"),
+            children: EMPTY_CHILDREN, pathDepth: 0, normalPly: 0, quiescencePly: 0
+        };
+        if (node.kind !== "root" && node.kind !== "normal_move" &&
+            node.kind !== "quiescence" && node.kind !== "quiescence_move") fail("路径节点 kind 无效");
+        if (node.kind === "root" || node.kind === "quiescence") {
+            if (node.move !== null) fail("根节点和静态搜索标记不应包含走法");
+        } else if (typeof node.move !== "string" || !MOVE.test(node.move)) fail("路径节点走法坐标无效");
+        if ((node.parent === null) !== (node.kind === "root")) fail("只有根节点的 parent 可以为空");
+        if (add(node.truncated_self, node.unrecorded_self, "节点不完整样本数") > node.self)
+            fail("节点不完整样本数超过 self");
+        return node;
+    }
+
+    function finishMetadata(iteration, source, session, totalTruncated, totalUnrecorded) {
+        if (iteration.truncated_samples !== undefined && totalTruncated > iteration.truncated_samples)
+            fail("节点截断样本数超过迭代统计");
+        if (iteration.unrecorded_path_samples !== undefined && totalUnrecorded !== iteration.unrecorded_path_samples)
+            fail("节点遗漏样本数与迭代统计不一致");
+        iteration.threads = [];
+        if (source.threads !== undefined) {
+            if (!Array.isArray(source.threads)) fail("threads 必须是数组");
+            var threadIds = new Set(), threadTotal = 0;
+            source.threads.forEach(function (rawThread) {
+                var item = record(rawThread, "线程统计");
+                var thread = { thread_id: uint(item.thread_id, "thread_id"),
+                    valid_samples: uint(item.valid_samples, "线程 valid_samples") };
+                if (threadIds.has(thread.thread_id)) fail("thread_id 重复");
+                if (session.thread_capacity !== undefined && thread.thread_id >= session.thread_capacity)
+                    fail("thread_id 超过 thread_capacity");
+                threadIds.add(thread.thread_id);
+                threadTotal = add(threadTotal, thread.valid_samples, "线程样本总数");
+                optionalUint(item, thread, ["max_quiescence_ply", "last_timestamp_ms"]);
+                iteration.threads.push(thread);
+            });
+            if (iteration.thread_statistics_available !== false && threadTotal !== iteration.valid_samples)
+                fail("线程样本总数与 valid_samples 不一致");
+        }
+        iteration.depth = iteration.iteration_depth;
+        iteration.validSamples = iteration.valid_samples;
+        return iteration;
+    }
+
+    // Small reports keep ordinary objects. Large reports use numeric pages and
+    // bounded, on-demand views instead of two Map entries and an object per node.
+    function createIterationBuilder(session, options) {
+        if (options && options.compact) return createCompactIterationBuilder(session, options);
         var nodes = [], byId = new Map(), children = new Map(), rootNode = null;
         var totalSelf = 0, totalTruncated = 0, totalUnrecorded = 0;
         var finished = false;
         function addNode(rawNode) {
             if (finished) fail("迭代报告已完成建模");
-            var item = record(rawNode, "路径节点");
-            var node = {
-                id: uint(item.id, "节点 id"),
-                parent: item.parent === null ? null : uint(item.parent, "节点 parent"),
-                kind: item.kind,
-                move: item.move,
-                inclusive: uint(item.inclusive, "节点 inclusive"),
-                self: uint(item.self, "节点 self"),
-                truncated_self: item.truncated_self === undefined ? 0 : uint(item.truncated_self, "节点 truncated_self"),
-                unrecorded_self: item.unrecorded_self === undefined ? 0 : uint(item.unrecorded_self, "节点 unrecorded_self"),
-                children: EMPTY_CHILDREN,
-                pathDepth: 0,
-                normalPly: 0,
-                quiescencePly: 0
-            };
+            var node = normalizeNode(rawNode);
             if (byId.has(node.id)) fail("路径节点 id 重复");
-            if (node.kind !== "root" && node.kind !== "normal_move" &&
-                node.kind !== "quiescence" && node.kind !== "quiescence_move") fail("路径节点 kind 无效");
-            if (node.kind === "root" || node.kind === "quiescence") {
-                if (node.move !== null) fail("根节点和静态搜索标记不应包含走法");
-            } else if (typeof node.move !== "string" || !MOVE.test(node.move)) fail("路径节点走法坐标无效");
-            if ((node.parent === null) !== (node.kind === "root")) fail("只有根节点的 parent 可以为空");
             if (node.parent === null) {
                 if (rootNode) fail("路径树必须只有一个根节点");
                 rootNode = node;
             }
-            if (add(node.truncated_self, node.unrecorded_self, "节点不完整样本数") > node.self)
-                fail("节点不完整样本数超过 self");
             totalSelf = add(totalSelf, node.self, "self 总数");
             totalTruncated = add(totalTruncated, node.truncated_self, "截断样本总数");
             totalUnrecorded = add(totalUnrecorded, node.unrecorded_self, "遗漏路径样本总数");
@@ -232,38 +263,248 @@
                     current.children.sort(function (a, b) { return b.inclusive - a.inclusive || a.id - b.id; });
             }
             if (queue.length !== nodes.length) fail("路径树含有环或与根断开的节点");
-            if (iteration.truncated_samples !== undefined && totalTruncated > iteration.truncated_samples)
-                fail("节点截断样本数超过迭代统计");
-            if (iteration.unrecorded_path_samples !== undefined && totalUnrecorded !== iteration.unrecorded_path_samples)
-                fail("节点遗漏样本数与迭代统计不一致");
-            iteration.threads = [];
-            if (source.threads !== undefined) {
-                if (!Array.isArray(source.threads)) fail("threads 必须是数组");
-                var threadIds = new Set(), threadTotal = 0;
-                source.threads.forEach(function (rawThread) {
-                    var item = record(rawThread, "线程统计");
-                    var thread = { thread_id: uint(item.thread_id, "thread_id"),
-                        valid_samples: uint(item.valid_samples, "线程 valid_samples") };
-                    if (threadIds.has(thread.thread_id)) fail("thread_id 重复");
-                    if (session.thread_capacity !== undefined && thread.thread_id >= session.thread_capacity)
-                        fail("thread_id 超过 thread_capacity");
-                    threadIds.add(thread.thread_id);
-                    threadTotal = add(threadTotal, thread.valid_samples, "线程样本总数");
-                    optionalUint(item, thread, ["max_quiescence_ply", "last_timestamp_ms"]);
-                    iteration.threads.push(thread);
-                });
-                if (iteration.thread_statistics_available !== false && threadTotal !== iteration.valid_samples)
-                    fail("线程样本总数与 valid_samples 不一致");
-            }
             iteration.nodes = nodes;
             iteration.byId = byId;
             iteration.children = children;
             iteration.root = rootNode;
-            iteration.depth = iteration.iteration_depth;
-            iteration.validSamples = iteration.valid_samples;
-            return iteration;
+            return finishMetadata(iteration, source, session, totalTruncated, totalUnrecorded);
         }
         return { addNode: addNode, finish: finish };
+    }
+
+    function createCompactIterationBuilder(session, options) {
+        var pageSize = options.pageSize === undefined ? 65536 : options.pageSize;
+        if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 65536)
+            fail("节点存储页大小必须为 1 至 65536");
+        // Dense engine IDs cost 34 bytes/node, plus optional nonzero loss counts.
+        // The Map contains pages, never individual nodes. Links normally use
+        // uint32 (id + 1, zero = absent); only pages with larger external IDs
+        // promote that link column to Float64, with -1 as the absent sentinel.
+        var pages = new Map(), views = new Map(), count = 0, rootId = null;
+        var totalSelf = 0, totalTruncated = 0, totalUnrecorded = 0, finished = false;
+        var MAX_LINK_ID = 4294967294, VIEW_LIMIT = 4096, BATCH = 16384;
+        function pageAt(id) { return pages.get(Math.floor(id / pageSize)); }
+        function has(id) {
+            if (!Number.isSafeInteger(id) || id < 0) return false;
+            var page = pageAt(id);
+            return !!page && page.code[id % pageSize] !== 0;
+        }
+        function link(column, offset) {
+            var value = column[offset];
+            if (column instanceof Uint32Array) return value === 0 ? null : value - 1;
+            return value === -1 ? null : value;
+        }
+        function putLink(page, name, offset, value) {
+            var column = page[name];
+            if (column instanceof Uint32Array && value !== null && value > MAX_LINK_ID) {
+                var promoted = new Float64Array(pageSize);
+                for (var i = 0; i < pageSize; ++i) promoted[i] = column[i] - 1;
+                column = page[name] = promoted;
+            }
+            if (column instanceof Uint32Array) column[offset] = value === null ? 0 : value + 1;
+            else column[offset] = value === null ? -1 : value;
+        }
+        function encode(node) {
+            if (node.kind === "root") return 1;
+            if (node.kind === "quiescence") return 2;
+            var move = node.move, from = Number(move[1]) * 9 + move.charCodeAt(0) - 97;
+            var to = Number(move[3]) * 9 + move.charCodeAt(2) - 97;
+            return 3 + from * 90 + to + (node.kind === "quiescence_move" ? 8100 : 0);
+        }
+        function kind(code) {
+            return code === 1 ? "root" : code === 2 ? "quiescence" : code < 8103 ? "normal_move" : "quiescence_move";
+        }
+        function inQ(code) { return code === 2 || code >= 8103; }
+        function moveText(code) {
+            if (code <= 2) return null;
+            var squares = (code - 3) % 8100, from = Math.floor(squares / 90), to = squares % 90;
+            return String.fromCharCode(97 + from % 9) + Math.floor(from / 9) +
+                String.fromCharCode(97 + to % 9) + Math.floor(to / 9);
+        }
+        function addNode(rawNode) {
+            if (finished) fail("迭代报告已完成建模");
+            var node = normalizeNode(rawNode), index = Math.floor(node.id / pageSize), offset = node.id % pageSize;
+            var page = pages.get(index);
+            if (!page) {
+                page = {code: new Uint16Array(pageSize), parent: new Uint32Array(pageSize),
+                    first: new Uint32Array(pageSize), next: new Uint32Array(pageSize),
+                    inclusive: new Float64Array(pageSize), self: new Float64Array(pageSize),
+                    depth: new Uint32Array(pageSize), truncated: null, unrecorded: null};
+                pages.set(index, page);
+            }
+            if (page.code[offset]) fail("路径节点 id 重复");
+            if (node.parent === null) {
+                if (rootId !== null) fail("路径树必须只有一个根节点");
+                rootId = node.id;
+            }
+            totalSelf = add(totalSelf, node.self, "self 总数");
+            totalTruncated = add(totalTruncated, node.truncated_self, "截断样本总数");
+            totalUnrecorded = add(totalUnrecorded, node.unrecorded_self, "遗漏路径样本总数");
+            putLink(page, "parent", offset, node.parent);
+            page.code[offset] = encode(node);
+            page.inclusive[offset] = node.inclusive; page.self[offset] = node.self;
+            if (node.truncated_self) {
+                if (!page.truncated) page.truncated = new Float64Array(pageSize);
+                page.truncated[offset] = node.truncated_self;
+            }
+            if (node.unrecorded_self) {
+                if (!page.unrecorded) page.unrecorded = new Float64Array(pageSize);
+                page.unrecorded[offset] = node.unrecorded_self;
+            }
+            ++count;
+        }
+        function childViews(id) {
+            if (!has(id)) return undefined;
+            var page = pageAt(id), child = link(page.first, id % pageSize);
+            if (child === null) return EMPTY_CHILDREN;
+            var result = [];
+            while (child !== null) {
+                result.push(get(child));
+                page = pageAt(child); child = link(page.next, child % pageSize);
+            }
+            result.sort(function (a, b) { return b.inclusive - a.inclusive || a.id - b.id; });
+            return result;
+        }
+        function get(id) {
+            if (!has(id)) return undefined;
+            if (views.has(id)) {
+                var cached = views.get(id); views.delete(id); views.set(id, cached); return cached;
+            }
+            var page = pageAt(id), offset = id % pageSize, code = page.code[offset];
+            var depth = page.depth[offset] - 1, normal = depth % 2048, q = Math.floor(depth / 2048);
+            var node = {id: id, parent: link(page.parent, offset), kind: kind(code), move: moveText(code),
+                inclusive: page.inclusive[offset], self: page.self[offset],
+                truncated_self: page.truncated ? page.truncated[offset] : 0,
+                unrecorded_self: page.unrecorded ? page.unrecorded[offset] : 0,
+                pathDepth: normal + q + 1 + (inQ(code) ? 1 : 0), normalPly: normal, quiescencePly: q};
+            Object.defineProperty(node, "children", {enumerable: true, get: function () { return childViews(id); }});
+            if (views.size >= VIEW_LIMIT) views.delete(views.keys().next().value);
+            views.set(id, node);
+            return node;
+        }
+        function* ids() {
+            for (var entry of pages) {
+                var base = entry[0] * pageSize, page = entry[1];
+                for (var offset = 0; offset < pageSize; ++offset)
+                    if (page.code[offset]) yield base + offset;
+            }
+        }
+        function beginFinish(rawMetadata) {
+            if (finished) fail("迭代报告已完成建模");
+            var parsed = iterationHeader(rawMetadata, session);
+            if (!count) fail("迭代报告缺少路径节点");
+            finished = true;
+            if (rootId === null) fail("路径树缺少根节点");
+            var rootPage = pageAt(rootId);
+            if (rootPage.inclusive[rootId % pageSize] !== parsed.value.valid_samples || totalSelf !== parsed.value.valid_samples)
+                fail("路径树样本总数与 valid_samples 不一致");
+            return validate(parsed);
+        }
+        function* validate(parsed) {
+            var iteration = parsed.value, done = 0, total = count * 2;
+            // Numeric adjacency links allow parents to arrive after children.
+            for (var entry of pages) {
+                var page = entry[1], base = entry[0] * pageSize;
+                for (var offset = 0; offset < pageSize; ++offset) {
+                    var code = page.code[offset];
+                    if (!code) continue;
+                    var id = base + offset, parent = link(page.parent, offset);
+                    if (parent !== null) {
+                        if (!has(parent)) fail("路径节点引用不存在的 parent");
+                        var parentPage = pageAt(parent), parentOffset = parent % pageSize;
+                        var parentInQ = inQ(parentPage.code[parentOffset]);
+                        if ((code === 2 || code >= 3 && code < 8103) && parentInQ)
+                            fail("静态搜索路径中出现普通走法或重复阶段标记");
+                        if (code >= 8103 && !parentInQ) fail("静态走法缺少阶段标记");
+                        putLink(page, "next", offset, link(parentPage.first, parentOffset));
+                        putLink(parentPage, "first", parentOffset, id);
+                    }
+                    if (++done % BATCH === 0) yield {done: done, total: total};
+                }
+            }
+            yield {done: done, total: total};
+            // Resolve each parent chain once, with at most MAX_PATH_NODES local
+            // entries. No breadth-first queue or full-tree node views are kept.
+            for (var item of pages) {
+                page = item[1]; base = item[0] * pageSize;
+                for (offset = 0; offset < pageSize; ++offset) {
+                    code = page.code[offset];
+                    if (!code) continue;
+                    id = base + offset;
+                    if (!page.depth[offset]) {
+                        var chain = [], cursor = id;
+                        while (true) {
+                            var currentPage = pageAt(cursor), currentOffset = cursor % pageSize;
+                            if (currentPage.depth[currentOffset]) break;
+                            chain.push(cursor);
+                            if (chain.length > MAX_PATH_NODES) fail("路径含环或超过 1024 步记录上限");
+                            parent = link(currentPage.parent, currentOffset);
+                            if (parent === null) { currentPage.depth[currentOffset] = 1; chain.pop(); break; }
+                            cursor = parent;
+                        }
+                        while (chain.length) {
+                            cursor = chain.pop(); currentPage = pageAt(cursor); currentOffset = cursor % pageSize;
+                            parent = link(currentPage.parent, currentOffset); parentPage = pageAt(parent);
+                            var packed = parentPage.depth[parent % pageSize] - 1, currentCode = currentPage.code[currentOffset];
+                            var normal = packed % 2048 + (currentCode >= 3 && currentCode < 8103 ? 1 : 0);
+                            var q = Math.floor(packed / 2048) + (currentCode >= 8103 ? 1 : 0);
+                            if (normal + q > MAX_MOVES || normal + q + 1 + (inQ(currentCode) ? 1 : 0) > MAX_PATH_NODES)
+                                fail("路径超过 1024 步记录上限");
+                            if (normal > iteration.iteration_depth ||
+                                (iteration.max_normal_ply !== undefined && normal > iteration.max_normal_ply) ||
+                                (iteration.max_quiescence_ply !== undefined && q > iteration.max_quiescence_ply))
+                                fail("路径深度与迭代深度统计不一致");
+                            currentPage.depth[currentOffset] = normal + q * 2048 + 1;
+                        }
+                    }
+                    var child = link(page.first, offset), subtotal = page.self[offset];
+                    var keys = child !== null && link(pageAt(child).next, child % pageSize) !== null ? new Set() : null;
+                    while (child !== null) {
+                        var childPage = pageAt(child), childOffset = child % pageSize, key = childPage.code[childOffset];
+                        if (keys) {
+                            if (keys.has(key)) fail("同一路径前缀下存在重复走法节点");
+                            keys.add(key);
+                        }
+                        subtotal = add(subtotal, childPage.inclusive[childOffset], "前缀样本总数");
+                        child = link(childPage.next, childOffset);
+                    }
+                    if (subtotal !== page.inclusive[offset]) fail("节点 inclusive 不等于 self 与子节点 inclusive 之和");
+                    if (++done % BATCH === 0) yield {done: done, total: total};
+                }
+            }
+            yield {done: done, total: total};
+            iteration.nodes = {length: count, forEach: function (callback) {
+                var index = 0; for (var id of ids()) callback(get(id), index++, iteration.nodes);
+            }};
+            iteration.nodes[Symbol.iterator] = function* () { for (var id of ids()) yield get(id); };
+            iteration.byId = {get: get, has: has, size: count};
+            iteration.children = {get: childViews, has: has, size: count};
+            iteration.root = get(rootId);
+            iteration.storage = "compact";
+            return finishMetadata(iteration, parsed.source, session, totalTruncated, totalUnrecorded);
+        }
+        function finish(rawMetadata) {
+            var work = beginFinish(rawMetadata), result;
+            do { result = work.next(); } while (!result.done);
+            return result.value;
+        }
+        async function finishAsync(rawMetadata, callbacks) {
+            callbacks = callbacks || {};
+            function checkCancelled() {
+                if (callbacks.cancelled && callbacks.cancelled()) {
+                    var error = new Error("已取消读取报告。"); error.name = "AbortError"; throw error;
+                }
+            }
+            checkCancelled();
+            var work = beginFinish(rawMetadata);
+            while (true) {
+                checkCancelled();
+                var result = work.next();
+                if (result.done) return result.value;
+                if (callbacks.onProgress) await callbacks.onProgress(result.value.done, result.value.total);
+            }
+        }
+        return {addNode: addNode, finish: finish, finishAsync: finishAsync};
     }
 
     function parseIteration(raw, session) {
@@ -275,7 +516,7 @@
     }
 
     function pathTo(iteration, nodeId) {
-        if (!iteration || !(iteration.byId instanceof Map)) fail("迭代报告尚未解析");
+        if (!iteration || !iteration.byId || typeof iteration.byId.get !== "function") fail("迭代报告尚未解析");
         var node = iteration.byId.get(uint(nodeId, "所选节点 id"));
         if (!node) fail("找不到所选路径节点");
         var path = [];

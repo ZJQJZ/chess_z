@@ -51,7 +51,7 @@
       let raw, iteration;
       if (!source.raw && source.file.size > STREAM_REPORT_BYTES) {
         if (!R) throw new Error("无法加载 report_reader.js，请重新打包或保留查看器的全部脚本。");
-        const builder = M.createIterationBuilder(group.session);
+        const builder = M.createIterationBuilder(group.session, {compact: true});
         raw = await R.read(source.file, {
           onNode: node => builder.addNode(node), cancelled: () => !isCurrent(),
           onProgress: async (bytes, total) => {
@@ -63,7 +63,14 @@
         if (!isCurrent()) return null;
         busy("正在校验深度 " + depth + " 的路径树…"); await tick();
         if (!isCurrent()) return null;
-        iteration = builder.finish(raw);
+        iteration = await builder.finishAsync(raw, {
+          cancelled: () => !isCurrent(),
+          onProgress: async (done, total) => {
+            if (!isCurrent()) return;
+            busy("正在校验深度 " + depth + " 的路径树… " + Math.floor(done / total * 100) + "%");
+            await tick();
+          }
+        });
       } else {
         raw = source.raw || JSON.parse(await source.file.text());
         if (!isCurrent()) return null;

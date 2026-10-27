@@ -83,6 +83,9 @@ The offline search-sample viewer has a standalone Node.js test suite:
 
 ```sh
 node tests/search_sample_viewer_tests.js
+# Small synthetic fixtures only, without replaying local saved reports:
+node tests/search_sample_viewer_tests.js --synthetic-only
+node tests/search_sample_compact_model_tests.js
 ```
 
 It checks report validation, path identity, FEN coordinates, captures, ordinary and
@@ -92,6 +95,9 @@ counts, incremental model construction and browser/CommonJS loading without a DO
 samples can include pseudo-legal positions. If `build/search_samples` exists, the
 suite also loads saved reports up to 64 MiB and replays every sampled endpoint. Those
 local reports are optional and are not required for the synthetic tests.
+The compact-model suite uses small fixtures to check paged storage, sparse safe-integer
+IDs, exact large counts, unordered parents, tree validation, replay and cancellable
+asynchronous finalization without generating or reading large reports.
 
 The large-report reader has bounded-chunk JSON tests:
 
