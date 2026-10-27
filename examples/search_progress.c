@@ -24,24 +24,35 @@
 #include <unistd.h>
 #endif
 
-#define CLI_SAMPLE_BOUNDARIES 1024u
 #define CLI_SAMPLE_REQUEST_HISTORY 1024u
+#ifndef CLI_SAMPLE_QUEUE_CAPACITY
+#define CLI_SAMPLE_QUEUE_CAPACITY 65536u
+#endif
+#ifndef CLI_SAMPLE_BATCH_CAPACITY
+#define CLI_SAMPLE_BATCH_CAPACITY 512u
+#endif
+_Static_assert(CLI_SAMPLE_QUEUE_CAPACITY > 0, "sampling queue must not be empty");
+_Static_assert(CLI_SAMPLE_BATCH_CAPACITY > 0, "sampling batch must not be empty");
+
+typedef enum CliTimelineKind
+{
+    CLI_TIMELINE_STATE, CLI_TIMELINE_SAMPLE, CLI_SAMPLE_BOUNDARY, CLI_SAMPLE_ALLOCATION_FAILURE
+} CliTimelineKind;
+typedef struct CliTimelineEvent
+{
+    XqSearchSample sample;
+    uint64_t requested_at;
+    CliTimelineKind kind;
+    bool finished;
+} CliTimelineEvent;
 
 typedef struct CliSampleSlot
 {
-    XqSearchSample sample;
-    XqMove path[XQ_SEARCH_SAMPLE_MAX_MOVES];
     uint64_t last_request, state_sequence;
     XqSearchThreadState state;
     unsigned state_depth;
-    bool ready, seen_request, seen_state;
+    bool seen_request, seen_state;
 } CliSampleSlot;
-
-typedef struct CliSampleBoundary
-{
-    unsigned depth;
-    bool finished;
-} CliSampleBoundary;
 
 struct CliSearchProgress
 {
@@ -52,28 +63,31 @@ struct CliSearchProgress
     bool clock_available;
     bool threaded;
     bool show_progress, terminal;
+    bool timeline;
     XqSearchSampler *sampler;
     CliSampleReport *report;
-    CliSampleSlot *slots, *drain;
+    CliSampleSlot *slots;
     unsigned thread_capacity;
     uint64_t interval_ms, requested;
     uint64_t *request_times;
-    CliSampleBoundary *boundaries, *drain_boundaries;
-    size_t boundary_head, boundary_count;
+    uint64_t *request_ids;
+    CliTimelineEvent *record_queue, *record_batch;
+    size_t record_head, record_count;
     CliSampleCounters counters;
     CliSampleSummary summary;
     unsigned active_threads;
-    unsigned finished_depth;
-    bool stop;
+    bool stop, writer_stop, writer_started;
     size_t previous_width; /* Display-thread owned until joined. */
 #ifdef _WIN32
     HANDLE thread;
+    HANDLE writer;
     CRITICAL_SECTION mutex;
-    CONDITION_VARIABLE changed;
+    CONDITION_VARIABLE changed, record_ready, record_space;
 #else
     pthread_t thread;
+    pthread_t writer;
     pthread_mutex_t mutex;
-    pthread_cond_t changed;
+    pthread_cond_t changed, record_ready, record_space;
 #endif
 };
 
@@ -189,6 +203,12 @@ static void draw(CliSearchProgress *display, XqSearchProgress snapshot, bool ove
     size_t length, clear_to;
     if (display->sampler)
     {
+        CliSampleSummary summary;
+        unsigned active;
+        lock_display(display);
+        summary = display->summary;
+        active = display->active_threads;
+        unlock_display(display);
         char base[256] = "";
         if (display->show_progress)
             format_progress(display, snapshot, sizeof(base) - 1, base, sizeof(base));
@@ -196,10 +216,10 @@ static void draw(CliSearchProgress *display, XqSearchProgress snapshot, bool ove
             snprintf(base, sizeof(base), "search depth %u", snapshot.depth);
         /* Keep samples visible even on narrow terminals. The full prefix remains in reports. */
         snprintf(text, sizeof(text), "d%u samples/5s %" PRIu64 " active %u/%u maxQ %" PRIu64
-                 "%s hot %s", snapshot.depth, display->summary.recent_samples,
-                 display->active_threads, display->thread_capacity,
-                 display->summary.max_quiescence_ply, display->summary.incomplete ? " incomplete" : "",
-                 display->summary.hot_path[0] ? display->summary.hot_path : "-");
+                 "%s hot %s", snapshot.depth, summary.recent_samples,
+                 active, display->thread_capacity,
+                 summary.max_quiescence_ply, summary.incomplete ? " incomplete" : "",
+                 summary.hot_path[0] ? summary.hot_path : "-");
         size_t summary_length = strlen(text);
         if (display->show_progress && strlen(base) + summary_length + 3 <= width)
         {
@@ -213,9 +233,9 @@ static void draw(CliSearchProgress *display, XqSearchProgress snapshot, bool ove
             snprintf(combined, sizeof(combined), "d%u roots %u/%u samp/5s %" PRIu64
                      " active %u/%u Q%" PRIu64 " %s", snapshot.depth,
                      snapshot.completed_moves, snapshot.total_moves,
-                     display->summary.recent_samples, display->active_threads,
-                     display->thread_capacity, display->summary.max_quiescence_ply,
-                     display->summary.hot_path[0] ? display->summary.hot_path : "-");
+                     summary.recent_samples, active,
+                     display->thread_capacity, summary.max_quiescence_ply,
+                     summary.hot_path[0] ? summary.hot_path : "-");
             memcpy(text, combined, strlen(combined) + 1);
         }
         if (width < sizeof(text) && strlen(text) > width) text[width] = '\0';
@@ -297,84 +317,129 @@ static void display_progress_only(CliSearchProgress *display)
     unlock_display(display);
 }
 
+/* The mutex protects only queue metadata, requests and UI snapshots. No report
+ * processing or file I/O runs while it is held. Queue saturation applies
+ * backpressure instead of discarding diagnostic events. */
+static void enqueue_record(CliSearchProgress *display, const CliTimelineEvent *event)
+{
+    while (display->record_count == CLI_SAMPLE_QUEUE_CAPACITY)
+    {
 #ifdef _WIN32
-static DWORD WINAPI display_main(LPVOID argument)
+        SleepConditionVariableCS(&display->record_space, &display->mutex, INFINITE);
 #else
-static void *display_main(void *argument)
+        pthread_cond_wait(&display->record_space, &display->mutex);
+#endif
+    }
+    size_t index = (display->record_head + display->record_count++) % CLI_SAMPLE_QUEUE_CAPACITY;
+    display->record_queue[index] = *event;
+#ifdef _WIN32
+    WakeConditionVariable(&display->record_ready);
+#else
+    pthread_cond_signal(&display->record_ready);
+#endif
+}
+
+static void wake_writer(CliSearchProgress *display)
+{
+#ifdef _WIN32
+    WakeAllConditionVariable(&display->record_ready);
+    WakeAllConditionVariable(&display->record_space);
+#else
+    pthread_cond_broadcast(&display->record_ready);
+    pthread_cond_broadcast(&display->record_space);
+#endif
+}
+
+static void wait_record(CliSearchProgress *display)
+{
+#ifdef _WIN32
+    SleepConditionVariableCS(&display->record_ready, &display->mutex, 100);
+#else
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) return;
+    deadline.tv_nsec += 100000000;
+    if (deadline.tv_nsec >= 1000000000)
+    {
+        ++deadline.tv_sec;
+        deadline.tv_nsec -= 1000000000;
+    }
+    pthread_cond_timedwait(&display->record_ready, &display->mutex, &deadline);
+#endif
+}
+
+#ifdef _WIN32
+static DWORD WINAPI report_main(LPVOID argument)
+#else
+static void *report_main(void *argument)
 #endif
 {
     CliSearchProgress *display = argument;
-    if (display->sampler == NULL)
-    {
-        display_progress_only(display);
-#ifdef _WIN32
-        return 0;
-#else
-        return NULL;
-#endif
-    }
-    uint64_t next_request = 0, next_draw = 0;
+    uint64_t next_summary = 0;
+    unsigned finished_depth = 0;
     for (;;)
     {
-        CliSampleBoundary *boundaries = display->drain_boundaries;
-        size_t boundary_count;
-        CliSampleCounters counters;
-        unsigned active = 0;
         lock_display(display);
-        bool stopping = display->stop;
-        XqSearchProgress snapshot = display->latest;
-        unsigned finished_depth = display->finished_depth;
-        uint64_t now = display->started_ms;
-        monotonic_ms(&now);
-        if (display->sampler && !stopping && now >= next_request)
-        {
-            ++display->requested;
-            display->request_times[display->requested % CLI_SAMPLE_REQUEST_HISTORY] = now;
-            xq_search_sampler_request(display->sampler);
-            next_request = deadline_after(now, display->interval_ms);
-        }
-        for (unsigned i = 0; i < display->thread_capacity; ++i)
-        {
-            CliSampleSlot *slot = &display->slots[i];
-            CliSampleSlot *drain = &display->drain[i];
-            drain->ready = slot->ready;
-            if (slot->ready)
-            {
-                drain->sample = slot->sample;
-                memcpy(drain->path, slot->path, slot->sample.path_length * sizeof(*slot->path));
-                drain->sample.path = drain->path;
-                slot->ready = false;
-            }
-            if (slot->seen_state && slot->state_depth == snapshot.depth &&
-                (slot->state == XQ_SEARCH_THREAD_SEARCH || slot->state == XQ_SEARCH_THREAD_QUIESCENCE)) ++active;
-        }
-        boundary_count = display->boundary_count;
-        for (size_t i = 0; i < boundary_count; ++i)
-            boundaries[i] = display->boundaries[(display->boundary_head + i) % CLI_SAMPLE_BOUNDARIES];
-        display->boundary_head = (display->boundary_head + boundary_count) % CLI_SAMPLE_BOUNDARIES;
-        display->boundary_count = 0;
-        counters = display->counters;
+        if (!display->record_count && !display->writer_stop) wait_record(display);
+        size_t count = display->record_count;
+        if (count > CLI_SAMPLE_BATCH_CAPACITY) count = CLI_SAMPLE_BATCH_CAPACITY;
+        for (size_t i = 0; i < count; ++i)
+            display->record_batch[i] = display->record_queue[(display->record_head + i) % CLI_SAMPLE_QUEUE_CAPACITY];
+        display->record_head = (display->record_head + count) % CLI_SAMPLE_QUEUE_CAPACITY;
+        display->record_count -= count;
+        bool stopping = display->writer_stop && !display->record_count;
+        CliSampleCounters counters = display->counters;
+        unsigned depth = display->latest.depth;
+#ifdef _WIN32
+        WakeAllConditionVariable(&display->record_space);
+#else
+        pthread_cond_broadcast(&display->record_space);
+#endif
         unlock_display(display);
 
-        /* Every borrowed sample is copied before the callback returns. The following
-         * trie work and all filesystem/terminal I/O run without the callback mutex. */
-        for (unsigned i = 0; i < display->thread_capacity; ++i)
-            if (display->drain[i].ready)
-                cli_sample_report_sample(display->report, &display->drain[i].sample);
+        uint64_t now = display->started_ms;
+        monotonic_ms(&now);
+        /* Publish this batch's counters before a boundary can write a final
+         * report. The report owner also throttles expensive checkpoints. */
         cli_sample_report_tick(display->report, now, &counters);
-        /* Drain samples before FINISHED: a sample in the final per-thread slot must
-         * be included in its iteration before that iteration is written and freed. */
-        for (size_t i = 0; i < boundary_count; ++i)
-            cli_sample_report_boundary(display->report, boundaries[i].depth, boundaries[i].finished);
-        /* A full boundary ring may lose lifecycle events, never the completion
-         * watermark. Reclaim every known completed iteration even in that case. */
-        cli_sample_report_complete_through(display->report, finished_depth);
-        display->active_threads = active;
-        cli_sample_report_summary(display->report, snapshot.depth, now, &display->summary);
-        if (!stopping && display->terminal && (display->show_progress || display->sampler) && now >= next_draw)
+        for (size_t i = 0; i < count; ++i)
         {
-            draw(display, snapshot, true);
-            next_draw = deadline_after(now, 100);
+            const CliTimelineEvent *event = &display->record_batch[i];
+            if (event->kind == CLI_TIMELINE_SAMPLE)
+            {
+                cli_sample_report_sample_timed(display->report, &event->sample, event->requested_at);
+                free((void *)event->sample.path);
+            }
+            else if (event->kind == CLI_TIMELINE_STATE)
+            {
+                cli_sample_report_timeline_state(display->report, &event->sample);
+                /* Advance completion from consumed FIFO events, never a newer
+                 * producer snapshot that could skip still-buffered paths. */
+                if (event->sample.thread_id == 0 && event->sample.state == XQ_SEARCH_THREAD_IDLE &&
+                    event->sample.iteration_depth > finished_depth)
+                    finished_depth = event->sample.iteration_depth;
+            }
+            else if (event->kind == CLI_SAMPLE_BOUNDARY)
+            {
+                cli_sample_report_boundary(display->report, event->sample.iteration_depth, event->finished);
+                if (event->finished && event->sample.iteration_depth > finished_depth)
+                    finished_depth = event->sample.iteration_depth;
+            }
+            else
+                cli_sample_report_allocation_failed(display->report);
+        }
+        /* Also reclaim rounds when timeline setup failed after marking the
+         * report as requested: the non-timeline boundary API then defers to us. */
+        if (finished_depth)
+            cli_sample_report_complete_through(display->report, finished_depth);
+        monotonic_ms(&now);
+        if (now >= next_summary || stopping)
+        {
+            CliSampleSummary summary = {0};
+            cli_sample_report_summary(display->report, depth, now, &summary);
+            lock_display(display);
+            display->summary = summary;
+            unlock_display(display);
+            next_summary = deadline_after(now, 100);
         }
         if (stopping)
         {
@@ -382,19 +447,6 @@ static void *display_main(void *argument)
             display->report = NULL;
             break;
         }
-        lock_display(display);
-        if (!display->stop)
-        {
-            uint64_t after = now;
-            monotonic_ms(&after);
-            uint64_t deadline = next_draw;
-            if (display->sampler && (!display->terminal || next_request < deadline)) deadline = next_request;
-            uint64_t delay = deadline > after ? deadline - after : 1;
-            /* Even long custom sample intervals keep shutdown/progress responsive. */
-            if (delay > 100) delay = 100;
-            wait_display(display, delay);
-        }
-        unlock_display(display);
     }
 #ifdef _WIN32
     return 0;
@@ -403,10 +455,110 @@ static void *display_main(void *argument)
 #endif
 }
 
+#ifdef _WIN32
+static DWORD WINAPI display_main(LPVOID argument)
+#else
+static void *display_main(void *argument)
+#endif
+{
+    CliSearchProgress *display = argument;
+    if (display->sampler == NULL)
+        display_progress_only(display);
+    else
+    {
+        uint64_t next_request = 0, next_draw = 0;
+        for (;;)
+        {
+            lock_display(display);
+            if (display->stop) { unlock_display(display); break; }
+            XqSearchProgress snapshot = display->latest;
+            uint64_t now = display->started_ms;
+            bool now_valid = monotonic_ms(&now);
+            if (now >= next_request)
+            {
+                ++display->requested;
+                size_t index = (size_t)(display->requested % CLI_SAMPLE_REQUEST_HISTORY);
+                display->request_times[index] = now_valid ? now : 0;
+                display->request_ids[index] = display->requested;
+                xq_search_sampler_request(display->sampler);
+                next_request = deadline_after(now, display->interval_ms);
+            }
+            unsigned active = 0;
+            for (unsigned i = 0; i < display->thread_capacity; ++i)
+            {
+                const CliSampleSlot *slot = &display->slots[i];
+                if (slot->seen_state && slot->state_depth == snapshot.depth &&
+                    (slot->state == XQ_SEARCH_THREAD_SEARCH || slot->state == XQ_SEARCH_THREAD_QUIESCENCE)) ++active;
+            }
+            display->active_threads = active;
+            unlock_display(display);
+            if (display->terminal && now >= next_draw)
+            {
+                draw(display, snapshot, true);
+                next_draw = deadline_after(now, 100);
+            }
+            lock_display(display);
+            if (!display->stop)
+            {
+                uint64_t after = now;
+                monotonic_ms(&after);
+                uint64_t delay = next_request > after ? next_request - after : 1;
+                if (display->terminal && next_draw > after && next_draw - after < delay)
+                    delay = next_draw - after;
+                if (delay > 100) delay = 100;
+                wait_display(display, delay);
+            }
+            unlock_display(display);
+        }
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+static void free_sampling_buffers(CliSearchProgress *display)
+{
+    xq_search_sampler_destroy(display->sampler);
+    display->sampler = NULL;
+    free(display->slots); display->slots = NULL;
+    free(display->request_times); display->request_times = NULL;
+    free(display->request_ids); display->request_ids = NULL;
+    free(display->record_queue); display->record_queue = NULL;
+    free(display->record_batch); display->record_batch = NULL;
+    display->thread_capacity = 0;
+    display->timeline = false;
+}
+
+static void join_writer(CliSearchProgress *display, bool startup_failed)
+{
+    if (!display->writer_started) return;
+    lock_display(display);
+    if (startup_failed)
+    {
+        CliTimelineEvent event = {0};
+        event.kind = CLI_SAMPLE_ALLOCATION_FAILURE;
+        enqueue_record(display, &event);
+    }
+    display->writer_stop = true;
+    wake_writer(display);
+    unlock_display(display);
+#ifdef _WIN32
+    WaitForSingleObject(display->writer, INFINITE);
+    CloseHandle(display->writer);
+#else
+    pthread_join(display->writer, NULL);
+#endif
+    display->writer_started = false;
+}
+
 static CliSearchProgress *start_display(unsigned max_depth, uint64_t time_limit_ms,
                                        bool show_progress, unsigned thread_capacity,
                                        uint64_t interval_ms, const char *output_dir,
-                                       const XqPosition *position, const char *mode)
+                                       const XqPosition *position, const char *mode,
+                                       bool timeline, uint64_t timeline_byte_limit,
+                                       size_t statistics_byte_limit)
 {
     CliSearchProgress *display = calloc(1, sizeof(*display));
     if (display == NULL)
@@ -424,73 +576,98 @@ static CliSearchProgress *start_display(unsigned max_depth, uint64_t time_limit_
     {
         display->sampler = xq_search_sampler_create(thread_capacity);
         display->slots = calloc(thread_capacity, sizeof(*display->slots));
-        display->drain = calloc(thread_capacity, sizeof(*display->drain));
-        display->boundaries = calloc(CLI_SAMPLE_BOUNDARIES, sizeof(*display->boundaries));
-        display->drain_boundaries = calloc(CLI_SAMPLE_BOUNDARIES, sizeof(*display->drain_boundaries));
         display->request_times = calloc(CLI_SAMPLE_REQUEST_HISTORY, sizeof(*display->request_times));
-        if (display->sampler && display->slots && display->drain && display->boundaries &&
-            display->drain_boundaries &&
-            display->request_times && display->clock_available)
+        display->request_ids = calloc(CLI_SAMPLE_REQUEST_HISTORY, sizeof(*display->request_ids));
+        display->record_queue = calloc(CLI_SAMPLE_QUEUE_CAPACITY, sizeof(*display->record_queue));
+        display->record_batch = calloc(CLI_SAMPLE_BATCH_CAPACITY, sizeof(*display->record_batch));
+        if (display->sampler && display->slots && display->request_times && display->request_ids &&
+            display->record_queue && display->record_batch && display->clock_available)
             display->report = cli_sample_report_create(output_dir, position, mode,
                 xq_search_sampler_id(display->sampler), thread_capacity,
                 display->interval_ms, max_depth, time_limit_ms);
         if (!display->report)
         {
             fputs("warning: cannot allocate search sampler; sampling disabled\n", stderr);
-            xq_search_sampler_destroy(display->sampler);
-            display->sampler = NULL;
-            free(display->slots); display->slots = NULL;
-            free(display->drain); display->drain = NULL;
-            free(display->boundaries); display->boundaries = NULL;
-            free(display->drain_boundaries); display->drain_boundaries = NULL;
-            free(display->request_times); display->request_times = NULL;
+            free_sampling_buffers(display);
         }
-        else display->thread_capacity = thread_capacity;
+        else
+        {
+            display->thread_capacity = thread_capacity;
+            cli_sample_report_set_statistics_limit(display->report, statistics_byte_limit);
+            if (timeline)
+            {
+                display->timeline = cli_sample_report_enable_timeline(display->report,
+                    display->started_ms, timeline_byte_limit);
+                if (!display->timeline)
+                    fputs("warning: cannot allocate search timeline; continuing with path sampling\n", stderr);
+            }
+        }
     }
     if (!display->sampler && (!show_progress || !display->terminal)) return display;
 #ifdef _WIN32
     if (!InitializeCriticalSectionEx(&display->mutex, 0, 0)) goto fallback;
     InitializeConditionVariable(&display->changed);
+    InitializeConditionVariable(&display->record_ready);
+    InitializeConditionVariable(&display->record_space);
+    if (display->sampler)
+    {
+        display->writer = CreateThread(NULL, 0, report_main, display, 0, NULL);
+        if (display->writer == NULL) goto destroy_mutex;
+        display->writer_started = true;
+    }
     display->thread = CreateThread(NULL, 0, display_main, display, 0, NULL);
     if (display->thread == NULL)
     {
-        DeleteCriticalSection(&display->mutex);
-        goto fallback;
+        join_writer(display, true);
+        goto destroy_mutex;
     }
 #else
     if (pthread_mutex_init(&display->mutex, NULL) != 0) goto fallback;
-    if (pthread_cond_init(&display->changed, NULL) != 0)
+    if (pthread_cond_init(&display->changed, NULL) != 0) goto destroy_mutex;
+    if (pthread_cond_init(&display->record_ready, NULL) != 0) goto destroy_changed;
+    if (pthread_cond_init(&display->record_space, NULL) != 0) goto destroy_ready;
+    if (display->sampler)
     {
-        pthread_mutex_destroy(&display->mutex);
-        goto fallback;
+        if (pthread_create(&display->writer, NULL, report_main, display) != 0) goto destroy_space;
+        display->writer_started = true;
     }
     if (pthread_create(&display->thread, NULL, display_main, display) != 0)
     {
-        pthread_cond_destroy(&display->changed);
-        pthread_mutex_destroy(&display->mutex);
-        goto fallback;
+        join_writer(display, true);
+        goto destroy_space;
     }
 #endif
     display->threaded = true;
     return display;
-fallback:
+#ifndef _WIN32
+ destroy_space:
+    pthread_cond_destroy(&display->record_space);
+ destroy_ready:
+    pthread_cond_destroy(&display->record_ready);
+ destroy_changed:
+    pthread_cond_destroy(&display->changed);
+#endif
+ destroy_mutex:
+#ifdef _WIN32
+    DeleteCriticalSection(&display->mutex);
+#else
+    pthread_mutex_destroy(&display->mutex);
+#endif
+ fallback:
     fputs("warning: cannot start search collector/display; sampling disabled, using iteration summaries\n", stderr);
-    cli_sample_report_finish(display->report, &display->counters);
+    if (display->report)
+    {
+        cli_sample_report_allocation_failed(display->report);
+        cli_sample_report_finish(display->report, &display->counters);
+    }
     display->report = NULL;
-    xq_search_sampler_destroy(display->sampler);
-    display->sampler = NULL;
-    free(display->slots); display->slots = NULL;
-    free(display->drain); display->drain = NULL;
-    free(display->boundaries); display->boundaries = NULL;
-    free(display->drain_boundaries); display->drain_boundaries = NULL;
-    free(display->request_times); display->request_times = NULL;
-    display->thread_capacity = 0;
+    free_sampling_buffers(display);
     return display;
 }
 
 CliSearchProgress *cli_search_progress_start(unsigned max_depth, uint64_t time_limit_ms)
 {
-    return start_display(max_depth, time_limit_ms, true, 0, 20, NULL, NULL, NULL);
+    return start_display(max_depth, time_limit_ms, true, 0, 20, NULL, NULL, NULL, false, 0, 0);
 }
 
 CliSearchProgress *cli_search_progress_start_sampling(unsigned max_depth, uint64_t time_limit_ms,
@@ -501,7 +678,31 @@ CliSearchProgress *cli_search_progress_start_sampling(unsigned max_depth, uint64
 {
     return start_display(max_depth, time_limit_ms, show_progress,
                          thread_capacity ? thread_capacity : 1, interval_ms,
-                         output_dir, initial_position, search_mode);
+                         output_dir, initial_position, search_mode, false, 0, 0);
+}
+
+CliSearchProgress *cli_search_progress_start_timeline(unsigned max_depth, uint64_t time_limit_ms,
+                                                     bool show_progress, unsigned thread_capacity,
+                                                     uint64_t interval_ms, const char *output_dir,
+                                                     const XqPosition *initial_position,
+                                                     const char *search_mode,
+                                                     uint64_t timeline_byte_limit)
+{
+    return start_display(max_depth, time_limit_ms, show_progress,
+                         thread_capacity ? thread_capacity : 1, interval_ms,
+                         output_dir, initial_position, search_mode, true, timeline_byte_limit, 0);
+}
+
+CliSearchProgress *cli_search_progress_start_sampling_with_limits(
+    unsigned max_depth, uint64_t time_limit_ms, bool show_progress,
+    unsigned thread_capacity, uint64_t interval_ms, const char *output_dir,
+    const XqPosition *initial_position, const char *search_mode,
+    bool timeline, uint64_t timeline_byte_limit, size_t statistics_byte_limit)
+{
+    return start_display(max_depth, time_limit_ms, show_progress,
+                         thread_capacity ? thread_capacity : 1, interval_ms,
+                         output_dir, initial_position, search_mode, timeline,
+                         timeline_byte_limit, statistics_byte_limit);
 }
 
 XqSearchSampler *cli_search_progress_sampler(CliSearchProgress *display)
@@ -534,20 +735,32 @@ void cli_search_progress_update(const XqSearchProgress *update, void *user)
     }
     if (update->event == XQ_SEARCH_PATH_SAMPLE || update->event == XQ_SEARCH_THREAD_STATE)
     {
-        if (!display->threaded || !display->sampler || !update->sample) return;
+        if (!display->threaded || !update->sample) return;
         const XqSearchSample *sample = update->sample;
         lock_display(display);
         if (sample->thread_id >= display->thread_capacity ||
-            sample->search_id != xq_search_sampler_id(display->sampler)) ++display->counters.dropped;
+            sample->search_id != xq_search_sampler_id(display->sampler) ||
+            sample->state < XQ_SEARCH_THREAD_IDLE || sample->state > XQ_SEARCH_THREAD_WAIT_HELPERS)
+            ++display->counters.dropped;
         else
         {
             CliSampleSlot *slot = &display->slots[sample->thread_id];
+            bool fresh_state = !slot->seen_state || sample->sequence > slot->state_sequence;
             if (!slot->seen_state || sample->sequence >= slot->state_sequence)
             {
                 slot->state = sample->state;
                 slot->state_depth = sample->iteration_depth;
                 slot->state_sequence = sample->sequence;
                 slot->seen_state = true;
+            }
+            if (display->timeline && update->event == XQ_SEARCH_THREAD_STATE && fresh_state)
+            {
+                CliTimelineEvent event = {0};
+                event.kind = CLI_TIMELINE_STATE;
+                event.sample = *sample;
+                event.sample.path = NULL;
+                event.sample.path_length = 0;
+                enqueue_record(display, &event);
             }
             if (update->event == XQ_SEARCH_PATH_SAMPLE)
             {
@@ -556,31 +769,47 @@ void cli_search_progress_update(const XqSearchProgress *update, void *user)
                     (sample->path_length && !sample->path)) ++display->counters.dropped;
                 else if (slot->seen_request && sample->request_id <= slot->last_request)
                     ++display->counters.duplicates;
+                else if (display->timeline && (!fresh_state || sample->sequence == 0))
+                    ++display->counters.dropped;
                 else
                 {
-                    if (slot->ready) ++display->counters.overwritten;
-                    slot->sample = *sample;
+                    CliTimelineEvent event = {0};
+                    event.kind = CLI_TIMELINE_SAMPLE;
+                    event.sample = *sample;
+                    event.sample.path = NULL;
                     if (sample->path_length)
-                        memcpy(slot->path, sample->path, sample->path_length * sizeof(*sample->path));
-                    slot->sample.path = slot->path;
-                    slot->ready = slot->seen_request = true;
+                    {
+                        XqMove *path = calloc(sample->path_length, sizeof(*path));
+                        if (path)
+                        {
+                            memcpy(path, sample->path, sample->path_length * sizeof(*path));
+                            event.sample.path = path;
+                        }
+                        else
+                        {
+                            /* This marker needs no allocation and uses the same
+                             * backpressure queue. The writer makes both reports
+                             * explicitly incomplete rather than hiding the loss. */
+                            event.kind = CLI_SAMPLE_ALLOCATION_FAILURE;
+                            ++display->counters.dropped;
+                        }
+                    }
+                    size_t index = (size_t)(sample->request_id % CLI_SAMPLE_REQUEST_HISTORY);
+                    event.requested_at = sample->request_id && display->request_ids[index] == sample->request_id ?
+                                         display->request_times[index] : 0;
+                    slot->seen_request = true;
                     slot->last_request = sample->request_id;
                     if (sample->request_id < display->requested) ++display->counters.delayed;
-                    else if (sample->request_id <= display->requested &&
-                             display->requested - sample->request_id < CLI_SAMPLE_REQUEST_HISTORY)
-                    {
-                        uint64_t requested_at = display->request_times[sample->request_id % CLI_SAMPLE_REQUEST_HISTORY];
-                        if (sample->timestamp_ms > requested_at &&
-                            sample->timestamp_ms - requested_at > display->interval_ms)
-                            ++display->counters.delayed;
-                    }
+                    else if (event.requested_at && sample->timestamp_ms > event.requested_at &&
+                             sample->timestamp_ms - event.requested_at > display->interval_ms)
+                        ++display->counters.delayed;
+                    enqueue_record(display, &event);
                 }
             }
         }
         unlock_display(display);
         return;
     }
-    if (!display->threaded && update->event == XQ_SEARCH_ROOT_MOVE_COMPLETED) return;
     if (display->threaded) lock_display(display);
     if (update->event == XQ_SEARCH_ITERATION_STARTED)
     {
@@ -593,23 +822,17 @@ void cli_search_progress_update(const XqSearchProgress *update, void *user)
             display->latest.completed_moves = update->completed_moves;
         display->latest.event = update->event;
     }
-    if (display->sampler && (update->event == XQ_SEARCH_ITERATION_STARTED ||
+    if (display->sampler && !display->timeline && (update->event == XQ_SEARCH_ITERATION_STARTED ||
                             update->event == XQ_SEARCH_ITERATION_FINISHED))
     {
-        if (update->event == XQ_SEARCH_ITERATION_FINISHED && update->depth > display->finished_depth)
-            display->finished_depth = update->depth;
-        if (display->boundary_count == CLI_SAMPLE_BOUNDARIES) ++display->counters.boundaries_dropped;
-        else
-        {
-            size_t index = (display->boundary_head + display->boundary_count++) % CLI_SAMPLE_BOUNDARIES;
-            display->boundaries[index] = (CliSampleBoundary){update->depth,
-                update->event == XQ_SEARCH_ITERATION_FINISHED};
-        }
-        signal_display(display);
+        CliTimelineEvent event = {0};
+        event.kind = CLI_SAMPLE_BOUNDARY;
+        event.sample.iteration_depth = update->depth;
+        event.finished = update->event == XQ_SEARCH_ITERATION_FINISHED;
+        enqueue_record(display, &event);
     }
+    signal_display(display);
     if (display->threaded) unlock_display(display);
-    else if (display->show_progress && update->event == XQ_SEARCH_ITERATION_FINISHED)
-        draw(display, display->latest, false);
 }
 
 void cli_search_progress_finish(CliSearchProgress *display, const char *status,
@@ -625,9 +848,17 @@ void cli_search_progress_finish(CliSearchProgress *display, const char *status,
 #ifdef _WIN32
         WaitForSingleObject(display->thread, INFINITE);
         CloseHandle(display->thread);
-        DeleteCriticalSection(&display->mutex);
 #else
         pthread_join(display->thread, NULL);
+#endif
+        /* No search callback remains (the public finish contract). Stop the
+         * ticker first, then let the report owner drain every accepted event. */
+        join_writer(display, false);
+#ifdef _WIN32
+        DeleteCriticalSection(&display->mutex);
+#else
+        pthread_cond_destroy(&display->record_space);
+        pthread_cond_destroy(&display->record_ready);
         pthread_cond_destroy(&display->changed);
         pthread_mutex_destroy(&display->mutex);
 #endif
@@ -651,11 +882,6 @@ void cli_search_progress_finish(CliSearchProgress *display, const char *status,
         fputc('\n', stderr);
         fflush(stderr);
     }
-    xq_search_sampler_destroy(display->sampler);
-    free(display->slots);
-    free(display->drain);
-    free(display->boundaries);
-    free(display->drain_boundaries);
-    free(display->request_times);
+    free_sampling_buffers(display);
     free(display);
 }

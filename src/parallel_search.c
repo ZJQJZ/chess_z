@@ -3087,7 +3087,10 @@ XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter  
                 ? sampler
                 : NULL;
         if (search.sampler != NULL)
+        {
             search.stats.sampling = xq_sampling_thread(search.sampler, 0);
+            xq_sampling_register(search.stats.sampling, progress, progress_user);
+        }
         search.root_color = pos->side_to_move;
         search.evaluate   = engine != NULL && engine->static_evaluate != NULL
                                 ? engine->static_evaluate
@@ -3198,6 +3201,8 @@ XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter  
                 goto finished;
             }
             ++search.worker_count;
+            if (worker->stats.sampling != NULL)
+                xq_sampling_register(worker->stats.sampling, progress, progress_user);
         }
         ParallelPv previous_pv = {0};
         for (unsigned current_depth = 1;; ++current_depth)

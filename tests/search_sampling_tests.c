@@ -23,6 +23,10 @@ typedef struct PathCheck
     XqSearchSampler *sampler;
     XqPosition root;
     uint64_t request[16], sequence[16];
+    XqSearchThreadState state[16];
+    uint32_t registered_threads, working_threads;
+    unsigned caller_begin_depth, caller_end_depth;
+    unsigned caller_begins, caller_ends, root_finishes;
     uint64_t samples, normal, quiet, quiet_extensions, helpers, waits, idle;
     bool request_each_event;
 #ifndef _WIN32
@@ -91,9 +95,18 @@ static void path_progress(const XqSearchProgress *event, void *user)
         const XqSearchSample *sample = event->sample;
         CHECK(sample != NULL && sample->thread_id < 16);
         CHECK(sample->search_id == xq_search_sampler_id(check->sampler));
-        CHECK(sample->iteration_depth >= 1);
+        CHECK(sample->iteration_depth >= 1 ||
+              (event->event == XQ_SEARCH_THREAD_STATE &&
+               sample->state == XQ_SEARCH_THREAD_IDLE));
+        if (sample->sequence == 1)
+        {
+            CHECK(event->event == XQ_SEARCH_THREAD_STATE);
+            CHECK(sample->state == XQ_SEARCH_THREAD_IDLE && sample->iteration_depth == 0);
+            check->registered_threads |= UINT32_C(1) << sample->thread_id;
+        }
         CHECK(sample->sequence > check->sequence[sample->thread_id]);
         check->sequence[sample->thread_id] = sample->sequence;
+        check->state[sample->thread_id] = sample->state;
         if (event->event == XQ_SEARCH_PATH_SAMPLE)
         {
             CHECK(sample->state == XQ_SEARCH_THREAD_SEARCH ||
@@ -101,6 +114,7 @@ static void path_progress(const XqSearchProgress *event, void *user)
             CHECK(sample->request_id > check->request[sample->thread_id]);
             check->request[sample->thread_id] = sample->request_id;
             validate_path(check, sample);
+            check->working_threads |= UINT32_C(1) << sample->thread_id;
             ++check->samples;
             check->normal += sample->state == XQ_SEARCH_THREAD_SEARCH;
             check->quiet += sample->state == XQ_SEARCH_THREAD_QUIESCENCE;
@@ -112,10 +126,37 @@ static void path_progress(const XqSearchProgress *event, void *user)
             CHECK(sample->path_length == 0 && sample->path == NULL);
             check->waits += sample->state == XQ_SEARCH_THREAD_WAIT_HELPERS;
             check->idle += sample->state == XQ_SEARCH_THREAD_IDLE;
+            if (sample->thread_id == 0 && sample->iteration_depth != 0)
+            {
+                if (sample->state == XQ_SEARCH_THREAD_SEARCH &&
+                    sample->iteration_depth > check->caller_begin_depth)
+                {
+                    CHECK(sample->normal_ply == 0 && sample->quiescence_ply == 0);
+                    check->caller_begin_depth = sample->iteration_depth;
+                    ++check->caller_begins;
+                }
+                else if (sample->state == XQ_SEARCH_THREAD_IDLE)
+                {
+                    CHECK(sample->normal_ply == 0 && sample->quiescence_ply == 0);
+                    CHECK(sample->iteration_depth == check->caller_begin_depth);
+                    CHECK(sample->iteration_depth > check->caller_end_depth);
+                    check->caller_end_depth = sample->iteration_depth;
+                    ++check->caller_ends;
+                }
+            }
         }
     }
     else
+    {
         CHECK(event->sample == NULL);
+        if (event->event == XQ_SEARCH_ITERATION_FINISHED && check->registered_threads)
+        {
+            /* Parallel root progress precedes final PV/temporary cleanup;
+             * the actual caller IDLE boundary follows search_node's return. */
+            CHECK(check->caller_begin_depth == event->depth);
+            ++check->root_finishes;
+        }
+    }
     /* Request is the sole controller operation allowed concurrently with search.
      * Advancing here makes short-lived recursive entries deterministic in this unit test. */
     if (check->request_each_event)
@@ -152,6 +193,9 @@ static void builtin_paths(void)
         CHECK(same_move(move, plain_move));
         CHECK(stats.nodes == plain_stats.nodes);
         CHECK(check.samples && check.normal && check.quiet && check.idle);
+        CHECK(check.registered_threads == 1);
+        CHECK(check.caller_begins == check.caller_ends &&
+              check.caller_ends == check.root_finishes);
         if (i != 0)
             CHECK(check.quiet_extensions);
         check_destroy(&check);
@@ -179,6 +223,9 @@ static void parallel_paths(void)
             CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options,
                   &result, path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
             CHECK(check.samples && check.normal && check.quiet && check.idle);
+            CHECK(check.registered_threads == ((UINT32_C(1) << counts[c]) - 1));
+            CHECK(check.caller_begins == check.caller_ends &&
+                  check.caller_ends == check.root_finishes);
             if (counts[c] == 1)
             {
                 CHECK(same_move(result.best_move, plain_result.best_move));
@@ -199,6 +246,35 @@ static void parallel_paths(void)
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
     CHECK(check.quiet_extensions);
     check_destroy(&check);
+}
+
+static void idle_workers_without_samples(void)
+{
+    /* No requested epochs and depth below the split threshold: all helpers
+     * register IDLE, but receive no tasks or path samples. */
+    for (unsigned strategy = 0; strategy < 2; ++strategy)
+    {
+        PathCheck check;
+        check_init(&check, quiet_fen, 16);
+        check.request_each_event = false;
+        XqParallelOptions options = xq_parallel_options_default();
+        options.depth = 2;
+        options.thread_count = 16;
+        options.split_strategy = (XqParallelSplitStrategy)strategy;
+        XqParallelResult result;
+        CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
+              path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
+        CHECK(check.registered_threads == UINT32_C(65535));
+        CHECK((check.working_threads & ~UINT32_C(1)) == 0);
+        CHECK(check.caller_begins == 2 && check.caller_ends == 2 && check.root_finishes == 2);
+        for (unsigned thread = 1; thread < 16; ++thread)
+        {
+            CHECK(check.sequence[thread] == 1);
+            CHECK(check.state[thread] == XQ_SEARCH_THREAD_IDLE);
+            CHECK(check.request[thread] == 0);
+        }
+        check_destroy(&check);
+    }
 }
 
 static int slow_evaluate(const XqPosition *position, XqColor perspective, void *user)
@@ -248,6 +324,55 @@ typedef struct CoreCheck
     XqSearchSample last;
     XqMove moves[XQ_SEARCH_SAMPLE_MAX_MOVES];
 } CoreCheck;
+
+typedef struct LifecycleCheck
+{
+    uint64_t sequence, request;
+    unsigned states, samples;
+    XqSearchSample last;
+} LifecycleCheck;
+
+static void lifecycle_progress(const XqSearchProgress *event, void *user)
+{
+    LifecycleCheck *check = user;
+    CHECK(event->sample != NULL);
+    CHECK(event->sample->sequence == ++check->sequence);
+    CHECK(event->sample->request_id == check->request);
+    if (event->event == XQ_SEARCH_THREAD_STATE)
+    {
+        CHECK(event->sample->path == NULL && event->sample->path_length == 0);
+        ++check->states;
+    }
+    else
+        ++check->samples;
+    check->last = *event->sample;
+}
+
+static void lifecycle_without_path_samples(void)
+{
+    XqSearchSampler *sampler = xq_search_sampler_create(1);
+    CHECK(sampler != NULL);
+    XqSamplingThread *thread = xq_sampling_thread(sampler, 0);
+    LifecycleCheck check = {0};
+    xq_sampling_register(thread, lifecycle_progress, &check);
+    CHECK(check.states == 1 && check.last.iteration_depth == 0 &&
+          check.last.state == XQ_SEARCH_THREAD_IDLE);
+    xq_sampling_begin(thread, 1, lifecycle_progress, &check);
+    xq_sampling_checkpoint(thread, false);
+    CHECK(check.states == 2 && check.samples == 0);
+    xq_sampling_state(thread, XQ_SEARCH_THREAD_WAIT_HELPERS);
+    xq_sampling_state(thread, XQ_SEARCH_THREAD_SEARCH);
+    xq_sampling_state(thread, XQ_SEARCH_THREAD_IDLE);
+    CHECK(check.states == 5 && check.samples == 0);
+    xq_sampling_begin(thread, 2, lifecycle_progress, &check);
+    CHECK(check.states == 6 && check.last.iteration_depth == 2);
+    /* A begin is a boundary even if the caller was already SEARCH. */
+    xq_sampling_begin(thread, 3, lifecycle_progress, &check);
+    CHECK(check.states == 7 && check.last.iteration_depth == 3);
+    xq_sampling_state(thread, XQ_SEARCH_THREAD_IDLE);
+    CHECK(check.states == 8 && check.samples == 0);
+    xq_search_sampler_destroy(sampler);
+}
 
 static void core_progress(const XqSearchProgress *event, void *user)
 {
@@ -389,9 +514,11 @@ static void winning_and_no_moves(void)
 int main(void)
 {
     core_boundaries();
+    lifecycle_without_path_samples();
     builtin_paths();
 #ifndef _WIN32
     parallel_paths();
+    idle_workers_without_samples();
     cancellation();
 #endif
     disabled_and_terminal();

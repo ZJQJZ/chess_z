@@ -21,7 +21,8 @@ def validate(directory):
     for path in reports:
         report = json.loads(path.read_text())
         assert report["finished"]
-        assert report["statistics_bytes"] <= session["iteration_memory_limit_bytes"]
+        if session["iteration_memory_limit_bytes"]:
+            assert report["statistics_bytes"] <= session["iteration_memory_limit_bytes"]
         assert report["thread_statistics_available"]
         assert sum(t["valid_samples"] for t in report["threads"]) == report["valid_samples"]
         nodes = report["nodes"]

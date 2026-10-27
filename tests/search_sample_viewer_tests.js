@@ -103,6 +103,51 @@ test("root selection leaves initial position and input arrays unchanged", () => 
     assert.equal(JSON.stringify(raw), before);
 });
 
+test("incremental iteration building matches ordinary parsing without retaining or changing raw nodes", () => {
+    const raw = simpleReport(), before = JSON.stringify(raw), s = model.parseSession(session());
+    const expected = model.parseIteration(raw, s), builder = model.createIterationBuilder(s);
+    const {nodes, ...metadata} = raw;
+    // A parent need not arrive before its child, just as with ordinary parsing.
+    for (const item of nodes.slice().reverse()) builder.addNode(item);
+    const incremental = builder.finish(metadata);
+    const reordered = model.parseIteration({...metadata, nodes:nodes.slice().reverse()}, s);
+    assert.deepEqual(incremental, reordered);
+    assert.deepEqual(model.replay(s, incremental, 3), model.replay(s, expected, 3));
+    assert.equal(JSON.stringify(raw), before);
+    assert.notEqual(incremental.byId.get(3), nodes[3]);
+    assert.throws(() => builder.addNode(nodes[0]), /完成建模/);
+    assert.throws(() => builder.finish(metadata), /完成建模/);
+});
+
+test("incremental node input rejects invalid nodes before finalization", () => {
+    const s = model.parseSession(session());
+    for (const change of [item => {item.kind="script";}, item => {item.move="z0a1";},
+        item => {item.self=-1;}, item => {item.parent=null;}]) {
+        const builder = model.createIterationBuilder(s), item = simpleReport().nodes[1];
+        change(item);assert.throws(() => builder.addNode(item));
+    }
+    const duplicate = model.createIterationBuilder(s), item = simpleReport().nodes[0];
+    duplicate.addNode(item);assert.throws(() => duplicate.addNode(item), /id 重复/);
+});
+
+test("incremental finalization retains metadata, parent, depth and thread validation", () => {
+    const s = model.parseSession(session());
+    const mutations = [
+        raw => {raw.search_id=99;}, raw => {raw.format_version=2;},
+        raw => {raw.valid_samples=2;}, raw => {raw.iteration_depth=0;raw.max_normal_ply=0;},
+        raw => {raw.nodes[1].parent=404;}, raw => {raw.nodes[1].parent=3;},
+        raw => {raw.thread_statistics_available=true;raw.threads=[{thread_id:16,valid_samples:1}];},
+        raw => {raw.thread_statistics_available=true;raw.threads=[{thread_id:0,valid_samples:2}];}
+    ];
+    for (const change of mutations) {
+        const raw = simpleReport();change(raw);
+        const {nodes,...metadata} = raw, builder = model.createIterationBuilder(s);
+        nodes.forEach(builder.addNode);
+        assert.throws(() => builder.finish(metadata), "incremental metadata was accepted: "+change);
+    }
+    assert.throws(() => model.createIterationBuilder(s).finish(simpleReport()), /缺少路径节点/);
+});
+
 test("capture and quiescence marker restore the selected position precisely", () => {
     const [s, iteration] = parsed();
     const capture = model.replay(s, iteration, 1);
@@ -309,14 +354,18 @@ test("real saved reports replay every sampled endpoint and retain count invarian
         return;
     }
     let endpoints = 0;
-    let iterations = 0;
+    let iterations = 0, skippedLarge = 0;
     for (const directory of fs.readdirSync(reportRoot)) {
         const dir = path.join(reportRoot, directory);
         const sessionPath = path.join(dir, "session.json");
         if (!fs.existsSync(sessionPath)) continue;
         const s = model.parseSession(fs.readFileSync(sessionPath, "utf8"));
         for (const file of fs.readdirSync(dir).filter(f => /^depth-\d+\.json$/.test(f))) {
-            const raw = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+            const filename = path.join(dir, file);
+            // Huge reports have separate streaming-reader validation; this
+            // synchronous replay suite must stay below whole-string limits.
+            if (fs.statSync(filename).size > 64 * 1024 * 1024) { skippedLarge++; continue; }
+            const raw = JSON.parse(fs.readFileSync(filename, "utf8"));
             const iteration = model.parseIteration(raw, s);
             let total = 0;
             for (const n of iteration.nodes) {
@@ -343,6 +392,7 @@ test("real saved reports replay every sampled endpoint and retain count invarian
         }
     }
     console.log("  replayed " + endpoints + " sampled endpoints in " + iterations + " saved iterations");
+    if (skippedLarge) console.log("  skipped " + skippedLarge + " reports over 64 MiB (covered by streaming-reader checks)");
 });
 
 console.log("Passed " + checks + " offline viewer tests.");

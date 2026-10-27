@@ -119,6 +119,36 @@
     #report-detail { display:flex; flex-wrap:wrap; gap:8px 24px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
     .footer { color:var(--muted); font-size:11px; margin:15px 0 0; }
     #load-status { color:var(--muted); font-size:12px; }
+    .view-tabs { display:flex; gap:5px; align-items:center; }
+    .view-tabs button { padding:4px 10px; font-size:12px; }
+    .view-tabs button[aria-pressed="true"] { color:var(--blue); background:var(--blue-light); border-color:#91afe0; }
+    .timeline-tools { padding:11px 14px; display:flex; gap:7px 10px; flex-wrap:wrap; align-items:center; border-bottom:1px solid var(--line); font-size:12px; }
+    .timeline-tools label { display:inline-flex; align-items:center; gap:5px; }
+    .timeline-tools button { padding:4px 8px; font-size:12px; }
+    .timeline-tools input { width:100px; padding:4px 6px; border:1px solid #cdd6e1; border-radius:5px; }
+    .timeline-tools select { padding:4px 6px; }
+    #timeline-message { margin:11px 14px; padding:9px 11px; background:#fff8e9; color:#79500f; border:1px solid #ead4a5; border-radius:6px; font-size:12px; overflow-wrap:anywhere; }
+    #timeline-range-info { display:block; padding:8px 14px; color:var(--muted); font-size:11px; border-bottom:1px solid var(--line); }
+    #timeline-plot { height:560px; min-height:300px; overflow:auto; position:relative; background:white; }
+    #timeline-canvas-host { position:sticky; top:0; height:0; z-index:1; }
+    #timeline-canvas { display:block; touch-action:none; cursor:crosshair; }
+    #timeline-spacer { width:1px; pointer-events:none; }
+    .timeline-intro { padding:12px 14px 9px; border-bottom:1px solid var(--line); }
+    .timeline-intro strong { font-size:13px; }
+    .timeline-intro p { margin:3px 0 0; color:var(--muted); font-size:12px; }
+    #timeline-density { color:#64748b; }
+    #timeline-tooltip { position:absolute; z-index:3; max-width:320px; padding:7px 10px; border-radius:6px; border:1px solid #b6c9e4; background:#f8fbff; color:#244366; box-shadow:0 3px 12px #24436618; font-size:12px; white-space:pre-line; pointer-events:none; }
+    #timeline-overview { margin:0; border-top:1px solid var(--line); }
+    #timeline-overview summary { padding:10px 14px; background:#f8fafc; color:#415873; }
+    #timeline-overview-plot { height:230px; overflow:auto; position:relative; }
+    #timeline-overview-canvas-host { position:sticky; top:0; height:0; z-index:1; }
+    #timeline-overview-canvas { display:block; cursor:pointer; }
+    #timeline-overview-spacer { width:1px; pointer-events:none; }
+    #timeline-selection { margin:0; min-height:50px; padding:10px 14px; font-size:12px; color:#415873; border-top:1px solid var(--line); overflow-wrap:anywhere; }
+    .timeline-legend { display:flex; flex-wrap:wrap; gap:5px 12px; font-size:11px; padding:8px 14px; color:var(--muted); border-bottom:1px solid var(--line); }
+    .legend-chip { display:inline-block; width:13px; height:10px; margin-right:4px; border:1px solid #c0c7d2; vertical-align:middle; }
+    .legend-chip.search { background:#aac8ed; }.legend-chip.q { background:#efd09a; }.legend-chip.wait { background:#9ba4b0; }.legend-chip.idle { background:#e3e7ed; }
+    .legend-chip.unknown { background:repeating-linear-gradient(135deg,#edf0f4 0 3px,#b8c1ce 3px 4px,#edf0f4 4px 7px); }
     @media (min-width:1400px) { .workspace { grid-template-columns:minmax(0,1fr) 400px; } #board { grid-template-rows:repeat(11,30px); } }
     @media (max-width:1050px) { .workspace { grid-template-columns:minmax(0,1fr) 335px; gap:13px; } main { padding:18px; } .top { padding:18px; } .branch-track { display:none; } .metrics { gap:8px; } .metric { padding:11px; } }
     @media (max-width:780px) { .workspace { grid-template-columns:1fr; } .board-panel { position:static; } .metrics { grid-template-columns:repeat(3,minmax(0,1fr)); } .metric-value { font-size:20px; } .board-wrap { max-width:400px; margin:auto; } .board-panel { max-width:100%; } .top { gap:14px; } .chart-shell { max-height:350px; } }
@@ -161,13 +191,29 @@
         <div class="metric"><div class="metric-label">采样间隔</div><div class="metric-value" id="sample-interval">—</div></div>
       </div>
       <div class="workspace">
-        <section class="panel" aria-label="热点路径">
-          <div class="panel-head"><h2>热点路径</h2><span class="small muted">蓝色：普通搜索　橙色：静态搜索</span></div>
+        <section class="panel" aria-label="热点路径与时间栈图">
+          <div class="panel-head"><div class="view-tabs" role="group" aria-label="报告视图"><button id="view-hotspot" type="button" aria-pressed="true">热点分布</button><button id="view-timeline" type="button" aria-pressed="false">时间栈图</button></div><span class="small muted">蓝色：普通搜索　橙色：静态搜索</span></div>
+          <div id="hotspot-view">
           <div class="chart-tools"><button id="zoom-root" type="button">完整路径图</button><button id="zoom-parent" type="button">放大范围上一级</button><button id="zoom-selected" type="button">放大所选分支</button><span id="chart-info"></span></div>
           <div class="chart-shell" id="chart-shell"><svg id="chart" role="group" aria-label="走法前缀采样分布，点击查看棋盘，双击放大"></svg><div class="chart-empty" id="chart-empty" hidden></div></div>
           <div class="chart-caption" id="chart-caption">宽度表示前缀累计样本；单击查看棋盘，双击放大。很窄的分支可在下方列表中选择。</div>
           <div class="list-head"><h3 id="branches-title">后续分支</h3><input id="move-filter" type="search" placeholder="筛选后续着法" aria-label="筛选所选节点的直接后续着法"></div>
           <div class="branch-wrap"><table><thead><tr><th>后续着法</th><th>前缀样本</th><th>占父分支</th><th>自身样本</th></tr></thead><tbody id="branches"></tbody></table></div>
+          </div>
+          <div id="timeline-view" hidden>
+            <div id="timeline-message" role="status" hidden></div>
+            <div id="timeline-controls" hidden>
+              <div class="timeline-tools"><label for="timeline-thread">查看线程<select id="timeline-thread" aria-label="展开的线程"></select></label><button id="timeline-prev" type="button">前一样本</button><button id="timeline-next" type="button">后一样本</button><button id="timeline-readable" type="button">看清着法</button><button id="timeline-zoom-in" type="button" aria-label="时间范围放大">＋</button><button id="timeline-zoom-out" type="button" aria-label="时间范围缩小">－</button><span id="timeline-loading" role="status"></span></div>
+              <div class="timeline-tools"><label>开始 <input id="timeline-start" type="number" min="0" step="1" aria-label="范围开始毫秒"></label><label>结束 <input id="timeline-end" type="number" min="0" step="1" aria-label="范围结束毫秒"></label><span class="muted">ms</span><button id="timeline-apply" type="button">应用范围</button><button id="timeline-pan-left" type="button" aria-label="时间范围向前平移">←</button><button id="timeline-pan-right" type="button" aria-label="时间范围向后平移">→</button><button id="timeline-reset" type="button">恢复整轮</button></div>
+              <div class="timeline-legend"><span><i class="legend-chip search"></i>普通搜索</span><span><i class="legend-chip q"></i>静态搜索</span><span><i class="legend-chip wait"></i>等待辅助线程</span><span><i class="legend-chip idle"></i>空闲</span><span><i class="legend-chip unknown"></i>未知／未观测</span></div>
+              <span id="timeline-range-info"></span>
+              <div class="timeline-intro"><strong id="timeline-stack-title">所选线程的采样走法</strong><p>从上到下读一列：根局面 → 每一步着法。每层相邻的相同路径前缀连成横条，条内显示着法；圆点标出实际采样时刻，点击横条回放附近样本。横条为采样间的近似连接，不代表精确执行时长。</p><p id="timeline-density"></p></div>
+            </div>
+            <div id="timeline-plot" hidden><div id="timeline-canvas-host"></div><div id="timeline-spacer"></div><div id="timeline-tooltip" role="tooltip" hidden></div></div>
+            <p id="timeline-selection" role="status">点击着法横条回放附近样本；点击灰色区间查看等待状态。</p>
+            <details id="timeline-overview" hidden><summary id="timeline-overview-title">全部线程状态概览</summary><div id="timeline-overview-plot"><div id="timeline-overview-canvas-host"></div><div id="timeline-overview-spacer"></div></div><div class="chart-caption">每行一个线程，点击行名切换线程。概览中的混合色表示该时间桶内有多种状态；斜纹才表示未知。</div></details>
+            <div class="chart-caption">上方状态条显示所选线程的搜索／等待区间。触控板左右滑动、Shift+滚轮或 Shift+拖动平移；上下滚动查看深层走法。拖选缩放，Ctrl／⌘+滚轮或触控板捏合平滑缩放，也可使用＋／－按钮。左右方向键切换样本。路径区的空白表示没有采样点，不能据此判断阻塞。</div>
+          </div>
         </section>
         <aside class="panel board-panel" aria-label="所选节点的棋盘与路径">
           <div class="panel-head"><h2 id="board-title">所选着法后的棋盘</h2><div class="board-tools"><button id="parent" type="button">上一步</button><button id="flip" type="button" aria-pressed="false">翻转</button></div></div>
@@ -175,7 +221,7 @@
           <div class="node-detail">
             <div id="replay-error" role="alert" hidden></div>
             <div class="node-top"><span id="selected-move" class="mono">根局面</span><span id="node-phase" class="badge"></span></div>
-            <div class="node-stats"><div><p id="inclusive">—</p><span>前缀累计样本</span></div><div><p id="self">—</p><span>节点自身样本</span></div></div>
+            <div class="node-stats" id="node-stats"><div><p id="inclusive">—</p><span>前缀累计样本</span></div><div><p id="self">—</p><span>节点自身样本</span></div></div>
             <div id="node-ratio" class="small muted"></div>
             <div id="node-warning" hidden></div>
             <div class="path-head"><span id="path-title">根到所选节点的路径</span><span id="node-id"></span></div>
@@ -190,6 +236,8 @@
   </main>
   <noscript>请启用浏览器 JavaScript，以便在本地读取报告和回放棋盘。</noscript>
   <script src="model.js"></script>
+  <script src="report_reader.js"></script>
+  <script src="timeline.js"></script>
   <script src="viewer.js"></script>
 </body>
 </html>

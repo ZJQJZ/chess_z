@@ -2,6 +2,8 @@
 (function () {
   "use strict";
   const M = window.XqSampleModel;
+  const R = window.XqSampleReportReader;
+  const STREAM_REPORT_BYTES = 16 * 1024 * 1024;
   const $ = id => document.getElementById(id);
   if (!M) {
     $("notice").hidden = false;
@@ -10,7 +12,7 @@
     return;
   }
   const state = { groups: [], group: null, iteration: null, selected: null, zoom: null,
-    replay: null, flipped: false, importEpoch: 0, depthEpoch: 0 };
+    replay: null, flipped: false, importEpoch: 0, depthEpoch: 0, view: "hotspot", noPath: false };
   const nf = new Intl.NumberFormat("zh-CN");
   const count = n => nf.format(n || 0);
   const percent = (n, total) => total ? (100 * n / total).toFixed(1) + "%" : "—";
@@ -19,6 +21,7 @@
   const svgNS = "http://www.w3.org/2000/svg";
   const pieceNames = { k: "将", a: "士", b: "象", e: "象", n: "馬", h: "馬", r: "車", c: "炮", p: "卒",
     K: "帥", A: "仕", B: "相", E: "相", N: "馬", H: "馬", R: "車", C: "炮", P: "兵" };
+  const timeline = window.XqSampleTimeline ? window.XqSampleTimeline.create({$, onNode: selectNode, onState: selectStatus}) : null;
 
   function notice(message, error) {
     $("notice").textContent = message || "";
@@ -42,18 +45,51 @@
     return depth;
   }
 
-  async function readIteration(group, depth) {
+  async function readIteration(group, depth, isCurrent = () => true) {
     const source = group.depths.get(depth);
-    const raw = source.raw || JSON.parse(await source.file.text());
-    const iteration = M.parseIteration(raw, group.session);
-    if (iteration.depth !== depth) throw new Error("文件名中的深度与报告内容不符：" + source.name);
-    return iteration;
+    try {
+      let raw, iteration;
+      if (!source.raw && source.file.size > STREAM_REPORT_BYTES) {
+        if (!R) throw new Error("无法加载 report_reader.js，请重新打包或保留查看器的全部脚本。");
+        const builder = M.createIterationBuilder(group.session);
+        raw = await R.read(source.file, {
+          onNode: node => builder.addNode(node), cancelled: () => !isCurrent(),
+          onProgress: async (bytes, total) => {
+            if (!isCurrent()) return;
+            busy("正在读取深度 " + depth + "… " + Math.floor(bytes / total * 100) + "%");
+            await tick();
+          }
+        });
+        if (!isCurrent()) return null;
+        busy("正在校验深度 " + depth + " 的路径树…"); await tick();
+        if (!isCurrent()) return null;
+        iteration = builder.finish(raw);
+      } else {
+        raw = source.raw || JSON.parse(await source.file.text());
+        if (!isCurrent()) return null;
+        iteration = M.parseIteration(raw, group.session);
+      }
+      iteration.timelineReport = {timeline_version: raw.timeline_version, timeline: raw.timeline};
+      if (iteration.depth !== depth) throw new Error("文件名中的深度与报告内容不符");
+      return iteration;
+    } catch (error) {
+      if (error.name === "AbortError" || !isCurrent()) return null;
+      const detail = error instanceof SyntaxError ? "JSON 不完整或格式损坏，请确认报告已写完后重新选择文件" : error.message;
+      throw new Error((source.name || "depth-" + depth + ".json") + "：" + detail);
+    }
   }
   function beginImport() {
     const epoch = ++state.importEpoch; ++state.depthEpoch;
     busy("正在读取报告…");
     notice("");
+    if (timeline) timeline.stop();
     return epoch;
+  }
+  function restoreTimeline() {
+    if (!timeline || !state.group || !state.iteration) return;
+    timeline.attach(state.group.session, state.iteration, state.iteration.timelineReport || {},
+      state.group.timelineFiles || new Map());
+    return timeline.selectMode(state.view === "timeline");
   }
   async function importFiles(files, epoch) {
     if (epoch === undefined) epoch = beginImport();
@@ -64,11 +100,15 @@
         const path = entry.path.replace(/\\/g, "/");
         const name = path.split("/").pop();
         const match = /^depth-([1-9]\d*)\.json$/.exec(name);
-        if (name !== "session.json" && !match) continue;
+        const chunk = /^depth-[1-9]\d*-timeline-\d+\.json$/.test(name);
+        if (name !== "session.json" && !match && !chunk) continue;
         const key = path.slice(0, -name.length).replace(/\/$/, "") || "所选报告";
-        if (!grouped.has(key)) grouped.set(key, { key, depths: new Map() });
+        if (!grouped.has(key)) grouped.set(key, { key, depths: new Map(), timelineFiles: new Map() });
         const group = grouped.get(key);
-        if (name === "session.json") {
+        if (chunk) {
+          if (group.timelineFiles.has(name)) throw new Error("发现重复时间线文件：" + name);
+          group.timelineFiles.set(name, entry.file);
+        } else if (name === "session.json") {
           if (group.sessionFile) throw new Error("发现多个同名 session.json，请选择一个完整报告目录。");
           group.sessionFile = entry.file;
         } else {
@@ -93,7 +133,11 @@
         for (const depth of [...candidate.depths.keys()].sort((a, b) => b - a)) {
           await tick();
           if (epoch !== state.importEpoch) return;
-          try { iteration = await readIteration(candidate, depth); group = candidate; break; }
+          try {
+            iteration = await readIteration(candidate, depth, () => epoch === state.importEpoch);
+            if (epoch !== state.importEpoch) return;
+            group = candidate; break;
+          }
           catch (error) { skipped.push(candidate.key + "/depth-" + depth + ".json：" + error.message); }
         }
       }
@@ -103,16 +147,20 @@
       commitIteration(group, iteration);
       if (skipped.length) notice("已跳过不完整或无法读取的报告：" + skipped.join("；"));
     } catch (error) {
-      if (epoch === state.importEpoch) notice(error.message, true);
+      if (epoch === state.importEpoch) {
+        notice(error.message, true);
+        await restoreTimeline();
+      }
     } finally { if (epoch === state.importEpoch) busy(""); }
   }
   async function changeIteration(group, depth) {
     ++state.importEpoch;
     const epoch = ++state.depthEpoch;
     busy("正在加载深度 " + depth + "…"); notice("");
+    if (timeline) timeline.stop();
     try {
       await tick();
-      const iteration = await readIteration(group, depth);
+      const iteration = await readIteration(group, depth, () => epoch === state.depthEpoch);
       if (epoch !== state.depthEpoch) return;
       commitIteration(group, iteration);
     } catch (error) {
@@ -120,6 +168,7 @@
       notice(error.message, true);
       if (state.group) $("session-select").value = state.group.key;
       if (state.iteration) $("depth-select").value = state.iteration.depth;
+      await restoreTimeline();
     } finally { if (epoch === state.depthEpoch) busy(""); }
   }
   function commitIteration(group, iteration) {
@@ -157,11 +206,14 @@
     $("chart-shell").scrollTop = 0;
     selectNode(iteration.root.id);
     renderChart();
+    if (timeline) timeline.attach(group.session, iteration, iteration.timelineReport || {}, group.timelineFiles || new Map());
+    setView(state.view);
   }
 
   function selectNode(id) {
     const iteration = state.iteration, node = iteration.byId.get(id);
     if (!node) return;
+    state.noPath = false; $("node-stats").hidden = false; $("flip").disabled = false;
     state.selected = id;
     $("selected-move").textContent = label(node);
     $("node-phase").textContent = node.kind === "root" ? "初始局面" : phase(node) ? "静态搜索" : "普通搜索";
@@ -200,7 +252,40 @@
     for (const frame of $("chart").querySelectorAll(".chart-frame.selected")) frame.classList.remove("selected");
     const selected = $("chart").querySelector('[data-node-id="' + state.selected + '"]');
     if (selected) selected.classList.add("selected");
-    $("zoom-selected").disabled = state.selected === state.zoom;
+    $("zoom-selected").disabled = state.noPath || state.selected === state.zoom;
+  }
+  function selectStatus(item) {
+    state.noPath = true; state.replay = null;
+    const names = window.XqSampleTimeline.NAMES;
+    $("board-title").textContent = "此处无搜索路径";
+    $("board").replaceChildren(); $("board").setAttribute("aria-label", "此处无搜索路径");
+    $("side").replaceChildren(element("span", "线程 " + item.thread_id + " · " + names[item.state], "muted"));
+    $("selected-move").textContent = names[item.state]; $("node-phase").textContent = "线程状态";
+    $("node-phase").className = "badge";
+    $("node-stats").hidden = true; $("node-ratio").textContent = "";
+    $("node-id").textContent = ""; $("path-title").textContent = "此处无走法路径";
+    $("path").replaceChildren(); $("fen").value = "";
+    $("node-warning").hidden = true;
+    $("replay-error").hidden = false;
+    $("replay-error").textContent = item.reason || (item.state === "unknown" ?
+      "没有可靠状态或路径信息，不能据此判断线程在运行或阻塞。" :
+      "此区间仅记录线程逻辑状态，没有对应的搜索棋盘。");
+    $("parent").disabled = true; $("flip").disabled = true;
+    $("copy-fen").disabled = true; $("copy-path").disabled = true;
+    updateChartSelection();
+  }
+  function setView(view) {
+    state.view = view;
+    $("hotspot-view").hidden = view !== "hotspot";
+    $("view-hotspot").setAttribute("aria-pressed", String(view === "hotspot"));
+    $("view-timeline").setAttribute("aria-pressed", String(view === "timeline"));
+    if (timeline) timeline.selectMode(view === "timeline");
+    else {
+      $("timeline-view").hidden = view !== "timeline";
+      $("timeline-message").textContent = "无法加载 timeline.js。请重新生成单文件查看器或保留查看器目录中的全部文件。";
+      $("timeline-message").hidden = false;
+    }
+    if (view === "hotspot" && state.noPath && state.iteration) selectNode(state.selected);
   }
   function renderBoard() {
     const replay = state.replay;
@@ -247,6 +332,7 @@
     $("path-title").textContent = "根到所选节点 · " + move + " 步";
   }
   function renderBranches() {
+    if (state.noPath) return;
     const node = state.iteration.byId.get(state.selected), filter = $("move-filter").value.trim().toLowerCase();
     const children = state.iteration.children.get(node.id) || [];
     const fragment = document.createDocumentFragment();
@@ -369,8 +455,24 @@
       nodes: [node(0, null, "root", null, 100, 0), node(1, 0, "normal_move", "b2b9", 65, 5),
         node(2, 1, "normal_move", "a9b9", 60, 10), node(3, 2, "quiescence", null, 50, 15),
         node(4, 3, "quiescence_move", "h2h9", 35, 35), node(5, 0, "normal_move", "h2e2", 35, 35)] };
-    const group = { key: "内置示例 · 炮吃馬后的搜索", session, depths: new Map([[3, { raw, name: "depth-3.json" }]]) };
-    state.groups = [group]; commitIteration(group, M.parseIteration(raw, session));
+    raw.timeline_version = 1;
+    const file = "depth-3-timeline-000001.json";
+    const record = (type, thread_id, sequence, time_ms, extra) => ({type, thread_id, sequence, time_ms, ...extra});
+    const records = [record("state", 0, 1, 0, {state:"search"}), record("state", 1, 1, 0, {state:"idle"}),
+      record("sample", 0, 2, 22, {state:"search", request_time_ms:20, request_id:1, node_id:1, normal_ply:1, quiescence_ply:0, truncated:false, path_omitted:false}),
+      record("state", 1, 2, 30, {state:"search"}),
+      record("sample", 1, 3, 43, {state:"quiescence", request_time_ms:40, request_id:2, node_id:4, normal_ply:2, quiescence_ply:1, truncated:false, path_omitted:false}),
+      record("state", 0, 3, 50, {state:"wait_helpers"}), record("state", 1, 4, 100, {state:"idle"}),
+      record("state", 0, 4, 102, {state:"search"}),
+      record("sample", 0, 5, 122, {state:"search", request_time_ms:120, request_id:6, node_id:5, normal_ply:1, quiescence_ply:0, truncated:false, path_omitted:false}),
+      record("state", 0, 6, 160, {state:"idle"})];
+    raw.timeline = {start_ms:0,end_ms:180,finished:true,incomplete:false,cutoff_ms:null,stop_reason:null,state_dropped:0,
+      initial_states:[{thread_id:0,state:"unknown",time_ms:null,sequence:0},{thread_id:1,state:"idle",time_ms:0,sequence:0}],
+      chunks:[{file,start_ms:0,end_ms:160,records:records.length}]};
+    const group = { key: "内置示例 · 炮吃馬后的搜索", session, depths: new Map([[3, { raw, name: "depth-3.json" }]]),
+      timelineFiles: new Map([[file, {text: async () => JSON.stringify({timeline_version:1,search_id:1,iteration_depth:3,start_ms:0,end_ms:160,records})}]]) };
+    const iteration = M.parseIteration(raw, session); iteration.timelineReport = raw;
+    state.groups = [group]; commitIteration(group, iteration);
   }
   async function filesFromDrop(dataTransfer) {
     const entries = Array.from(dataTransfer.items || []).map(item => item.webkitGetAsEntry ? item.webkitGetAsEntry() : null).filter(Boolean);
@@ -379,7 +481,7 @@
     async function walk(entry, prefix) {
       const path = prefix + entry.name;
       if (entry.isFile) {
-        if (entry.name !== "session.json" && !/^depth-[1-9]\d*\.json$/.test(entry.name)) return;
+        if (entry.name !== "session.json" && !/^depth-[1-9]\d*(?:-timeline-\d+)?\.json$/.test(entry.name)) return;
         const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
         output.push({ file, path });
       } else if (entry.isDirectory) {
@@ -405,6 +507,7 @@
   });
   $("depth-select").addEventListener("change", event => changeIteration(state.group, Number(event.target.value)));
   $("parent").addEventListener("click", () => {
+    if (state.noPath) return;
     const node = state.iteration.byId.get(state.selected);
     if (node.parent !== null) selectNode(node.parent);
   });
@@ -420,6 +523,8 @@
   $("copy-fen").addEventListener("click", event => { if (state.replay) copyText(state.replay.fen, event.currentTarget); });
   $("copy-path").addEventListener("click", event => { if (state.replay) copyText(state.replay.moves.join(" "), event.currentTarget); });
   $("demo").addEventListener("click", demo);
+  $("view-hotspot").addEventListener("click", () => setView("hotspot"));
+  $("view-timeline").addEventListener("click", () => setView("timeline"));
   let dragDepth = 0;
   document.addEventListener("dragenter", event => {
     if (Array.from(event.dataTransfer.types).includes("Files")) { event.preventDefault(); ++dragDepth; document.body.classList.add("dragging"); }

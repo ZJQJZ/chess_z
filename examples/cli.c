@@ -74,6 +74,9 @@ static void print_usage(const char *program)
     printf("  %-21s  %s\n", "    --tt-file PATH", "load a saved transposition table before the first search");
     printf("  %-21s  %s\n", "    --progress", "show live per-depth root-move progress on stderr");
     printf("  %-21s  %s\n", "    --sample-search", "sample logical move paths (independent of --progress)");
+    printf("  %-21s  %s\n", "    --sample-timeline", "record per-thread time stacks and wait states (implies --sample-search)");
+    printf("  %-21s  %s\n", "    --sample-timeline-max-mib N", "timeline file budget per thought; 0 = unlimited (default 0)");
+    printf("  %-21s  %s\n", "    --sample-statistics-max-mib N", "statistics memory budget per iteration; 0 = unlimited (default 0)");
     printf("  %-21s  %s\n", "    --sample-interval-ms N", "positive sampling interval in milliseconds (default 20)");
     printf("  %-21s  %s\n", "    --sample-output-dir DIR", "sampling reports directory (default build/search_samples)");
     printf("  %-21s  %s\n", "    --search-detail", "append each engine search to build/search_detail.txt");
@@ -161,8 +164,8 @@ static bool parse_depth(const char *text, unsigned *depth)
     return true;
 }
 
-/* Parse a positive millisecond limit, rejecting overflow and extra arguments. */
-static bool parse_time_ms(const char *text, uint64_t *time_limit_ms)
+/* Parse decimal unsigned limits, rejecting overflow and extra arguments. */
+static bool parse_unsigned_limit(const char *text, uint64_t *limit)
 {
     uint64_t value = 0;
 
@@ -177,10 +180,15 @@ static bool parse_time_ms(const char *text, uint64_t *time_limit_ms)
     }
     while (isspace((unsigned char)*text))
         ++text;
-    if (*text != '\0' || value == 0)
+    if (*text != '\0')
         return false;
-    *time_limit_ms = value;
+    *limit = value;
     return true;
+}
+
+static bool parse_time_ms(const char *text, uint64_t *time_limit_ms)
+{
+    return parse_unsigned_limit(text, time_limit_ms) && *time_limit_ms > 0;
 }
 
 typedef struct CliMoveInput
@@ -525,6 +533,9 @@ int main(int argc, char **argv)
     bool search_detail = false;
     bool show_progress = false;
     bool sample_search = false;
+    bool sample_timeline = false, timeline_limit_set = false;
+    uint64_t timeline_byte_limit = 0;
+    size_t statistics_byte_limit = 0;
     bool sample_options_set = false;
     uint64_t sample_interval_ms = 20;
     const char *sample_output_dir = "build/search_samples";
@@ -570,7 +581,7 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--threads") == 0 || strcmp(argv[i], "--split-percent") == 0)
         {
             bool percentage = strcmp(argv[i], "--split-percent") == 0;
-            unsigned value;
+            unsigned value = 0;
             if (++i >= argc ||
                 (!(percentage && strcmp(argv[i], "0") == 0) && !parse_depth(argv[i], &value)))
             {
@@ -596,6 +607,35 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--sample-search") == 0)
         {
             sample_search = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--sample-timeline") == 0)
+        {
+            sample_timeline = sample_search = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--sample-timeline-max-mib") == 0)
+        {
+            uint64_t mib;
+            if (++i >= argc || !parse_unsigned_limit(argv[i], &mib) || mib > UINT64_MAX / (1024u * 1024u))
+            {
+                fprintf(stderr, "error: --sample-timeline-max-mib requires nonnegative integer MiB (0 = unlimited)\n");
+                return EXIT_FAILURE;
+            }
+            timeline_byte_limit = mib * 1024u * 1024u;
+            timeline_limit_set = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--sample-statistics-max-mib") == 0)
+        {
+            uint64_t mib;
+            if (++i >= argc || !parse_unsigned_limit(argv[i], &mib) || mib > SIZE_MAX / (1024u * 1024u))
+            {
+                fprintf(stderr, "error: --sample-statistics-max-mib requires nonnegative integer MiB (0 = unlimited)\n");
+                return EXIT_FAILURE;
+            }
+            statistics_byte_limit = (size_t)(mib * 1024u * 1024u);
+            sample_options_set = true;
             continue;
         }
         if (strcmp(argv[i], "--sample-interval-ms") == 0)
@@ -700,6 +740,11 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    if (timeline_limit_set && !sample_timeline)
+    {
+        fprintf(stderr, "error: --sample-timeline-max-mib requires --sample-timeline\n");
+        return EXIT_FAILURE;
+    }
     if (sample_options_set && !sample_search)
     {
         fprintf(stderr, "error: sampling options require --sample-search\n");
@@ -814,10 +859,11 @@ int main(int argc, char **argv)
             bool found;
             char text[8];
             CliSearchProgress *progress = sample_search ?
-                cli_search_progress_start_sampling(
+                cli_search_progress_start_sampling_with_limits(
                     parallel ? parallel_options.depth : limits.max_depth, limits.time_limit_ms,
                     show_progress, parallel ? parallel_options.thread_count : 1,
-                    sample_interval_ms, sample_output_dir, &pos, parallel ? "parallel" : "builtin") :
+                    sample_interval_ms, sample_output_dir, &pos, parallel ? "parallel" : "builtin",
+                    sample_timeline, timeline_byte_limit, statistics_byte_limit) :
                 show_progress ?
                 cli_search_progress_start(parallel ? parallel_options.depth : limits.max_depth,
                                            limits.time_limit_ms) : NULL;

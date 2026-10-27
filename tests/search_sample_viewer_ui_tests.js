@@ -11,6 +11,8 @@ const vm = require("node:vm");
 const viewerDir = path.join(__dirname, "../tools/search_sample_viewer");
 const index = fs.readFileSync(path.join(viewerDir, "index.html"), "utf8");
 const modelSource = fs.readFileSync(path.join(viewerDir, "model.js"), "utf8");
+const readerSource = fs.readFileSync(path.join(viewerDir, "report_reader.js"), "utf8");
+const timelineSource = fs.readFileSync(path.join(viewerDir, "timeline.js"), "utf8");
 const viewerSource = fs.readFileSync(path.join(viewerDir, "viewer.js"), "utf8");
 
 // The small DOM below implements only element creation, text, attributes,
@@ -109,16 +111,21 @@ function browser(loadModel = true) {
         ids.set(match[3], el); document.body.append(el);
     }
     const window = {document, isSecureContext: false, addEventListener() {}};
-    const context = vm.createContext({window, document, navigator: {}, Intl,
+    const context = vm.createContext({window, document, navigator: {}, Intl, Blob, TextDecoder, Uint8Array, ArrayBuffer,
         requestAnimationFrame: callback => { queueMicrotask(() => callback(0)); return 1; },
         setTimeout: callback => { queueMicrotask(callback); return 1; }});
     if (loadModel) {
         vm.runInContext(modelSource, context, {filename: "model.js"});
         window.XqSampleModel = context.XqSampleModel;
     }
+    vm.runInContext(readerSource, context, {filename: "report_reader.js"});
+    window.XqSampleReportReader = context.XqSampleReportReader;
+    vm.runInContext(timelineSource, context, {filename: "timeline.js"});
+    window.XqSampleTimeline = context.XqSampleTimeline;
     vm.runInContext(viewerSource, context, {filename: "viewer.js"});
     return {
         document, $: id => document.getElementById(id),
+        window,
         frame(id) {
             const frame = document.getElementById("chart").querySelector('[data-node-id="' + id + '"]');
             assert.ok(frame, "chart has no visible frame for node " + id); return frame;
@@ -135,6 +142,23 @@ function deferred() {
     let resolve;
     const promise = new Promise(done => { resolve = done; });
     return {promise, resolve};
+}
+function streamedFile(name, raw, directory = "fixture", firstRead) {
+    // Exceed the streaming threshold without keeping a large report fixture on disk.
+    const json = typeof raw === "string" ? raw : JSON.stringify(raw);
+    const blob = new Blob([" ".repeat(16 * 1024 * 1024), json]);
+    const reads = {text: 0, buffers: 0, maximumSlice: 0};
+    return {name, webkitRelativePath: directory + "/" + name, size: blob.size, reads,
+        text() { ++reads.text; throw new Error("A large report must not use file.text()."); },
+        slice(start, end) {
+            const part = blob.slice(start, end);
+            reads.maximumSlice = Math.max(reads.maximumSlice, part.size);
+            return {size: part.size, async arrayBuffer() {
+                ++reads.buffers;
+                if (reads.buffers === 1 && firstRead) await firstRead();
+                return part.arrayBuffer();
+            }};
+        }};
 }
 async function settle() { for (let i = 0; i < 15; i++) await Promise.resolve(); }
 function boardCell(ui, coordinate) {
@@ -257,6 +281,48 @@ async function main() {
         assert.equal(ui.$("notice").className, "error");
     });
 
+    await test("large sliced reports load and switch depths without reading one whole text string", async () => {
+        const ui = browser(), latest = fixture(4), older = fixture(2);
+        assert.equal(typeof ui.window.XqSampleReportReader.read, "function", "the browser reader module was not loaded");
+        const large = streamedFile("depth-4.json", latest.report);
+        await importFiles(ui, [file("session.json", latest.session), file("depth-2.json", older.report), large]);
+        assert.equal(ui.$("session-name").textContent, "fixture");
+        assert.equal(ui.$("depth-select").value, "4");
+        assert.equal(rootFen(ui), initialFen);
+        assert.equal(large.reads.text, 0);
+        assert.ok(large.reads.buffers > 1, "the report was not read in separate byte slices");
+        assert.ok(large.reads.maximumSlice < large.size, "the reader allocated the entire report as one slice");
+        await ui.frame(1).fire("click");assert.notEqual(rootFen(ui), initialFen);
+        ui.$("depth-select").value = "2";await ui.$("depth-select").fire("change");
+        assert.equal(ui.$("depth-select").value, "2");assert.equal(rootFen(ui), initialFen);
+        ui.$("depth-select").value = "4";await ui.$("depth-select").fire("change");
+        assert.equal(ui.$("depth-select").value, "4");assert.equal(rootFen(ui), initialFen);
+        assert.equal(ui.$("selected-move").textContent, "根局面");
+        assert.equal(large.reads.text, 0);assert.equal(ui.$("load-status").textContent, "");
+    });
+
+    await test("truncated large reports name the damaged file and preserve the displayed iteration", async () => {
+        const ui = browser(), current = fixture(4), broken = fixture(2);
+        const damaged = streamedFile("depth-2.json", JSON.stringify(broken.report).slice(0, -8));
+        await importFiles(ui, [...filesFor(current), damaged]);
+        await ui.frame(1).fire("click");const selectedFen = rootFen(ui);
+        ui.$("depth-select").value = "2";await ui.$("depth-select").fire("change");
+        assert.equal(ui.$("notice").className, "error");
+        assert.match(ui.$("notice").textContent, /depth-2\.json/);
+        assert.match(ui.$("notice").textContent, /损坏|截断|不完整/);
+        assert.equal(ui.$("depth-select").value, "4");assert.equal(rootFen(ui), selectedFen);
+        assert.equal(ui.$("selected-move").textContent, "a0a9");
+        assert.equal(damaged.reads.text, 0);
+        const importedDamage = streamedFile("depth-2.json", JSON.stringify(broken.report).slice(0, -8), "damaged-import");
+        await importFiles(ui, [file("session.json", broken.session, "damaged-import"), importedDamage]);
+        assert.equal(ui.$("notice").className, "error");
+        assert.match(ui.$("notice").textContent, /depth-2\.json/);
+        assert.match(ui.$("notice").textContent, /损坏|截断|不完整/);
+        assert.equal(ui.$("session-name").textContent, "fixture");
+        assert.equal(ui.$("depth-select").value, "4");assert.equal(rootFen(ui), selectedFen);
+        assert.equal(importedDamage.reads.text, 0);assert.equal(ui.$("load-status").textContent, "");
+    });
+
     await test("session picker keeps different initial FENs separate even when search IDs match", async () => {
         const ui = browser(), a = fixture(), b = fixture();
         b.session.initial_fen = "4k3r/9/9/9/9/9/9/9/9/R3K4 b - -";
@@ -325,6 +391,31 @@ async function main() {
         assert.equal(ui.$("depth-select").value, "3");
         assert.equal(ui.$("total-samples").textContent, "100");
         assert.equal(ui.$("load-status").textContent, "");
+    });
+
+    await test("cancelled sliced imports and depth changes stop reading and cannot replace a newer demo", async () => {
+        for (const mode of ["import", "depth"]) {
+            const ui = browser(), wait = deferred(), entered = deferred(), older = fixture(2);
+            const large = streamedFile("depth-2.json", older.report, "streaming-old", async () => {
+                entered.resolve();await wait.promise;
+            });
+            let loading;
+            if (mode === "import") {
+                loading = importFiles(ui, [file("session.json", older.session, "streaming-old"), large]);
+            } else {
+                const latest = fixture(4);
+                await importFiles(ui, [...filesFor(latest, "streaming-old"), large]);
+                ui.$("depth-select").value = "2";loading = ui.$("depth-select").fire("change");
+            }
+            await Promise.race([entered.promise, loading.then(() => { throw new Error(mode + " ended without reading a byte slice"); })]);
+            await ui.$("demo").fire("click");
+            wait.resolve();await loading;await settle();
+            assert.match(ui.$("session-name").textContent, /内置示例/);
+            assert.equal(ui.$("depth-select").value, "3");assert.equal(ui.$("total-samples").textContent, "100");
+            assert.match(ui.$("notice").textContent, /这是内置示例/);
+            assert.equal(ui.$("load-status").textContent, "");assert.equal(large.reads.text, 0);
+            assert.equal(large.reads.buffers, 1, mode + " continued reading after cancellation");
+        }
     });
 
     await test("a slow dropped directory cannot replace a newer demo after directory traversal", async () => {
@@ -416,3 +507,4 @@ async function main() {
 }
 
 module.exports = main();
+module.exports.harness = {browser, file, importFiles, fixture, filesFor, boardCell, rootFen, settle};

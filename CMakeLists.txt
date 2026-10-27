@@ -67,9 +67,16 @@ if(BUILD_TESTING)
     if(XQ_VIEWER_NODE)
         add_test(NAME search_sample_viewer_model COMMAND ${XQ_VIEWER_NODE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/search_sample_viewer_tests.js)
+        add_test(NAME search_sample_report_reader COMMAND ${XQ_VIEWER_NODE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/search_sample_report_reader_tests.js)
         add_test(NAME search_sample_viewer_ui COMMAND ${XQ_VIEWER_NODE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/search_sample_viewer_ui_tests.js)
-        set_tests_properties(search_sample_viewer_model search_sample_viewer_ui PROPERTIES TIMEOUT 30)
+        add_test(NAME search_sample_timeline COMMAND ${XQ_VIEWER_NODE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/search_sample_timeline_tests.js)
+        add_test(NAME search_sample_timeline_ui COMMAND ${XQ_VIEWER_NODE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/search_sample_timeline_ui_tests.js)
+        set_tests_properties(search_sample_viewer_model search_sample_report_reader search_sample_viewer_ui
+            search_sample_timeline search_sample_timeline_ui PROPERTIES TIMEOUT 30)
     endif()
 endif()
 if(BUILD_TESTING AND NOT WIN32)
@@ -145,10 +152,50 @@ if(BUILD_TESTING AND NOT WIN32)
         ${CMAKE_CURRENT_BINARY_DIR}/sampling_allocation_reports)
     set_tests_properties(sampling_allocation_failures PROPERTIES TIMEOUT 15)
     find_package(Python3 COMPONENTS Interpreter QUIET)
+    add_executable(xiangqi_timeline_report_tests tests/timeline_report_tests.c)
+    target_include_directories(xiangqi_timeline_report_tests PRIVATE examples)
+    target_link_libraries(xiangqi_timeline_report_tests PRIVATE xiangqi)
+    xq_enable_warnings(xiangqi_timeline_report_tests)
+    foreach(timeline_variant IN ITEMS normal overflow)
+        if(timeline_variant STREQUAL "overflow")
+            set(timeline_collector_target xiangqi_timeline_collector_overflow_tests)
+            set(timeline_collector_test timeline_collector_overflow)
+            set(timeline_collector_arguments overflow)
+        else()
+            set(timeline_collector_target xiangqi_timeline_collector_tests)
+            set(timeline_collector_test timeline_collector)
+            set(timeline_collector_arguments)
+        endif()
+        set(timeline_collector_reports "${CMAKE_CURRENT_BINARY_DIR}/${timeline_collector_test}_reports")
+        add_executable(${timeline_collector_target} tests/timeline_collector_tests.c
+            examples/search_progress.c examples/search_sample_report.c)
+        target_include_directories(${timeline_collector_target} PRIVATE examples)
+        target_link_libraries(${timeline_collector_target} PRIVATE xiangqi)
+        xq_enable_warnings(${timeline_collector_target})
+        if(timeline_variant STREQUAL "overflow")
+            target_compile_definitions(${timeline_collector_target} PRIVATE
+                CLI_SAMPLE_QUEUE_CAPACITY=2 CLI_SAMPLE_BATCH_CAPACITY=1)
+        endif()
+        add_test(NAME ${timeline_collector_test} COMMAND ${timeline_collector_target}
+            ${timeline_collector_reports} ${timeline_collector_arguments})
+        set_tests_properties(${timeline_collector_test} PROPERTIES TIMEOUT 45
+            FIXTURES_SETUP ${timeline_collector_test}_data)
+        if(Python3_Interpreter_FOUND)
+            add_test(NAME ${timeline_collector_test}_format COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_timeline_collector.py
+                ${timeline_collector_reports})
+            set_tests_properties(${timeline_collector_test}_format PROPERTIES TIMEOUT 20
+                FIXTURES_REQUIRED ${timeline_collector_test}_data)
+        endif()
+    endforeach()
     if(Python3_Interpreter_FOUND)
         add_test(NAME sampling_report_format COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sampling_reports.py
             $<TARGET_FILE:xiangqi_sampling_report_tests>)
         set_tests_properties(sampling_report_format PROPERTIES TIMEOUT 20)
+        add_test(NAME timeline_report_format COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_timeline_reports.py
+            $<TARGET_FILE:xiangqi_timeline_report_tests>)
+        set_tests_properties(timeline_report_format PROPERTIES TIMEOUT 30)
     endif()
 endif()

@@ -9,7 +9,7 @@ import re
 def package(destination):
     source = Path(__file__).resolve().parent
     html = (source / "index.html").read_text(encoding="utf-8")
-    for name in ("model.js", "viewer.js"):
+    for name in ("model.js", "report_reader.js", "timeline.js", "viewer.js"):
         script = (source / name).read_text(encoding="utf-8")
         # A literal closing tag in a JS string/comment must not close the HTML tag.
         script = re.sub(r"</script", lambda _: r"<\/script", script, flags=re.IGNORECASE)

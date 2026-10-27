@@ -2171,7 +2171,10 @@ static bool builtin_search(const XqEngineAdapter *engine,
     if (list.count == 0)
         return true; /* All legal moves lose: retain the original first move. */
     if (sampler != NULL && xq_search_sampler_capacity(sampler) >= 1)
+    {
         context.sampling = xq_sampling_thread(sampler, 0);
+        xq_sampling_register(context.sampling, progress, progress_user);
+    }
 
     ScoredMove root_moves[XQ_MAX_MOVES];
     for (int i = 0; i < list.count; ++i)
@@ -2270,6 +2273,8 @@ static bool builtin_search(const XqEngineAdapter *engine,
                 break;
         }
 
+        if (context.sampling != NULL)
+            xq_sampling_state(context.sampling, XQ_SEARCH_THREAD_IDLE);
         if (progress != NULL)
         {
             XqSearchProgress update = {XQ_SEARCH_ITERATION_FINISHED, current_depth,
@@ -2329,8 +2334,6 @@ static bool builtin_search(const XqEngineAdapter *engine,
                 break;
             }
     }
-    if (context.sampling != NULL)
-        xq_sampling_state(context.sampling, XQ_SEARCH_THREAD_IDLE);
     return true;
 }
 

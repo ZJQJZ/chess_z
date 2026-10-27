@@ -164,6 +164,18 @@ void xq_sampling_state(XqSamplingThread *thread, XqSearchThreadState state)
     emit(thread, XQ_SEARCH_THREAD_STATE, current_request(thread->sampler));
 }
 
+void xq_sampling_register(XqSamplingThread *thread, XqSearchProgressFn progress, void *user)
+{
+    if (thread == NULL)
+        return;
+    thread->normal_ply = thread->quiescence_ply = 0;
+    thread->iteration_depth = 0;
+    thread->progress = progress;
+    thread->user = user;
+    thread->state = XQ_SEARCH_THREAD_IDLE;
+    emit(thread, XQ_SEARCH_THREAD_STATE, current_request(thread->sampler));
+}
+
 void xq_sampling_begin(XqSamplingThread *thread, unsigned iteration_depth,
                        XqSearchProgressFn progress, void *user)
 {
@@ -173,7 +185,10 @@ void xq_sampling_begin(XqSamplingThread *thread, unsigned iteration_depth,
     thread->iteration_depth = iteration_depth;
     thread->progress = progress;
     thread->user = user;
-    xq_sampling_state(thread, XQ_SEARCH_THREAD_SEARCH);
+    /* Iteration boundaries must remain visible even if a preceding early return
+     * left the same logical state. They also synchronize the new depth metadata. */
+    thread->state = XQ_SEARCH_THREAD_SEARCH;
+    emit(thread, XQ_SEARCH_THREAD_STATE, current_request(thread->sampler));
 }
 
 void xq_sampling_inherit(XqSamplingThread *destination, const XqSamplingThread *source)

@@ -6,6 +6,9 @@
 typedef struct XqSamplingThread XqSamplingThread;
 
 XqSamplingThread *xq_sampling_thread(XqSearchSampler *sampler, unsigned index);
+/* Bind a newly available physical thread before publishing any work to it. The
+ * initial IDLE event is emitted even though calloc already initialized its state. */
+void xq_sampling_register(XqSamplingThread *thread, XqSearchProgressFn progress, void *user);
 void xq_sampling_begin(XqSamplingThread *thread, unsigned iteration_depth,
                        XqSearchProgressFn progress, void *user);
 /* Only the source's owning thread may inherit its path into a reserved idle

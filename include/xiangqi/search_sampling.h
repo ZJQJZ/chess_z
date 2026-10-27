@@ -17,7 +17,11 @@ typedef enum XqSearchThreadState
 } XqSearchThreadState;
 
 /* Borrowed only for the duration of a progress callback. These are cooperative
- * logical-path samples, not OS CPU-time measurements or node visit counts. */
+ * logical-path samples, not OS CPU-time measurements or node visit counts.
+ * sequence orders both state events and path replies within one physical thread.
+ * A newly registered thread emits IDLE with iteration_depth == 0; each iteration
+ * of the calling thread is bounded by SEARCH/IDLE. State events have no path.
+ * timestamp_ms uses the monotonic clock; zero means the clock was unavailable. */
 typedef struct XqSearchSample
 {
     uint64_t search_id;
