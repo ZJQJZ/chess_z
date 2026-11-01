@@ -64,7 +64,7 @@ typedef struct XqSearchStats
     unsigned selected_move_depth; /* Selected result depth; zero for an unsearched fallback. */
     uint64_t nodes; /* Both searches: normal/quiescence entries, including one of each at their shared leaf. */
     bool stopped;   /* Time limit reached (including an extended iteration) or search clock failed. */
-    bool winning_move_found; /* Selected the first completed root candidate with a winning mate score. */
+    bool winning_move_found; /* Selected a root move with a proven winning mate score. */
     bool elapsed_available;
     uint64_t elapsed_ms; /* Monotonic wall time, independent of the search time mode. */
     bool cache_available;

@@ -82,8 +82,14 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * score cutoffs and ancestor-result storage, so cached results can be reused across paths and bypass
  * repetitions that would otherwise be encountered in an unexpanded subtree. Repetition-entry quiescence
  * results are not stored as normal-depth TT entries.
- * Internal TT scores use the side-to-move perspective and may come from greater search depths;
- * the root probes only for move ordering in the first iteration. Searches depths 1..options.depth,
+ * Internal TT scores use the side-to-move perspective and may come from greater search depths.
+ * A cached proven root win or loss returns before pool creation if its best move is legal and no
+ * root candidates were history-filtered. A cached win may also return after history filtering if
+ * its best move remains among the surviving candidates. Exact +/-30000, a lower bound of 30000 or
+ * an upper bound of -30000 proves the outcome regardless of cached depth. The returned score is
+ * exact and selected_move_depth is the cached depth; node counts and started/completed depths
+ * remain zero.
+ * Other root cache hits supply move ordering only. Searches depths 1..options.depth,
  * reusing the helper pool and previous root scores for ordering, even without a table. Stops early
  * for a terminal root, proven winning move or time stop. Exact results describe the selected
  * iteration; a partial first iteration supplies a lower bound. An unsearched legal fallback has
@@ -173,10 +179,10 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter *engine,
 
 /* Same search with optional observation of root progress, cooperative logical-path samples
  * and thread-state events (see XqSearchProgressFn concurrency contract).
- * Pass NULL for sampler to receive only root progress. Terminal roots, fully filtered roots
- * and argument/resource failures emit no iteration events. The sampler is borrowed until
- * return; a controller with capacity smaller than options.thread_count disables sampling for
- * this invocation. The basic entrypoint never emits sampling events. */
+ * Pass NULL for sampler to receive only root progress. Terminal roots, cached proven root outcomes,
+ * fully filtered roots and argument/resource failures emit no iteration events. The sampler is
+ * borrowed until return; a controller with capacity smaller than options.thread_count disables
+ * sampling for this invocation. The basic entrypoint never emits sampling events. */
 XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter *engine,
     const XqPosition *pos, const XqParallelOptions *options, XqParallelResult *result,
     XqSearchProgressFn progress, void *progress_user, XqSearchSampler *sampler);

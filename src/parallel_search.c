@@ -549,6 +549,29 @@ static bool parallel_tt_peek(XqParallelTranspositionTable *table,
 }
 
 /**
+ * @brief Reports whether a cached score proves a win or loss independently of depth or window.
+ *
+ * Scores are bounded by `[-WIN, WIN]`. An exact `WIN` or `-WIN` proves the outcome directly; a
+ * lower bound of `WIN` or an upper bound of `-WIN` leaves only that same exact value possible. The
+ * opposite bounds (an upper bound of `WIN` or a lower bound of `-WIN`) do not prove an outcome.
+ * Scores and outcomes use the cached position's side-to-move perspective.
+ *
+ * Reads only `score` and `score_kind`, without modifying the entry or statistics. Does not check
+ * the key, evaluator context, entry depth, cached move legality or history constraints; the caller
+ * must validate those as appropriate before reusing the result for the current node.
+ *
+ * @param entry Non-null, stable cache-entry snapshot to classify.
+ * @return      True for an exact +/-WIN, a WIN lower bound or a -WIN upper bound; false otherwise.
+ */
+static bool parallel_tt_is_proven_outcome(const ParallelTtEntry *entry)
+{
+    return (entry->score_kind == XQ_SEARCH_SCORE_EXACT &&
+            (entry->score == WIN || entry->score == -WIN)) ||
+           (entry->score_kind == XQ_SEARCH_SCORE_LOWER_BOUND && entry->score == WIN) ||
+           (entry->score_kind == XQ_SEARCH_SCORE_UPPER_BOUND && entry->score == -WIN);
+}
+
+/**
  * @brief Looks up a cached position and reports whether its score can resolve this search node.
  *
  * Selects a bucket using the low key bits and attempts to acquire it once. A busy bucket skips the
@@ -562,8 +585,8 @@ static bool parallel_tt_peek(XqParallelTranspositionTable *table,
  * require `cached depth >= requested depth` and either an exact value, a lower bound `>= beta`, or
  * an upper bound `<= alpha`. Scores and the supplied window must use the side-to-move perspective.
  * The caller must preserve the cached bound kind when converting the result into an interval; a
- * cutoff is not always exact. `ordering_only` disables all score reuse and is used at the root to
- * retain move selection.
+ * cutoff is not always exact. `ordering_only` disables score cutoffs in this probe; the root uses
+ * it to validate the cached move and history filtering before reusing a proven outcome.
  *
  * For a non-null table, increments `probes` even if bucket contention prevents inspection.
  * Increments `hits` on a key match and `cutoffs` only when returning `true`. Counters belong to the
@@ -600,13 +623,8 @@ static bool parallel_tt_probe(XqParallelTranspositionTable *table,
     if (!*hit)
         return false;
     ++stats->hits;
-    bool proven_outcome =
-        (snapshot->score_kind == XQ_SEARCH_SCORE_EXACT &&
-         (snapshot->score == WIN || snapshot->score == -WIN)) ||
-        (snapshot->score_kind == XQ_SEARCH_SCORE_LOWER_BOUND && snapshot->score == WIN) ||
-        (snapshot->score_kind == XQ_SEARCH_SCORE_UPPER_BOUND && snapshot->score == -WIN);
     if (!ordering_only &&
-        (proven_outcome ||
+        (parallel_tt_is_proven_outcome(snapshot) ||
          (snapshot->depth >= depth &&
           (snapshot->score_kind == XQ_SEARCH_SCORE_EXACT ||
            (snapshot->score_kind == XQ_SEARCH_SCORE_LOWER_BOUND && snapshot->score >= beta) ||
@@ -2996,8 +3014,12 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * complete iteration, a proven win, or completed first-iteration candidates. A partial first
  * iteration supplies a lower-bound score; with no completed candidates, returns a legal unsearched
  * fallback with `score_available == false`. An enabled table may reuse results from greater depths.
- * Terminal roots also succeed but have `move_available == false`; callers must check that flag
- * before using `best_move`. Equal-score move selection may depend on thread scheduling.
+ * A cached proven root win or loss returns before pool creation when its best move is legal and no
+ * root candidates were history-filtered. A cached win also returns if its best move survives root
+ * history filtering, even when other candidates were removed. The score is exact,
+ * `selected_move_depth` reports the cached depth, and no iteration is started or reported as
+ * completed. Terminal roots also succeed but have `move_available == false`; callers must check
+ * that flag before using `best_move`. Equal-score move selection may depend on thread scheduling.
  *
  * Evaluators may be called concurrently; the callback and its user data must support this and must
  * not modify positions. Scheduling uses atomic states and semaphores, without explicit mutexes.
@@ -3053,8 +3075,9 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
  * For each searched root iteration, the calling thread emits `STARTED` before dispatching work and
  * `FINISHED` after all root callbacks and helper work have completed. `FINISHED` may describe a
  * partial iteration when timing or a winning move permits an early exit. `ROOT_MOVE_COMPLETED`
- * events report valid submitted child results; cancelled children are excluded. Terminal or fully
- * filtered roots and argument, platform or initial resource failures emit no iteration events.
+ * events report valid submitted child results; cancelled children are excluded. Terminal roots,
+ * cached proven root outcomes, fully filtered roots and argument, platform or initial resource
+ * failures emit no iteration events.
  *
  * Root-move callbacks execute synchronously on the thread submitting the result, which may be a
  * helper. They can overlap and arrive out of count order; observers must synchronize shared state
@@ -3184,15 +3207,17 @@ XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter  
         parallel_order_moves(pos, moves);
         parallel_tt_new_iteration(search.options.transposition_table, search.evaluate,
                                   search.evaluate_user, search.root_color);
+        ParallelTtEntry cached;
+        bool            cached_outcome = false;
         if (search.options.transposition_table != NULL)
         {
-            ParallelTtEntry cached;
-            bool            hit;
+            bool hit;
             (void)parallel_tt_probe(search.options.transposition_table, xq_position_hash(pos), 1,
                                     -INFINITY_SCORE, INFINITY_SCORE, true, &cached, &hit,
                                     &search.stats.cache);
             if (hit)
-                (void)parallel_prioritize_move(moves, cached.best_move);
+                cached_outcome = parallel_prioritize_move(moves, cached.best_move) &&
+                                 parallel_tt_is_proven_outcome(&cached);
         }
         result->move_available = true;
         result->best_move      = moves->moves[0];
@@ -3203,6 +3228,20 @@ XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter  
         if (moves->count > 0)
             result->best_move = moves->moves[0];
         (void)search_check_time(&search);
+        /* History filtering preserves order, so a surviving cached move remains first. */
+        if (cached_outcome && moves->count > 0 &&
+            (!search.filtered_cycles ||
+             (cached.score == WIN && moves->moves[0].from == cached.best_move.from &&
+              moves->moves[0].to == cached.best_move.to)))
+        {
+            result->score                     = cached.score;
+            result->score_available           = true;
+            result->score_kind                = XQ_SEARCH_SCORE_EXACT;
+            result->stats.selected_move_depth = cached.depth;
+            result->stats.winning_move_found  = cached.score == WIN;
+            ++search.stats.cache.cutoffs;
+            goto finished;
+        }
         if (moves->count == 0 ||
             atomic_load_explicit(&search.time_state, memory_order_relaxed) == TIME_STOP)
             goto finished;
