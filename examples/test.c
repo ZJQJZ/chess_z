@@ -493,6 +493,27 @@ int main()
 
     125
     7PN/4a4/c4k3/7n1/5P3/C2N5/1p6R/1r1p5/5p1r1/4K4 r - -
+
+    126
+    2bak2r1/C3a4/1N2b3c/4p2N1/9/2R6/9/2n6/3pA4/c1rAK3R r - -
+
+    127
+    3aka1Nn/2C4R1/9/2r6/4r4/9/6C2/5n3/9/3K1c3 r - -
+
+    128
+    9/2P1ck3/4b2r1/2C3R2/3N1P3/9/9/4B4/2p1r4/1c3K3 r - -
+
+    129
+    2bak1b2/1n3P3/3a5/4p1p1N/6P1C/2R6/C1R1Pp1n1/3A5/3K2crc/3Ar4 r - -
+
+    130
+    4k3c/2R1a1P2/3ab1N2/9/2b6/4CR3/9/3KB4/1nn1p3r/5C3 r - -
+
+    131
+    2bnk4/2NPa4/9/9/6b2/1C3pN2/9/9/3p1p3/4K4 r - -
+
+    132
+    R8/3k5/2Para3/9/8N/6C2/9/3K5/4r4/9 r - -
     */
 
 
