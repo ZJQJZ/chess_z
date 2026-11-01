@@ -69,11 +69,19 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Before iterative deepening, real-game history filters legal root moves that close the third of
  * three consecutive identical even-length move sequences with four matching boundary position
  * hashes, using the same rule as built-in search. NULL, empty or mismatched history disables this
- * filtering. Normal-search paths are not checked for repetitions and search moves are never
- * appended to real history. Progress totals include only surviving root moves. When all candidates
- * are filtered, return the original legal fallback without a score, at selected_move_depth == 0 and
- * with no iteration events. A root result with any filtered candidates is never stored in the position-only
- * table; history-independent descendant results remain cacheable.
+ * filtering. Search moves are never appended to real history. Progress totals include only surviving
+ * root moves. When all candidates are filtered, return the original legal fallback without a score,
+ * at selected_move_depth == 0 and with no iteration events. A root result with any filtered
+ * candidates is never stored in the position-only table; descendant results remain cacheable.
+ * Ordinary-search nodes compare their board contents and side to move with all strict ancestors
+ * on the current search path, including the root. The first matching ancestor sends the current
+ * node directly to quiescence, regardless of remaining normal-search depth. Move counters are
+ * ignored; real-game history and sibling paths are not consulted. Checks for missing kings or a
+ * previous move exposing its mover's king take precedence. Repetition is checked before any
+ * current-node TT score cutoff. The table still uses position-only keys and retains its existing
+ * score cutoffs and ancestor-result storage, so cached results can be reused across paths and bypass
+ * repetitions that would otherwise be encountered in an unexpanded subtree. Repetition-entry quiescence
+ * results are not stored as normal-depth TT entries.
  * Internal TT scores use the side-to-move perspective and may come from greater search depths;
  * the root probes only for move ordering in the first iteration. Searches depths 1..options.depth,
  * reusing the helper pool and previous root scores for ordering, even without a table. Stops early
@@ -81,11 +89,12 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * iteration; a partial first iteration supplies a lower bound. An unsearched legal fallback has
  * score_available == false and selected_move_depth == 0. Table generations advance per iteration
  * and entries survive between them.
- * Depth-zero leaves run quiescence in the executing thread: stand pat plus captures when not in
- * check, all legal evasions without stand pat when in check. All move lists are pseudo-legal; the
- * move loop skips non-captures outside check and rejects moves that leave the original mover in
- * check when evading. Each depth-zero entry starts a private stack history at its entry position,
- * excluding real-game history and the normal-search prefix. Quiescence filters moves that lose
+ * Depth-zero leaves and repeated ordinary-search nodes run quiescence in the executing thread:
+ * stand pat plus captures when not in check, all legal evasions without stand pat when in check.
+ * All move lists are pseudo-legal; the move loop skips non-captures outside check and rejects moves
+ * that leave the original mover in check when evading. Each quiescence entry starts a new private
+ * stack history at its entry position, excluding real-game history and the normal-search prefix.
+ * Quiescence filters moves that lose
  * under the same three-cycle rule above, without sharing history between entries or branches.
  * Six consecutive actual quiescence moves that give check (three per side) produce a draw scored
  * as zero, unless the resulting position is checkmate. A non-checking move breaks the run; check
@@ -101,7 +110,7 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Quiescence flips child scores and windows, then ordinary search converts its result back to
  * the root perspective. Wins/losses remain +/-30000. Quiescence shares time and ancestor cancellation checks,
  * preserves cutoff bounds and never splits tasks, accesses the table or extends PV hints.
- * Node counts include normal and quiescence entries (the shared leaf counts once for each);
+ * Node counts include normal and quiescence entries (a shared entry counts once for each);
  * reported depths exclude extensions and progress still counts only root candidates.
  * The first root iteration and internal nodes use the built-in stable capture ordering. With a
  * table, non-root normal-search nodes that do not return early also borrow move-ordering hints from
