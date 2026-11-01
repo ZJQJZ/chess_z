@@ -557,11 +557,13 @@ static bool parallel_tt_peek(XqParallelTranspositionTable *table,
  * interpreting the copy; no pointer into shared entry storage escapes the guard.
  *
  * A matching key sets `*hit` even when its depth or bound cannot resolve the node, allowing the
- * caller to use the cached move for ordering. Score reuse requires `cached depth >= requested
- * depth` and either an exact value, a lower bound `>= beta`, or an upper bound `<= alpha`. Scores
- * and the supplied window must use the side-to-move perspective. The caller must preserve the
- * cached bound kind when converting the result into an interval; a cutoff is not always exact.
- * `ordering_only` disables all score reuse and is used at the root to retain move selection.
+ * caller to use the cached move for ordering. Proven outcomes (exact `+/-WIN`, a lower bound of
+ * `WIN`, or an upper bound of `-WIN`) can be reused regardless of depth or window. Other scores
+ * require `cached depth >= requested depth` and either an exact value, a lower bound `>= beta`, or
+ * an upper bound `<= alpha`. Scores and the supplied window must use the side-to-move perspective.
+ * The caller must preserve the cached bound kind when converting the result into an interval; a
+ * cutoff is not always exact. `ordering_only` disables all score reuse and is used at the root to
+ * retain move selection.
  *
  * For a non-null table, increments `probes` even if bucket contention prevents inspection.
  * Increments `hits` on a key match and `cutoffs` only when returning `true`. Counters belong to the
@@ -598,10 +600,17 @@ static bool parallel_tt_probe(XqParallelTranspositionTable *table,
     if (!*hit)
         return false;
     ++stats->hits;
-    if (!ordering_only && snapshot->depth >= depth &&
-        (snapshot->score_kind == XQ_SEARCH_SCORE_EXACT ||
-         (snapshot->score_kind == XQ_SEARCH_SCORE_LOWER_BOUND && snapshot->score >= beta) ||
-         (snapshot->score_kind == XQ_SEARCH_SCORE_UPPER_BOUND && snapshot->score <= alpha)))
+    bool proven_outcome =
+        (snapshot->score_kind == XQ_SEARCH_SCORE_EXACT &&
+         (snapshot->score == WIN || snapshot->score == -WIN)) ||
+        (snapshot->score_kind == XQ_SEARCH_SCORE_LOWER_BOUND && snapshot->score == WIN) ||
+        (snapshot->score_kind == XQ_SEARCH_SCORE_UPPER_BOUND && snapshot->score == -WIN);
+    if (!ordering_only &&
+        (proven_outcome ||
+         (snapshot->depth >= depth &&
+          (snapshot->score_kind == XQ_SEARCH_SCORE_EXACT ||
+           (snapshot->score_kind == XQ_SEARCH_SCORE_LOWER_BOUND && snapshot->score >= beta) ||
+           (snapshot->score_kind == XQ_SEARCH_SCORE_UPPER_BOUND && snapshot->score <= alpha)))))
     {
         ++stats->cutoffs;
         return true;
