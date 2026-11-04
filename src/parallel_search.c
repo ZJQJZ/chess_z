@@ -187,6 +187,7 @@ enum
     PARALLEL_TT_BUCKET_SIZE                     = 4,
     PARALLEL_TT_BUCKET_COUNT                    = 1 << 28,
     PARALLEL_MAX_SIMILAR_POSITION_QUERIES       = 8,
+    PARALLEL_TIME_CHECK_INTERVAL                = 256,
     PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT = 15
 };
 
@@ -197,6 +198,8 @@ _Static_assert(PARALLEL_TT_BUCKET_COUNT > 0 &&
                "parallel table requires a positive power-of-two bucket count");
 _Static_assert(PARALLEL_MAX_SIMILAR_POSITION_QUERIES >= 0,
                "similar-position query limit must be nonnegative");
+_Static_assert(PARALLEL_TIME_CHECK_INTERVAL >= 1,
+               "time-check interval must be positive");
 
 typedef struct ParallelTtEntry
 {
@@ -1181,12 +1184,13 @@ typedef struct SearchRange
     int begin, end, step;
 } SearchRange;
 
-/* One writer per physical thread; merged only after joining the pool. */
+/* One writer per physical thread; statistics are merged only after joining the pool. */
 typedef struct SearchThreadStats
 {
     XqTranspositionStats cache;
     uint64_t             nodes;
     XqSamplingThread    *sampling;
+    unsigned             time_check_countdown; /* Ordinary entries only; zero checks next entry. */
 } SearchThreadStats;
 
 typedef enum SearchTimeState
@@ -1282,9 +1286,12 @@ static bool parallel_clock_ms(uint64_t *value)
  * still reads the clock so a clock failure can escalate it to `TIME_STOP`. These states persist
  * across iterations; the root driver must not start another iteration after leaving `TIME_ACTIVE`.
  *
- * Search recursion calls this only once at each ordinary-node entry. Preparation, pool creation and
- * iteration boundaries also check the deadline; quiescence and other in-node checkpoints observe
- * the published stop state through `check_node()` without reading the clock.
+ * Ordinary recursion calls this at the first entry on each physical thread and then once per
+ * `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries on that thread. Its countdown persists across
+ * helper tasks and iterations; quiescence does not advance it. Preparation, pool creation and
+ * iteration boundaries force checks without changing the countdown. Other search checkpoints
+ * observe the published stop state through `check_node()` without reading the clock. Less frequent
+ * clock checks can delay deadline detection and change the root completion percentage sampled.
  *
  * The return value is a cooperative stop request, not confirmation that workers have exited. The
  * caller must propagate cancellation and complete all helper handshakes before releasing nodes.
@@ -2593,9 +2600,10 @@ static SearchRange split_node(Search           *search,
  * Creates a local `Node` with a copy of `position`, an initially unknown interval `[-WIN, WIN]`,
  * and a link to `parent`. A node is MAX when its side to move equals `search->root_color` and MIN
  * otherwise; its intervals retain the root side's perspective. Quiescence converts to and from the
- * side-to-move perspective at its entry boundary. Checks the deadline once at ordinary-node entry,
- * then uses lock-free `check_node()` to refresh inherited bounds and publish completion or
- * cancellation at search checkpoints without reading the clock again. Scheduling uses atomic worker
+ * side-to-move perspective at its entry boundary. Checks the deadline at the first ordinary entry
+ * on each physical thread and then every `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Uses
+ * lock-free `check_node()` at every entry and subsequent checkpoint to refresh inherited bounds and
+ * publish completion or cancellation without reading the clock. Scheduling uses atomic worker
  * states and retained semaphore notifications.
  *
  * The root uses the legal, history-filtered list prepared before the helper pool was created.
@@ -2717,7 +2725,16 @@ static Interval search_node(Search            *search,
     ++stats->nodes;
     if (stats->sampling != NULL)
         xq_sampling_checkpoint(stats->sampling, false);
-    (void)search_check_time(search);
+    if (search->options.time_limit_ms != 0)
+    {
+        if (stats->time_check_countdown == 0)
+        {
+            stats->time_check_countdown = PARALLEL_TIME_CHECK_INTERVAL - 1;
+            (void)search_check_time(search);
+        }
+        else
+            --stats->time_check_countdown;
+    }
     if (check_node(search, &node))
         return node_value(&node);
 
@@ -3060,10 +3077,11 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * always checked, or an exact loss for the current side otherwise. Other repetitions enter
  * quiescence. All repetition outcomes precede table lookup. Position-only table cutoffs remain
  * enabled and may skip descendant repetitions or reuse path-dependent ancestor results. A nonzero
- * time budget uses a monotonic deadline shared across preparation and all iterations. The deadline
- * is checked once at each ordinary-node entry and at preparation, pool-creation and iteration
- * boundaries; other search checkpoints only observe published stop state. An unfinished iteration
- * above `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
+ * time budget uses a monotonic deadline shared across preparation and all iterations. Each physical
+ * thread checks at its first ordinary entry and then every `PARALLEL_TIME_CHECK_INTERVAL` ordinary
+ * entries. Preparation, pool-creation and iteration boundaries also check the deadline; other
+ * search checkpoints only observe published stop state. An unfinished iteration above
+ * `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
  * returning.
  *
  * Only the adapter's `static_evaluate`, `user` and `history` are used; its `score_move` and serial

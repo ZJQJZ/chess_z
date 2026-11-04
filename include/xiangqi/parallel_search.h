@@ -178,11 +178,14 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * serially. thread_count == 1 disables splitting for either strategy. The global thread pool size
  * and its default of 2 are unchanged; three-way splitting requires thread_count >= 3 and two idle
  * helpers. Every dispatched helper completes before the node returns, including on cancellation.
- * The budget covers preparation, pool creation and all iterations. The deadline is checked once
- * at each ordinary-node entry and at preparation, pool-creation and iteration boundaries. Other
- * search checkpoints only observe published stop state; a long quiescence subtree may delay new
- * deadline detection until the next ordinary node or outer checkpoint. At the first detected
- * deadline, an unfinished iteration whose root completion percentage is strictly above
+ * The budget covers preparation, pool creation and all iterations. Each physical thread checks
+ * the deadline at its first ordinary-node entry and then every PARALLEL_TIME_CHECK_INTERVAL
+ * ordinary entries (256, defined in parallel_search.c). The countdown persists across tasks and
+ * iterations; quiescence does not advance it. Preparation, pool-creation and iteration boundaries
+ * also check the deadline. Every ordinary entry and other search checkpoints observe published
+ * stop state. Gaps between clock checks and long quiescence subtrees may delay deadline detection
+ * and change the sampled root completion percentage. At the first detected deadline, an unfinished
+ * iteration whose root completion percentage is strictly above
  * PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT (defined in parallel_search.c) may finish;
  * otherwise running nodes are cancelled. No new iteration starts after a deadline is detected.
  * Clock failure stops even an extended iteration. A cancelled iteration preserves the last
