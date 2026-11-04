@@ -34,7 +34,7 @@ typedef enum XqParallelSplitStrategy
 
 typedef struct XqParallelOptions
 {
-    unsigned depth;          /* Maximum normal-search depth >= 1; default 3. Excludes quiescence. */
+    unsigned depth;          /* Maximum normal-search budget >= 1; default 3. Excludes check evasions and quiescence. */
     unsigned thread_count;   /* >= 1, includes calling thread; default 2. */
     unsigned split_percent;  /* 0..100, default 50; contiguous only (0 disables); ignored by interleaved. */
     XqParallelTranspositionTable *transposition_table; /* Borrowed; NULL disables caching (default). */
@@ -95,8 +95,12 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * iteration; a partial first iteration supplies a lower bound. An unsearched legal fallback has
  * score_available == false and selected_move_depth == 0. Table generations advance per iteration
  * and entries survive between them.
- * Depth-zero leaves and repeated ordinary-search nodes run quiescence in the executing thread:
- * stand pat plus captures when not in check, all legal evasions without stand pat when in check.
+ * Ordinary nodes in check pass their unchanged depth budget to every child, including at depth
+ * zero. Other ordinary nodes consume one ply. There is no separate check-extension limit; terminal
+ * and path-repetition checks still take precedence. Zero-depth check-evasion nodes skip current-node
+ * TT reads and writes, preserving the table's zero-depth empty marker.
+ * Depth-zero nodes without check and repeated ordinary-search nodes run quiescence in the executing
+ * thread: stand pat plus captures when not in check, all legal evasions without stand pat when in check.
  * All move lists are pseudo-legal; the move loop skips non-captures outside check and rejects moves
  * that leave the original mover in check when evading. Each quiescence entry starts a new private
  * stack history at its entry position, excluding real-game history and the normal-search prefix.
@@ -117,7 +121,8 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * the root perspective. Wins/losses remain +/-30000. Quiescence shares time and ancestor cancellation checks,
  * preserves cutoff bounds and never splits tasks, accesses the table or extends PV hints.
  * Node counts include normal and quiescence entries (a shared entry counts once for each);
- * reported depths exclude extensions and progress still counts only root candidates.
+ * reported depths exclude check-evasion and quiescence extensions and progress still counts only
+ * root candidates. Sampled normal plies count actual moves and may exceed the iteration depth.
  * The first root iteration and internal nodes use the built-in stable capture ordering. With a
  * table, non-root normal-search nodes that do not return early also borrow move-ordering hints from
  * similar positions, even when a matching cache or PV move exists. Initially these positions are
@@ -143,14 +148,15 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * different winning hint exists; an invalid or absent PV first move clears any retained suffix.
  * Up to 64 moves are retained even without a table, without limiting search depth. Exact cache
  * cutoffs may rebuild a PV prefix; terminal positions, cache bounds/misses/contention or invalid
- * moves can shorten it.
+ * moves can shorten it. Cache reconstruction consumes depth only outside check and stops at depth
+ * zero; it may omit the uncached zero-depth check-evasion tail retained by ordinary recursion.
  * PV hints affect ordering only and are not exposed in the result. No custom move scorer is used.
  * Similar-position lookups skip busy buckets without waiting and do not refresh entry generations.
  * TT statistics accumulate on the table, excluding PV reconstruction and similar-position lookups;
  * stats contains per-call counters without resetting the table. Each normal-search node may split
  * once after all move ordering, provided its remaining normal-search depth is at least
- * PARALLEL_MIN_SPLIT_DEPTH (5, defined in parallel_search.c). This includes the next move and excludes quiescence extensions;
- * it applies to root and descendant nodes under both strategies.
+ * PARALLEL_MIN_SPLIT_DEPTH (5, defined in parallel_search.c). This budget excludes check-evasion
+ * and quiescence extensions; it applies to root and descendant nodes under both strategies.
  * Shallower nodes search serially. Pruning, terminal positions and cancellation may still end a
  * task early. The default maximum depth of 3 therefore dispatches no helper tasks.
  * CONTIGUOUS assigns a tail batch to at most one helper according to split_percent.

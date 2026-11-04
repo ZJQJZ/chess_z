@@ -53,7 +53,8 @@ typedef struct XqTranspositionStats
     uint64_t replacements;
 } XqTranspositionStats;
 
-/* Per-call statistics; depth is in plies and excludes quiescence extensions. */
+/* Per-call statistics; depth is a ply budget, excluding quiescence extensions and,
+ * in parallel search, check-evasion extensions. */
 typedef struct XqSearchStats
 {
     bool available;               /* Whether internal search counters are available. */

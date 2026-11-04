@@ -15,11 +15,11 @@
 /**
  * @brief Creates a default configuration for the parallel minimax search.
  *
- * The default configuration iteratively deepens to at most 3 plies, uses 2 threads including the
- * calling thread, and uses contiguous splitting to assign a tail batch of 50 percent of a node's
- * children to an available helper when the remaining depth permits splitting. The default depth is
- * below `PARALLEL_MIN_SPLIT_DEPTH`, so helpers receive no tasks. The search has no time limit and
- * no transposition table by default.
+ * The default configuration iteratively deepens to a normal-search budget of 3 plies and uses 2
+ * threads including the calling thread. Contiguous splitting assigns a tail batch of 50 percent of
+ * a node's children to an available helper when the remaining depth permits splitting. The default
+ * depth is below `PARALLEL_MIN_SPLIT_DEPTH`, so helpers receive no tasks. The search has no time
+ * limit and no transposition table by default.
  *
  * @return The default parallel-search configuration.
  */
@@ -185,7 +185,7 @@ enum
     PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
-    PARALLEL_TT_BUCKET_COUNT                    = 1 << 24,
+    PARALLEL_TT_BUCKET_COUNT                    = 1 << 28,
     PARALLEL_MAX_SIMILAR_POSITION_QUERIES       = 8,
     PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT = 99
 };
@@ -988,13 +988,15 @@ static void parallel_build_pv(ParallelPv       *pv,
  * mover's king is not in check afterward. A position with no legal continuation therefore cannot
  * contribute a move, even if its pseudo-legal list is non-empty.
  *
- * After appending, advances the local position, decreases the remaining depth, and reads the next
- * entry through `parallel_tt_snapshot()`. Each lookup tries its bucket once and copies the entry
- * before releasing the guard. A missing or occupied bucket, non-exact entry, insufficient depth,
- * missing king, absent candidate or illegal move stops reconstruction without discarding the prefix
- * already collected. Reaching depth zero or the 64-move capacity also stops it; these limits bound
- * cycles without a separate repetition detector. An initial depth of zero yields an empty line, and
- * array elements beyond the returned `count` are unspecified.
+ * After appending, decreases the remaining depth only if the mover was not in check, advances the
+ * local position, and reads the next entry through `parallel_tt_snapshot()`. Each lookup tries its
+ * bucket once and copies the entry before releasing the guard. A missing or occupied bucket,
+ * non-exact entry, insufficient depth, missing king, absent candidate or illegal move stops
+ * reconstruction without discarding the prefix already collected. Reaching depth zero or the
+ * 64-move capacity also stops it; these limits bound cycles without a separate repetition detector.
+ * Zero-depth check evasions are not cached, so reconstruction may stop before that ordinary-search
+ * tail. An initial depth of zero yields an empty line, and array elements beyond the returned
+ * `count` are unspecified.
  *
  * Successive snapshots need not represent one consistent table state because other workers can
  * replace entries between lookups. The line is only an ordering hint: it neither proves a score nor
@@ -1009,7 +1011,8 @@ static void parallel_build_pv(ParallelPv       *pv,
  * @param table    Search's borrowed cache for subsequent positions; `NULL` stops further lookups
  *                 but does not prevent using the supplied `first` entry.
  * @param position Non-null starting position corresponding to `first`; left unchanged.
- * @param depth    Maximum number of moves to reconstruct and initial required cache depth.
+ * @param depth    Remaining normal-search budget and initial required cache depth; check evasions
+ *                 do not consume it.
  * @param first    Non-null, stable entry snapshot already matched to `position`; left unchanged.
  * @param pv       Non-null caller-owned output; receives a possibly empty or truncated prefix.
  */
@@ -1043,8 +1046,9 @@ static void parallel_pv_from_tt(XqParallelTranspositionTable *table,
             xq_position_in_check(&next, current.side_to_move))
             break;
         pv->moves[pv->count++] = moves.moves[i];
-        current                = next;
-        --depth;
+        if (!xq_position_in_check(&current, current.side_to_move))
+            --depth;
+        current = next;
         if (depth == 0 || pv->count == PARALLEL_MAX_PV_MOVES ||
             !parallel_tt_snapshot(table, xq_position_hash(&current), &cached))
             break;
@@ -1105,26 +1109,27 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2,
 
 /*
  * The owner keeps this stack-allocated node and its parent chain alive until all helpers complete.
- * Position, `moves`, `depth`, `parent`, `parent_move_index`, `maximizing` and PV hints are
- * immutable once shared. The previous iteration's hint storage stays alive until the root and all
- * helpers return. Each batch PV has one writer; the owner reads helper PVs only after completion
- * synchronization. Bounds, window and `state` use atomic access, as do submission counters and
- * `best_index`. Each child slot has one writer and is immutable after publication through
- * `best_index`. Helper completion is acquired through each task completion record after consuming
- * its notification, before the owner returns. State combines finished/cancelled in one atomic
- * transition so readers never see a partial stop.
+ * Position, `moves`, `depth`, `parent`, `parent_move_index`, `maximizing`, `in_check` and PV hints
+ * are immutable once shared. The previous iteration's hint storage stays alive until the root and
+ * all helpers return. Each batch PV has one writer; the owner reads helper PVs only after
+ * completion synchronization. Bounds, window and `state` use atomic access, as do submission
+ * counters and `best_index`. Each child slot has one writer and is immutable after publication
+ * through `best_index`. Helper completion is acquired through each task completion record after
+ * consuming its notification, before the owner returns. State combines finished/cancelled in one
+ * atomic transition so readers never see a partial stop.
  */
 typedef struct Node
 {
-    struct Node  *parent;
-    int           parent_move_index; /* Root uses -1; otherwise indexes the parent's final moves. */
-    XqPosition    position;
-    XqMoveList    moves;
-    unsigned      depth;
-    bool          maximizing;
-    const XqMove *pv_hint;
-    int           pv_hint_count;
-    BatchPv       owner_pv;
+    struct Node   *parent;
+    int            parent_move_index;
+    XqPosition     position;
+    XqMoveList     moves;
+    unsigned       depth;
+    bool           maximizing;
+    bool           in_check;
+    const XqMove  *pv_hint;
+    int            pv_hint_count;
+    BatchPv        owner_pv;
     AtomicInterval value;
     Interval       children[XQ_MAX_MOVES];
     atomic_int     submitted_count;
@@ -1389,7 +1394,8 @@ static Interval parallel_tt_interval(const ParallelTtEntry *entry,
  * Converts root-perspective scores to the table's side-to-move perspective before writing. MAX
  * nodes need no conversion; MIN nodes negate the score and exchange upper/lower bound kinds,
  * leaving exact values exact. Delegates depth handling, bucket acquisition, replacement and
- * statistics updates to `parallel_tt_store()`, which may decline the optional write.
+ * statistics updates to `parallel_tt_store()`, which skips zero-depth writes and may decline the
+ * optional write.
  *
  * The caller must finish its own work and wait for all helpers accessing this node before supplying
  * the final interval and selected move. This function does not wait for completion; its relaxed
@@ -2313,17 +2319,19 @@ static Interval search_node(Search *,
 /**
  * @brief Searches a disjoint batch of child moves without an explicit scheduling mutex.
  *
- * Copies the position for each move and recursively searches it. Valid child intervals are
- * submitted once through lock-free `aggregate()`; cancelled results are excluded. A completed node
- * can still accept valid in-flight submissions. `check_node()` then refreshes its window and
- * atomically publishes any completion or cancellation. Only the matched PV move at index zero
- * inherits the hint suffix. The batch retains its best child's variation using the same bound
- * comparison and strict tie rule as `aggregate()`. Within a batch submissions are sequential, so a
- * final global `best_index` must also be its batch's retained `best_index`. Other batches never
- * read or write this batch's PV while it runs.
+ * Copies the position for each move and recursively searches it. A node in check retains its depth
+ * budget for every child; other nodes consume one ply. Valid child intervals are submitted once
+ * through lock-free `aggregate()`; cancelled results are excluded. A completed node can still
+ * accept valid in-flight submissions. `check_node()` then refreshes its window and atomically
+ * publishes any completion or cancellation. Only the matched PV move at index zero inherits the
+ * hint suffix. The batch retains its best child's variation using the same bound comparison and
+ * strict tie rule as `aggregate()`. Within a batch submissions are sequential, so a final global
+ * `best_index` must also be its batch's retained `best_index`. Other batches never read or write
+ * this batch's PV while it runs.
  *
  * @param search Shared search state; must not be null.
- * @param node   Parent with generated moves and positive depth; keep it and its parent chain alive.
+ * @param node   Parent with generated moves and either positive depth or check; keep it and its
+ *               parent chain alive.
  * @param range  Batch indices, with `0 <= begin <= end <= node->moves.count` and `step > 0`.
  *               Original move indices are retained for child results and PV hints.
  * @param batch  Exclusively owned PV output, initialized with `best_index == -1` before dispatch.
@@ -2335,6 +2343,8 @@ static void search_range(Search            *search,
                          BatchPv           *batch,
                          SearchThreadStats *stats)
 {
+    assert(node->in_check || node->depth > 0);
+    const unsigned child_depth = node->in_check ? node->depth : node->depth - 1;
     for (int i = range.begin; i < range.end; i += range.step)
     {
         if (node->parent == NULL)
@@ -2356,7 +2366,7 @@ static void search_range(Search            *search,
         if (stats->sampling != NULL)
             xq_sampling_push(stats->sampling, node->moves.moves[i], false);
         ParallelPv child_pv = {0};
-        Interval   child    = search_node(search, &child_position, node, i, node->depth - 1, NULL,
+        Interval   child    = search_node(search, &child_position, node, i, child_depth, NULL,
                                           child_hint, child_hint_count, &child_pv, stats);
         if (stats->sampling != NULL)
             xq_sampling_pop(stats->sampling, false);
@@ -2446,8 +2456,9 @@ static void *worker_main(void *argument)
  * depth below `PARALLEL_MIN_SPLIT_DEPTH`, fewer than two moves, no idle helper, or a zero split
  * percentage under `CONTIGUOUS`, returns `{0, count, 1}` without dispatching a task, leaving all
  * moves for the current thread to search serially. The depth threshold applies to both strategies
- * at root and descendant nodes, counts the next move, and excludes quiescence extensions. It limits
- * planned task depth; pruning, terminal positions and cancellation may still end work early.
+ * at root and descendant nodes and uses the remaining budget, excluding check-evasion and
+ * quiescence extensions. It limits planned task depth; pruning, terminal positions and cancellation
+ * may still end work early.
  *
  * `CONTIGUOUS` reserves at most one helper and assigns the last `ceil(count * split_percent / 100)`
  * moves, limited to `1..count-1`, with `step` `1` for both batches. `INTERLEAVED` ignores the
@@ -2566,20 +2577,22 @@ static SearchRange split_node(Search           *search,
  * quiescence.
  *
  * Checks missing kings and illegal previous moves before the depth limit or path repetition. A
- * missing king loses for its side. At depth zero, or on the first repetition of any strict
- * ancestor's board and side to move, enters thread-local quiescence with the inherited window
- * snapshot converted to the side-to-move perspective. Move counters do not affect repetition. Each
- * entry starts a fresh private quiescence history, excluding the ordinary-search prefix. Quiescence
- * filters pseudo-legal moves in its move loop to search captures or all legal check evasions.
- * Static evaluations are clamped to `[-STATIC_LIMIT, STATIC_LIMIT]`. Its fail-soft result is
- * converted back to the root perspective and classified against that snapshot before publishing an
- * exact or bounded interval; later ancestor updates only tighten the window. At positive depth, a
- * node with no legal continuation loses because every pseudo-legal child loses (or its move list is
- * empty). Terminal scores are `-WIN` or `WIN` from the root perspective and produce exact intervals
- * `[score, score]`.
+ * missing king loses for its side. A node in check consumes no depth when searching its children,
+ * including at depth zero. At depth zero without check, or on the first repetition of any strict
+ * ancestor's board and side to move even in check, enters thread-local quiescence with the
+ * inherited window snapshot converted to the side-to-move perspective. Move counters do not affect
+ * repetition. Each entry starts a fresh private quiescence history, excluding the ordinary-search
+ * prefix. Quiescence filters pseudo-legal moves in its move loop to search captures or all legal
+ * check evasions. Static evaluations are clamped to `[-STATIC_LIMIT, STATIC_LIMIT]`. Its fail-soft
+ * result is converted back to the root perspective and classified against that snapshot before
+ * publishing an exact or bounded interval; later ancestor updates only tighten the window. A
+ * continuing ordinary node with no legal continuation loses because every pseudo-legal child loses
+ * (or its move list is empty). Terminal scores are `-WIN` or `WIN` from the root perspective and
+ * produce exact intervals `[score, score]`.
  *
- * After terminal, depth-zero and repetition checks, an optional table supplies a hash move and may
- * resolve a non-root node with a sufficiently deep exact value or cutoff bound. Bounds remain
+ * After terminal, depth-boundary and repetition checks, an optional table supplies a hash move and
+ * may resolve a positive-depth non-root node with a sufficiently deep exact value or cutoff bound.
+ * Zero-depth check-evasion nodes skip current-position table reads and writes. Bounds remain
  * intervals; the root already used its ordering-only lookup during preparation; subsequent
  * iterations reuse the previous root ordering. Cached deeper results may change fixed-depth scores.
  * Exact cache cutoffs reconstruct a PV prefix from guarded snapshots; bound-only cutoffs return an
@@ -2628,8 +2641,8 @@ static SearchRange split_node(Search           *search,
  *                          the call.
  * @param parent            Parent node, or `NULL` for the root.
  * @param parent_move_index Index of the move in the parent's final list, or `-1` for the root.
- * @param depth             Remaining normal-search depth; `0` enters quiescence at a non-terminal
- *                          leaf.
+ * @param depth             Remaining normal-search budget; check evasions do not consume it. `0`
+ *                          enters quiescence at a non-terminal leaf only when not in check.
  * @param best_move         Optional root candidate output, valid when `iteration.move_available` is
  *                          `true`, even if the root was cancelled. Pass `NULL` for recursive child
  *                          searches.
@@ -2678,6 +2691,7 @@ static Interval search_node(Search            *search,
     if (check_node(search, &node))
         return node_value(&node);
 
+    node.in_check = xq_position_in_check(position, position->side_to_move);
     int  score = 0;
     bool leaf  = false;
     /*
@@ -2705,7 +2719,7 @@ static Interval search_node(Search            *search,
         score = node.maximizing ? WIN : -WIN;
         leaf  = true;
     }
-    else if (depth == 0 || parallel_path_repeats(&node))
+    else if (parallel_path_repeats(&node) || (depth == 0 && !node.in_check))
     {
         /* Classify using this snapshot, not the window tightened by quiescence stop checks. */
         int alpha = atomic_load_explicit(&node.alpha, memory_order_relaxed);
@@ -2755,7 +2769,7 @@ static Interval search_node(Search            *search,
     XqMove   hash_move     = {0};
     uint64_t key           = 0;
     bool     has_hash_move = false;
-    if (search->options.transposition_table != NULL)
+    if (depth > 0 && search->options.transposition_table != NULL)
     {
         int alpha = atomic_load_explicit(&node.alpha, memory_order_relaxed);
         int beta  = atomic_load_explicit(&node.beta, memory_order_relaxed);
@@ -2987,18 +3001,20 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * takes `k,k+N,...`. N shrinks when moves, idle workers or completion resources are insufficient; a
  * limit of one is serial. Both strategies require remaining normal-search depth of at least
  * `PARALLEL_MIN_SPLIT_DEPTH` and an idle helper; otherwise all moves stay with the current thread.
- * The search is synchronous; depth-zero and path-repetition leaves run thread-local quiescence for
- * captures and legal check evasions, with at most 500 extension plies. Quiescence shares the time
- * budget and ancestor cancellation, but neither splits tasks nor accesses the table or PV. Node
- * counts include both normal and quiescence entries, including their shared leaf; reported depths
- * exclude extensions. Real-game history removes root candidates that close a third identical cycle
- * before any helper tasks are dispatched. Each quiescence subtree applies the same cycle rule to
- * its private path, excluding real-game and ordinary-search history. Six consecutive checking plies
- * in that path are a draw unless the final check is mate; both outcomes precede cycle losses.
- * Ordinary nodes whose board and side to move repeat a strict ancestor enter quiescence before
- * table lookup; move counters are ignored. Position-only table cutoffs remain enabled and may skip
- * descendant repetitions or reuse path-dependent ancestor results. A nonzero time budget uses a
- * monotonic deadline shared across preparation and all iterations; an unfinished iteration above
+ * The search is synchronous; ordinary nodes in check retain their depth budget for each child,
+ * including at depth zero. Zero-depth nodes without check and path-repetition leaves run
+ * thread-local quiescence for captures and legal check evasions, with at most 500 extension plies.
+ * Quiescence shares the time budget and ancestor cancellation, but neither splits tasks nor
+ * accesses the table or PV. Node counts include both normal and quiescence entries, including their
+ * shared leaf; reported depths exclude check-evasion and quiescence extensions. Real-game history
+ * removes root candidates that close a third identical cycle before any helper tasks are
+ * dispatched. Each quiescence subtree applies the same cycle rule to its private path, excluding
+ * real-game and ordinary-search history. Six consecutive checking plies in that path are a draw
+ * unless the final check is mate; both outcomes precede cycle losses. Ordinary nodes whose board
+ * and side to move repeat a strict ancestor enter quiescence before table lookup; move counters are
+ * ignored. Position-only table cutoffs remain enabled and may skip descendant repetitions or reuse
+ * path-dependent ancestor results. A nonzero time budget uses a monotonic deadline shared across
+ * preparation and all iterations; an unfinished iteration above
  * `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
  * returning.
  *
@@ -3067,10 +3083,11 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
  *
  * Uses the same search semantics as `xq_engine_parallel_search()`: copies `options` or selects the
  * defaults, creates a helper pool once, and searches depths 1 through the configured maximum. Stops
- * early for a terminal root, proven winning move, or time stop. Depth-zero and path-repetition
- * leaves run thread-local quiescence; extensions contribute to node counts but not reported depths
- * or root progress. Root ordering, PV hints and an optional borrowed transposition table are
- * retained across iterations; cached results may come from greater search depths.
+ * early for a terminal root, proven winning move, or time stop. Nodes in check retain their depth
+ * budget for each child, including at depth zero. Zero-depth nodes without check and
+ * path-repetition leaves run thread-local quiescence; extensions contribute to node counts but not
+ * reported depths or root progress. Root ordering, PV hints and an optional borrowed transposition
+ * table are retained across iterations; cached results may come from greater search depths.
  *
  * For each searched root iteration, the calling thread emits `STARTED` before dispatching work and
  * `FINISHED` after all root callbacks and helper work have completed. `FINISHED` may describe a

@@ -28,10 +28,10 @@ typedef struct XqSearchSample
     uint64_t request_id;
     uint64_t sequence;
     uint64_t timestamp_ms;
-    unsigned iteration_depth;
+    unsigned iteration_depth; /* Iteration budget; parallel check evasions do not consume it. */
     unsigned thread_id;
     XqSearchThreadState state;
-    uint64_t normal_ply;
+    uint64_t normal_ply; /* Actual ordinary moves; may exceed iteration_depth after extensions. */
     uint64_t quiescence_ply;
     size_t path_length;
     const XqMove *path;

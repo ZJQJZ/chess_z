@@ -65,7 +65,7 @@ static void validate_path(const PathCheck *check, const XqSearchSample *sample)
 {
     CHECK(!sample->truncated);
     CHECK(sample->path_length == sample->normal_ply + sample->quiescence_ply);
-    CHECK(sample->normal_ply <= sample->iteration_depth);
+    CHECK(sample->path_length <= XQ_SEARCH_SAMPLE_MAX_MOVES);
     XqPosition position = check->root;
     for (size_t i = 0; i < sample->path_length; ++i)
     {

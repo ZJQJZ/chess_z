@@ -76,7 +76,7 @@ def validate_case(directory, case):
                 requests[thread] = record["request_id"]
                 if record["request_time_ms"] is not None:
                     assert record["request_time_ms"] <= record["time_ms"]
-                assert record["normal_ply"] <= depth
+                assert record["normal_ply"] <= data["max_normal_ply"]
             else:
                 assert "node_id" not in record and "request_id" not in record
         assert path_count == data["valid_samples"], (case, depth, path_count, data["valid_samples"])

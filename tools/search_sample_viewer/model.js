@@ -125,8 +125,6 @@
         iteration.valid_samples = uint(source.valid_samples, "valid_samples");
         optionalUint(source, iteration, ["truncated_samples", "unrecorded_path_samples", "window_overwritten",
             "max_normal_ply", "max_quiescence_ply", "statistics_bytes"]);
-        if (iteration.max_normal_ply !== undefined && iteration.max_normal_ply > iteration.iteration_depth)
-            fail("max_normal_ply 超过 iteration_depth");
         optionalBool(source, iteration, ["finished", "incomplete", "thread_statistics_available"]);
         if (source.session_counters !== undefined) {
             iteration.session_counters = {};
@@ -252,8 +250,7 @@
                     child.quiescencePly = current.quiescencePly + (child.kind === "quiescence_move" ? 1 : 0);
                     if (child.pathDepth > MAX_PATH_NODES || child.normalPly + child.quiescencePly > MAX_MOVES)
                         fail("路径超过 1024 步记录上限");
-                    if (child.normalPly > iteration.iteration_depth ||
-                        (iteration.max_normal_ply !== undefined && child.normalPly > iteration.max_normal_ply) ||
+                    if ((iteration.max_normal_ply !== undefined && child.normalPly > iteration.max_normal_ply) ||
                         (iteration.max_quiescence_ply !== undefined && child.quiescencePly > iteration.max_quiescence_ply))
                         fail("路径深度与迭代深度统计不一致");
                     queue.push(child);
@@ -450,8 +447,7 @@
                             var q = Math.floor(packed / 2048) + (currentCode >= 8103 ? 1 : 0);
                             if (normal + q > MAX_MOVES || normal + q + 1 + (inQ(currentCode) ? 1 : 0) > MAX_PATH_NODES)
                                 fail("路径超过 1024 步记录上限");
-                            if (normal > iteration.iteration_depth ||
-                                (iteration.max_normal_ply !== undefined && normal > iteration.max_normal_ply) ||
+                            if ((iteration.max_normal_ply !== undefined && normal > iteration.max_normal_ply) ||
                                 (iteration.max_quiescence_ply !== undefined && q > iteration.max_quiescence_ply))
                                 fail("路径深度与迭代深度统计不一致");
                             currentPage.depth[currentOffset] = normal + q * 2048 + 1;
