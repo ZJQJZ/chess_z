@@ -2401,9 +2401,10 @@ static void search_range(Search            *search,
         xq_position_make_move(&child_position, node->moves.moves[i]);
         if (stats->sampling != NULL)
             xq_sampling_push(stats->sampling, node->moves.moves[i], false);
-        ParallelPv child_pv = {0};
-        Interval   child    = search_node(search, &child_position, node, i, child_depth, NULL,
-                                          child_hint, child_hint_count, &child_pv, stats);
+        /* search_node initializes count; only moves below count are used. */
+        ParallelPv child_pv;
+        Interval   child = search_node(search, &child_position, node, i, child_depth, NULL,
+                                       child_hint, child_hint_count, &child_pv, stats);
         if (stats->sampling != NULL)
             xq_sampling_pop(stats->sampling, false);
 
@@ -2705,14 +2706,18 @@ static Interval search_node(Search            *search,
                             ParallelPv        *pv_out,
                             SearchThreadStats *stats)
 {
-    Node node                = {0};
-    pv_out->count            = 0;
-    node.parent              = parent;
-    node.parent_move_index   = parent_move_index;
-    node.position            = *position;
-    node.depth               = depth;
-    node.maximizing          = position->side_to_move == search->root_color;
-    node.owner_pv.best_index = -1;
+    /*
+     * Initialize control fields explicitly; arrays are filled before their valid entries are read.
+     */
+    Node node;
+    pv_out->count                = 0;
+    node.parent                  = parent;
+    node.parent_move_index       = parent_move_index;
+    node.position                = *position;
+    node.depth                   = depth;
+    node.maximizing              = position->side_to_move == search->root_color;
+    node.owner_pv.best_index     = -1;
+    node.owner_pv.child_pv.count = 0;
     atomic_init(&node.submitted_count, 0);
     atomic_init(&node.submitted_bound, node.maximizing ? -WIN : WIN);
     atomic_init(&node.value.lower, -WIN);
