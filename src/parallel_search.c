@@ -187,7 +187,7 @@ enum
     PARALLEL_TT_BUCKET_SIZE                     = 4,
     PARALLEL_TT_BUCKET_COUNT                    = 1 << 28,
     PARALLEL_MAX_SIMILAR_POSITION_QUERIES       = 8,
-    PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT = 99
+    PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT = 15
 };
 
 _Static_assert(PARALLEL_INTERLEAVED_SPLIT_THREADS >= 1,
@@ -1282,6 +1282,10 @@ static bool parallel_clock_ms(uint64_t *value)
  * still reads the clock so a clock failure can escalate it to `TIME_STOP`. These states persist
  * across iterations; the root driver must not start another iteration after leaving `TIME_ACTIVE`.
  *
+ * Search recursion calls this only once at each ordinary-node entry. Preparation, pool creation and
+ * iteration boundaries also check the deadline; quiescence and other in-node checkpoints observe
+ * the published stop state through `check_node()` without reading the clock.
+ *
  * The return value is a cooperative stop request, not confirmation that workers have exited. The
  * caller must propagate cancellation and complete all helper handshakes before releasing nodes.
  * False can mean timing is disabled, the deadline has not been reached, or this iteration may
@@ -1770,12 +1774,12 @@ static bool parallel_similar_position_next(SimilarPositionIterator *iterator,
  * complete ordering stage afterward. A generated move is an ordering candidate, not proof of
  * legality; ordinary search still applies its existing terminal and self-check rules.
  *
- * Before requesting each candidate, calls `search_check_time()` and `check_node()`. These checks
- * may update shared time state, tighten `node`'s `alpha`/`beta` window or publish completion or
- * cancellation. If a checkpoint reports that the node has stopped, no further candidates are
- * requested. The caller must inspect node state before applying hints or dispatching tasks. The
- * node and its parent chain must remain alive, and the table must remain valid under the search's
- * existing concurrency contract.
+ * Before requesting each candidate, calls `check_node()` to observe the published stop state,
+ * tighten `node`'s `alpha`/`beta` window or publish completion or cancellation, without reading the
+ * clock. If a checkpoint reports that the node has stopped, no further candidates are requested.
+ * The caller must inspect node state before applying hints or dispatching tasks. The node and its
+ * parent chain must remain alive, and the table must remain valid under the search's existing
+ * concurrency contract.
  *
  * @param search Non-null shared search state supplying the borrowed table and time controls.
  * @param node   Non-null, exclusively owned node with its current moves stably capture-ordered;
@@ -1807,7 +1811,6 @@ static unsigned parallel_collect_similar_hints(Search           *search,
     XqPosition              candidate;
     while (queries < limit)
     {
-        (void)search_check_time(search);
         if (check_node(search, node) || !parallel_similar_position_next(&iterator, &candidate))
             break;
         if (candidate.side_to_move != node->position.side_to_move ||
@@ -1921,12 +1924,12 @@ typedef struct QuiescenceResult
 } QuiescenceResult;
 
 /**
- * @brief Checks time and the ordinary leaf's ancestors during thread-local quiescence.
+ * @brief Checks the published stop state and ordinary leaf's ancestors during quiescence.
  *
- * First updates the shared time state, then lets `check_node()` decide whether the owning leaf must
- * stop. Reaching the deadline does not always cancel work: `TIME_FINISH_ITERATION` allows the
- * current iteration to continue, whereas `TIME_STOP` requests cancellation. Even with timing
- * disabled, ancestor completion or cancellation can still stop this subtree.
+ * Calls `check_node()` without reading the clock or updating the shared time state.
+ * `TIME_FINISH_ITERATION` allows the current iteration to continue, whereas a published `TIME_STOP`
+ * requests cancellation. Ancestor completion or cancellation can also stop this subtree. Deadline
+ * expiry is detected at an ordinary-node entry or an outer search checkpoint.
  *
  * The leaf and its parent chain stay alive until quiescence returns. Its window may tighten here,
  * but quiescence keeps its original window snapshot and local recursive windows. No quiescence
@@ -1939,7 +1942,7 @@ typedef struct QuiescenceResult
  * callbacks. A false result only means no stop was observed at this checkpoint. Quiescence checks
  * once at each recursive entry; the ordinary caller checks again before publishing its result.
  *
- * @param search Initialized, non-null shared search state whose time state may be updated here.
+ * @param search Initialized, non-null shared search state whose published time state is observed.
  * @param leaf   Non-null ordinary node owning the entire quiescence subtree, passed unchanged
  *               through its recursion. Its atomic fields must be initialized, and its parent chain
  *               must remain valid. This function may update its window and state.
@@ -1951,7 +1954,6 @@ typedef struct QuiescenceResult
 static bool quiescence_should_stop(Search *search,
                                    Node   *leaf)
 {
-    (void)search_check_time(search);
     return check_node(search, leaf);
 }
 
@@ -2017,12 +2019,13 @@ static void parallel_quiescence_filter_cycles(const XqHistory  *history,
  *
  * `position` is a private mutable copy owned by the ordinary leaf. Every made move is unmade before
  * inspecting cancellation or returning. Recursion uses only local windows and move lists, not the
- * larger shared `Node` structure. The ordinary leaf is used solely for time/ancestor stop checks.
- * No table, PV or progress updates occur here; each entry contributes to the executing thread's
- * node count. Time and ancestor cancellation are checked once at entry. A child's stopped result
- * propagates after restoring the move and history; the ordinary caller performs the final stop
- * check. The private history starts at this quiescence subtree's entry, excluding real-game and
- * ordinary-search history, and is restored between sibling branches.
+ * larger shared `Node` structure. The ordinary leaf is used solely to check the published stop
+ * state and its ancestors. No table, PV or progress updates occur here; each entry contributes to
+ * the executing thread's node count. Published stop state and ancestor cancellation are checked
+ * once at entry without reading the clock. A child's stopped result propagates after restoring the
+ * move and history; the ordinary caller performs the final stop check. The private history starts
+ * at this quiescence subtree's entry, excluding real-game and ordinary-search history, and is
+ * restored between sibling branches.
  *
  * A stopped result has no usable score. Otherwise the score is fail-soft and must be classified
  * against the caller's original window before being published as a proven interval. A score <= the
@@ -2375,8 +2378,6 @@ static void search_range(Search            *search,
     const unsigned child_depth = node->in_check ? node->depth : node->depth - 1;
     for (int i = range.begin; i < range.end; i += range.step)
     {
-        if (node->parent == NULL)
-            (void)search_check_time(search);
         if (check_node(search, node))
             break;
         if (node->parent == NULL)
@@ -2420,8 +2421,6 @@ static void search_range(Search            *search,
                 search->progress(&update, search->progress_user);
             }
         }
-        if (node->parent == NULL)
-            (void)search_check_time(search);
         (void)check_node(search, node);
     }
 }
@@ -2594,9 +2593,10 @@ static SearchRange split_node(Search           *search,
  * Creates a local `Node` with a copy of `position`, an initially unknown interval `[-WIN, WIN]`,
  * and a link to `parent`. A node is MAX when its side to move equals `search->root_color` and MIN
  * otherwise; its intervals retain the root side's perspective. Quiescence converts to and from the
- * side-to-move perspective at its entry boundary. Uses lock-free `check_node()` to refresh
- * inherited bounds and publish completion or cancellation at search checkpoints. Scheduling uses
- * atomic worker states and retained semaphore notifications.
+ * side-to-move perspective at its entry boundary. Checks the deadline once at ordinary-node entry,
+ * then uses lock-free `check_node()` to refresh inherited bounds and publish completion or
+ * cancellation at search checkpoints without reading the clock again. Scheduling uses atomic worker
+ * states and retained semaphore notifications.
  *
  * The root uses the legal, history-filtered list prepared before the helper pool was created.
  * Descendants search pseudo-legal moves: if the previous mover's king is attacked, that move loses
@@ -2800,7 +2800,6 @@ static Interval search_node(Search            *search,
         }
     }
 
-    (void)search_check_time(search);
     if (check_node(search, &node))
         return node_value(&node);
     if (leaf)
@@ -2894,7 +2893,6 @@ static Interval search_node(Search            *search,
     /*
      * This node is now quiescent; acquiring `finished` makes all helper result submissions visible.
      */
-    (void)search_check_time(search);
     (void)check_node(search, &node);
     assert(atomic_load_explicit(&node.state, memory_order_relaxed) != NODE_RUNNING);
     Interval value = node_value(&node);
@@ -2913,8 +2911,8 @@ static Interval search_node(Search            *search,
                 *best_move = node.moves.moves[best];
         }
         /*
-         * A last time check may cancel a root whose children already prove its complete value. Keep
-         * its immutable `Node` state; the driver commits this independently retained proof.
+         * A published time stop may cancel a root whose children already prove its complete value.
+         * Keep its immutable `Node` state; the driver commits this independently retained proof.
          */
         if (search->iteration.complete || search->iteration.winning)
             assert(value.lower == value.upper);
@@ -3049,21 +3047,23 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * The search is synchronous; ordinary nodes in check retain their depth budget for each child,
  * including at depth zero. Zero-depth nodes without check and path repetitions not adjudicated by
  * the ordinary-cycle rule run thread-local quiescence for captures and legal check evasions, with
- * at most 500 extension plies. Quiescence shares the time budget and ancestor cancellation, but
- * neither splits tasks nor accesses the table or PV. Node counts include both normal and quiescence
- * entries, including their shared leaf; reported depths exclude check-evasion and quiescence
- * extensions. Real-game history removes root candidates that close a third identical cycle before
- * any helper tasks are dispatched. Each quiescence subtree applies the same cycle rule to its
- * private path, excluding real-game and ordinary-search history. Six consecutive checking plies in
- * that path are a draw unless the final check is mate; both outcomes precede cycle losses. Ordinary
- * nodes whose board and side to move repeat a strict ancestor use the nearest matching ancestor to
- * define the cycle; move counters are ignored. If the current side always gave check during that
- * cycle, returns an exact draw when the opponent also always checked, or an exact loss for the
- * current side otherwise. Other repetitions enter quiescence. All repetition outcomes precede table
- * lookup. Position-only table cutoffs remain enabled and may skip descendant repetitions or reuse
- * path-dependent ancestor results. A nonzero time budget uses a monotonic deadline shared across
- * preparation and all iterations; an unfinished iteration above
- * `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
+ * at most 500 extension plies. Quiescence observes the published time stop and ancestor
+ * cancellation without reading the clock; it neither splits tasks nor accesses the table or PV.
+ * Node counts include both normal and quiescence entries, including their shared leaf; reported
+ * depths exclude check-evasion and quiescence extensions. Real-game history removes root candidates
+ * that close a third identical cycle before any helper tasks are dispatched. Each quiescence
+ * subtree applies the same cycle rule to its private path, excluding real-game and ordinary-search
+ * history. Six consecutive checking plies in that path are a draw unless the final check is mate;
+ * both outcomes precede cycle losses. Ordinary nodes whose board and side to move repeat a strict
+ * ancestor use the nearest matching ancestor to define the cycle; move counters are ignored. If the
+ * current side always gave check during that cycle, returns an exact draw when the opponent also
+ * always checked, or an exact loss for the current side otherwise. Other repetitions enter
+ * quiescence. All repetition outcomes precede table lookup. Position-only table cutoffs remain
+ * enabled and may skip descendant repetitions or reuse path-dependent ancestor results. A nonzero
+ * time budget uses a monotonic deadline shared across preparation and all iterations. The deadline
+ * is checked once at each ordinary-node entry and at preparation, pool-creation and iteration
+ * boundaries; other search checkpoints only observe published stop state. An unfinished iteration
+ * above `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
  * returning.
  *
  * Only the adapter's `static_evaluate`, `user` and `history` are used; its `score_move` and serial

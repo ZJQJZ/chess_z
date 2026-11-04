@@ -125,8 +125,9 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * must have a surviving legal evasion before the original position is statically evaluated.
  * The evaluator receives the side to move, and its result is clamped to +/-28999 for negamax.
  * Quiescence flips child scores and windows, then ordinary search converts its result back to
- * the root perspective. Wins/losses remain +/-30000. Quiescence shares time and ancestor cancellation checks,
- * preserves cutoff bounds and never splits tasks, accesses the table or extends PV hints.
+ * the root perspective. Wins/losses remain +/-30000. Quiescence observes the published time stop
+ * and ancestor cancellation without reading the clock, preserves cutoff bounds and never splits
+ * tasks, accesses the table or extends PV hints.
  * Node counts include normal and quiescence entries (a shared entry counts once for each);
  * reported depths exclude check-evasion and quiescence extensions and progress still counts only
  * root candidates. Sampled normal plies count actual moves and may exceed the iteration depth.
@@ -177,13 +178,18 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * serially. thread_count == 1 disables splitting for either strategy. The global thread pool size
  * and its default of 2 are unchanged; three-way splitting requires thread_count >= 3 and two idle
  * helpers. Every dispatched helper completes before the node returns, including on cancellation.
- * The budget covers preparation, pool creation and all iterations. At the first detected deadline,
- * an unfinished iteration with strictly more than 30% of its root candidates completed may finish;
- * otherwise running nodes are cancelled. No new iteration starts after the deadline. Clock failure
- * stops even an extended iteration. A cancelled iteration preserves the last complete result;
- * without one, select the best completed first-iteration candidate or a legal fallback. Timeout is
- * OK with stats.stopped set. Workers and callbacks finish before return, so the budget is not a hard
- * return deadline. Completed proofs remain valid if a final time check requests stopping.
+ * The budget covers preparation, pool creation and all iterations. The deadline is checked once
+ * at each ordinary-node entry and at preparation, pool-creation and iteration boundaries. Other
+ * search checkpoints only observe published stop state; a long quiescence subtree may delay new
+ * deadline detection until the next ordinary node or outer checkpoint. At the first detected
+ * deadline, an unfinished iteration whose root completion percentage is strictly above
+ * PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT (defined in parallel_search.c) may finish;
+ * otherwise running nodes are cancelled. No new iteration starts after a deadline is detected.
+ * Clock failure stops even an extended iteration. A cancelled iteration preserves the last
+ * complete result; without one, select the best completed first-iteration candidate or a legal
+ * fallback. Timeout is OK with stats.stopped set. Workers and callbacks finish before return, so
+ * the budget is not a hard return deadline. Completed proofs remain valid if a final time check
+ * requests stopping.
  * Results are initialized even on failure.
  * Equal-score choices may depend on scheduling. POSIX pthread implementation requiring
  * always-lock-free atomic int; Windows returns UNSUPPORTED. */

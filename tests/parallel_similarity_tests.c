@@ -629,9 +629,8 @@ static void timing_and_cutoff_isolation(void)
 {
     Fixture fixture;
     fixture_init(&fixture);
-    fixture.search.options.time_limit_ms = 1;
-    CHECK(parallel_clock_ms(&fixture.search.start_ms));
-    fixture.search.deadline_ms = fixture.search.start_ms;
+    /* Hint collection observes a published stop without checking the deadline itself. */
+    atomic_store(&fixture.search.time_state, TIME_STOP);
     CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 0);
     CHECK(atomic_load(&fixture.search.time_state) == TIME_STOP);
     fixture_destroy(&fixture);
