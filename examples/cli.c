@@ -837,11 +837,13 @@ int main(int argc, char **argv)
            color_name(xq_color_opponent(engine_color)), parallel ? "parallel" : "builtin",
            color_name(engine_color));
     printf("Use coordinates a-i and ranks 0-9. Example: b2b9\n");
+    printf("Last move: cyan background = from, yellow background = to.\n");
     print_help(parallel);
 
     for (;;)
     {
-        xq_position_print_oriented(&pos, board_flipped);
+        const XqMove *last_move = history.count > 1 ? &history.entries[history.count - 1].move : NULL;
+        xq_position_print_with_last_move(&pos, board_flipped, last_move);
         xq_generate_legal(&pos, &legal);
 
         if (legal.count == 0)

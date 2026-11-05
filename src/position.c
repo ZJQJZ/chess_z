@@ -460,6 +460,11 @@ void xq_position_print(const XqPosition *pos)
 /* Only the traversal order changes; square labels retain their original meaning. */
 void xq_position_print_oriented(const XqPosition *pos, bool flipped)
 {
+    xq_position_print_with_last_move(pos, flipped, NULL);
+}
+
+void xq_position_print_with_last_move(const XqPosition *pos, bool flipped, const XqMove *last_move)
+{
     int row;
     int column;
 
@@ -473,7 +478,15 @@ void xq_position_print_oriented(const XqPosition *pos, bool flipped)
             XqSquare sq = xq_square_make(file, rank);
             int piece = pos->board[sq];
             const char *text = xq_piece_to_text(piece);
-            if (piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == XQ_RED)
+            if (last_move != NULL && (sq == last_move->from || sq == last_move->to))
+            {
+                int foreground = piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == XQ_RED ? 31 : 30;
+                int background = sq == last_move->from ? 106 : 103;
+                /* Highlight two columns, then leave one uncolored column between squares. */
+                printf("\x1b[%d;%dm%s%s\x1b[0m ", foreground, background, text,
+                       piece == XQ_EMPTY_PIECE ? " " : "");
+            }
+            else if (piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == XQ_RED)
                 printf("\x1b[31m%s\x1b[0m ", text);
             else if (piece != XQ_EMPTY_PIECE)
                 printf("%s ", text);

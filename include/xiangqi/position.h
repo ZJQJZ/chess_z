@@ -38,5 +38,7 @@ const char *xq_piece_to_text(int piece);
 void xq_position_print(const XqPosition *pos);
 /* Rotate the display by 180 degrees when flipped; board and coordinates are unchanged. */
 void xq_position_print_oriented(const XqPosition *pos, bool flipped);
+/* Highlight the last move's origin in cyan and destination in yellow; NULL disables highlights. */
+void xq_position_print_with_last_move(const XqPosition *pos, bool flipped, const XqMove *last_move);
 
 #endif
