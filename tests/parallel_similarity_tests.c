@@ -738,6 +738,82 @@ static void winning_search_order_and_pv(void)
 }
 #endif
 
+/* Synthetic ancestor paths isolate cycle/check bookkeeping rather than legal move generation. */
+static void repetition_rule_path(Node path[7], XqColor side)
+{
+    XqPosition repeated, different;
+    xq_position_startpos(&repeated);
+    different = repeated;
+    CHECK(xq_position_remove_piece(&different, xq_square_make(0, 3)));
+    for (int i = 0; i < 7; ++i)
+    {
+        XqPosition position = i == 0 || i == 6 ? repeated : different;
+        position.side_to_move = i % 2 == 0 ? side : xq_color_opponent(side);
+        node_init(&path[i], &position, i > 0 ? &path[i - 1] : NULL, 0);
+        path[i].in_check = true;
+    }
+}
+
+static void repetition_rule_checks(void)
+{
+    for (unsigned color = 0; color < XQ_COLOR_NB; ++color)
+    {
+        Node path[7];
+        repetition_rule_path(path, (XqColor)color);
+        CHECK(parallel_path_repetition(&path[0]) == PATH_REPETITION_NONE);
+
+        /* Matching boards with opposite sides to move are not repetitions. */
+        path[1].position = path[0].position;
+        path[1].position.side_to_move = xq_color_opponent((XqColor)color);
+        CHECK(parallel_path_repetition(&path[1]) == PATH_REPETITION_NONE);
+
+        for (unsigned own = 0; own < 2; ++own)
+            for (unsigned opponent = 0; opponent < 2; ++opponent)
+            {
+                for (int i = 1; i < 7; ++i)
+                    path[i].in_check = i % 2 != 0 ? own != 0 : opponent != 0;
+                /* The matching ancestor's flag describes a move outside this cycle. */
+                path[0].in_check = false;
+                PathRepetition expected = own ?
+                    (opponent ? PATH_REPETITION_DRAW : PATH_REPETITION_LOSS) :
+                    (opponent ? PATH_REPETITION_NONE : PATH_REPETITION_QUIESCENCE);
+                CHECK(parallel_path_repetition(&path[6]) == expected);
+            }
+
+        repetition_rule_path(path, (XqColor)color);
+        path[0].in_check = false;
+        CHECK(parallel_path_repetition(&path[6]) == PATH_REPETITION_DRAW);
+        /* The closing move belongs to the opponent and must count in the cycle. */
+        path[6].in_check = false;
+        CHECK(parallel_path_repetition(&path[6]) == PATH_REPETITION_LOSS);
+        path[6].in_check = true;
+        path[1].in_check = false;
+        CHECK(parallel_path_repetition(&path[6]) == PATH_REPETITION_NONE);
+
+        /* A nearer matching ancestor excludes older non-checking moves and its own flag. */
+        path[4].position = path[6].position;
+        path[4].in_check = false;
+        path[2].in_check = false;
+        CHECK(parallel_path_repetition(&path[6]) == PATH_REPETITION_DRAW);
+        path[5].in_check = false;
+        CHECK(parallel_path_repetition(&path[6]) == PATH_REPETITION_NONE);
+        path[6].in_check = false;
+        CHECK(parallel_path_repetition(&path[6]) == PATH_REPETITION_QUIESCENCE);
+
+        repetition_rule_path(path, (XqColor)color);
+        /* Removing the only same-side match leaves no cycle, even with all checks set. */
+        path[0].position = path[2].position;
+        CHECK(parallel_path_repetition(&path[6]) == PATH_REPETITION_NONE);
+        path[3].in_check = false;
+        path[2].in_check = false;
+        CHECK(parallel_path_repetition(&path[6]) == PATH_REPETITION_NONE);
+        path[0].position = path[6].position;
+        CHECK(parallel_path_repetition(&path[6]) == PATH_REPETITION_QUIESCENCE);
+        path[2].in_check = true;
+        CHECK(parallel_path_repetition(&path[6]) == PATH_REPETITION_NONE);
+    }
+}
+
 typedef struct SampleCheck
 {
     XqSearchSampler *sampler;
@@ -858,6 +934,7 @@ int main(void)
     timing_and_cutoff_isolation();
     winning_search_order_and_pv();
 #endif
+    repetition_rule_checks();
     searches_and_sampling();
     puts("parallel similarity checks passed");
     return 0;

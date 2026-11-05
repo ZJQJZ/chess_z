@@ -1565,24 +1565,27 @@ typedef enum PathRepetition
 /**
  * @brief Classifies the nearest repeated cycle on the ordinary-search ancestor path.
  *
- * Walks from `node->parent` toward the root and uses the nearest matching ancestor. This detects
- * the second occurrence, without waiting for a third repetition or requiring the intervening move
- * sequences to match. The root participates as an ancestor; a root passed as `node` has no
- * ancestors and returns `PATH_REPETITION_NONE`. Real-game history, sibling branches and previous
- * iterative-deepening paths are not consulted.
+ * Search moves alternate sides, so same-side ancestors occur only at even distances. Walks toward
+ * the root two moves at a time and uses the nearest matching ancestor. This detects the second
+ * occurrence, without waiting for a third repetition or requiring intervening move sequences to
+ * match. The root participates as an ancestor; a root passed as `node` has no ancestors and returns
+ * `PATH_REPETITION_NONE`. Real-game history, siblings and previous iterations are not consulted.
  *
- * First compares the side to move, then compares all board squares byte for byte, including empty
- * squares and each piece's color and type. No hash is used, so a hash collision cannot trigger a
- * repetition. Halfmove/fullmove counters and derived fields such as bitboards and the cached piece
- * hash are deliberately ignored; comparing the entire `XqPosition` would include unrelated data.
+ * Compares same-side ancestors' board squares byte for byte, including empty squares and each
+ * piece's color and type. No hash is used, so a hash collision cannot trigger repetition.
+ * Halfmove/fullmove counters and derived fields such as bitboards and the cached piece hash are
+ * ignored; comparing the entire `XqPosition` would include unrelated data.
  *
  * The cycle contains the moves represented by nodes in `(ancestor, node]`. Each node's `in_check`
  * records whether the previous mover gave check, so it belongs to the opponent of that node's side
  * to move. The matching ancestor is excluded because its preceding move is outside the cycle; the
- * current node includes the closing move. If the current side to move gave check on every one of
- * its cycle moves, the result is a draw when its opponent also always checked, or a loss for the
- * current side otherwise. If the current side did not always check, the result requests quiescence,
- * including when only its opponent always checked.
+ * current node includes the closing move. "Own side" is the matching ancestor's side to move, which
+ * equals the current side. If every own-side move gave check, both sides always checking produces a
+ * draw; otherwise the own side loses. If only the opponent always checked, return NONE and continue
+ * ordinary search. If neither side always checked, request quiescence. Both check flags accumulate
+ * until the nearest matching ancestor is found; non-checking moves alone cannot determine whether a
+ * cycle exists. Matching and flag accumulation share one pass, with no per-move color calculation
+ * or second traversal.
  *
  * This read-only helper neither checks cancellation nor evaluates the position or runs quiescence.
  * The caller handles terminal positions first and consumes the result before table lookup or task
@@ -1591,31 +1594,37 @@ typedef enum PathRepetition
  * the search's helper-completion protocol preserves their lifetime.
  *
  * @param node Non-null, initialized ordinary-search node with a valid, stable ancestor chain.
- * @return     No repetition, a request for quiescence, a draw, or a loss for the current side to
- *             move. The caller converts a loss to its root-perspective score.
+ * @return     NONE for no cycle or only opposing perpetual check, QUIESCENCE when neither side
+ *             always checked, DRAW when both did, or LOSS for the cycle's starting side.
  */
 static PathRepetition parallel_path_repetition(const Node *node)
 {
-    for (const Node *ancestor = node->parent; ancestor != NULL; ancestor = ancestor->parent)
+    bool        own_all_checks      = true;
+    bool        opponent_all_checks = true;
+    const Node *cursor              = node;
+    for (;;)
     {
-        if (node->position.side_to_move != ancestor->position.side_to_move ||
-            memcmp(node->position.board, ancestor->position.board, sizeof(node->position.board)) !=
-                0)
-            continue;
+        /* This result node records the preceding own-side move, not its side to move. */
+        const Node *own_move = cursor->parent;
+        if (own_move == NULL)
+            return PATH_REPETITION_NONE;
 
-        bool all_checks[XQ_COLOR_NB] = {true, true};
-        for (const Node *cursor = node; cursor != ancestor; cursor = cursor->parent)
+        const Node *ancestor = own_move->parent;
+        if (ancestor == NULL)
+            return PATH_REPETITION_NONE;
+
+        own_all_checks &= own_move->in_check;
+        opponent_all_checks &= cursor->in_check;
+        if (memcmp(node->position.board, ancestor->position.board, sizeof(node->position.board)) ==
+            0)
         {
-            XqColor mover = xq_color_opponent(cursor->position.side_to_move);
-            if (!cursor->in_check)
-                all_checks[mover] = false;
+            if (own_all_checks)
+                return opponent_all_checks ? PATH_REPETITION_DRAW : PATH_REPETITION_LOSS;
+            return opponent_all_checks ? PATH_REPETITION_NONE : PATH_REPETITION_QUIESCENCE;
         }
-        XqColor side = node->position.side_to_move;
-        if (!all_checks[side])
-            return PATH_REPETITION_QUIESCENCE;
-        return all_checks[xq_color_opponent(side)] ? PATH_REPETITION_DRAW : PATH_REPETITION_LOSS;
+
+        cursor = ancestor;
     }
-    return PATH_REPETITION_NONE;
 }
 
 /**
@@ -2618,16 +2627,17 @@ static SearchRange split_node(Search           *search,
  * including at depth zero. A repeated board and side to move uses the cycle ending here and
  * starting at the nearest matching ancestor. If the current side gave check on every one of its
  * cycle moves, returns an exact draw when its opponent also always checked, or an exact loss for
- * the current side otherwise. Move counters do not affect repetition. Other repetitions, even in
- * check, and depth-zero nodes without check enter thread-local quiescence with the inherited window
- * snapshot converted to the side-to-move perspective. Each entry starts a fresh private quiescence
- * history, excluding the ordinary-search prefix. Quiescence filters pseudo-legal moves in its move
- * loop to search captures or all legal check evasions. Static evaluations are clamped to
- * `[-STATIC_LIMIT, STATIC_LIMIT]`. Its fail-soft result is converted back to the root perspective
- * and classified against that snapshot before publishing an exact or bounded interval; later
- * ancestor updates only tighten the window. A continuing ordinary node with no legal continuation
- * loses because every pseudo-legal child loses (or its move list is empty). Terminal scores are
- * `-WIN`, `WIN` or `0` from the root perspective and produce exact intervals `[score, score]`.
+ * the current side otherwise. Move counters do not affect repetition. If only the opponent always
+ * checked, ordinary search continues. If neither side always checked, even in check, enter
+ * thread-local quiescence, as do depth-zero nodes without check. The inherited window snapshot is
+ * converted to the side-to-move perspective. Each entry starts a fresh private quiescence history,
+ * excluding the ordinary-search prefix. Quiescence filters pseudo-legal moves in its move loop to
+ * search captures or all legal check evasions. Static evaluations are clamped to `[-STATIC_LIMIT,
+ * STATIC_LIMIT]`. Its fail-soft result is converted back to the root perspective and classified
+ * against that snapshot before publishing an exact or bounded interval; later ancestor updates only
+ * tighten the window. A continuing ordinary node with no legal continuation loses because every
+ * pseudo-legal child loses (or its move list is empty). Terminal scores are `-WIN`, `WIN` or `0`
+ * from the root perspective and produce exact intervals `[score, score]`.
  *
  * After terminal, depth-boundary and repetition checks, an optional table supplies a hash move and
  * may resolve a positive-depth non-root node with a sufficiently deep exact value or cutoff bound.
@@ -3067,27 +3077,27 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * limit of one is serial. Both strategies require remaining normal-search depth of at least
  * `PARALLEL_MIN_SPLIT_DEPTH` and an idle helper; otherwise all moves stay with the current thread.
  * The search is synchronous; ordinary nodes in check retain their depth budget for each child,
- * including at depth zero. Zero-depth nodes without check and path repetitions not adjudicated by
- * the ordinary-cycle rule run thread-local quiescence for captures and legal check evasions, with
- * at most 500 extension plies. Quiescence observes the published time stop and ancestor
- * cancellation without reading the clock; it neither splits tasks nor accesses the table or PV.
- * Node counts include both normal and quiescence entries, including their shared leaf; reported
- * depths exclude check-evasion and quiescence extensions. Real-game history removes root candidates
- * that close a third identical cycle before any helper tasks are dispatched. Each quiescence
- * subtree applies the same cycle rule to its private path, excluding real-game and ordinary-search
- * history. Six consecutive checking plies in that path are a draw unless the final check is mate;
- * both outcomes precede cycle losses. Ordinary nodes whose board and side to move repeat a strict
- * ancestor use the nearest matching ancestor to define the cycle; move counters are ignored. If the
- * current side always gave check during that cycle, returns an exact draw when the opponent also
- * always checked, or an exact loss for the current side otherwise. Other repetitions enter
- * quiescence. All repetition outcomes precede table lookup. Position-only table cutoffs remain
- * enabled and may skip descendant repetitions or reuse path-dependent ancestor results. A nonzero
- * time budget uses a monotonic deadline shared across preparation and all iterations. Each physical
- * thread checks at its first ordinary entry and then every `PARALLEL_TIME_CHECK_INTERVAL` ordinary
- * entries. Preparation, pool-creation and iteration boundaries also check the deadline; other
- * search checkpoints only observe published stop state. An unfinished iteration above
- * `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
- * returning.
+ * including at depth zero. Zero-depth nodes without check and repetitions where neither side always
+ * checked run thread-local quiescence for captures and legal evasions, with at most 500 extension
+ * plies. Quiescence observes the published time stop and ancestor cancellation without reading the
+ * clock; it neither splits tasks nor accesses the table or PV. Node counts include both normal and
+ * quiescence entries, including their shared leaf; reported depths exclude check-evasion and
+ * quiescence extensions. Real-game history removes root candidates that close a third identical
+ * cycle before any helper tasks are dispatched. Each quiescence subtree applies the same cycle rule
+ * to its private path, excluding real-game and ordinary-search history. Six consecutive checking
+ * plies in that path are a draw unless the final check is mate; both outcomes precede cycle losses.
+ * Ordinary nodes whose board and side to move repeat a strict ancestor use the nearest matching
+ * ancestor to define the cycle; move counters are ignored. If the current side always gave check
+ * during that cycle, returns an exact draw when the opponent also always checked, or an exact loss
+ * for the current side otherwise. Only opposing perpetual check returns NONE and continues ordinary
+ * search; neither side always checking requests quiescence. Repetition handling precedes table
+ * lookup. Position-only table cutoffs remain enabled and may skip descendant repetitions or reuse
+ * path-dependent ancestor results. A nonzero time budget uses a monotonic deadline shared across
+ * preparation and all iterations. Each physical thread checks at its first ordinary entry and then
+ * every `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Preparation, pool-creation and iteration
+ * boundaries also check the deadline; other search checkpoints only observe published stop state.
+ * An unfinished iteration above `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline
+ * check may finish before returning.
  *
  * Only the adapter's `static_evaluate`, `user` and `history` are used; its `score_move` and serial
  * table are ignored. The parallel table remains in `options`. A null adapter or static evaluator
@@ -3156,11 +3166,11 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter   *engine,
  * defaults, creates a helper pool once, and searches depths 1 through the configured maximum. Stops
  * early for a terminal root, proven winning move, or time stop. Nodes in check retain their depth
  * budget for each child, including at depth zero. Ordinary path repetitions adjudicate a draw or
- * current-side loss when the current side always checked during the nearest repeated cycle. Other
- * repetitions and zero-depth nodes without check run thread-local quiescence; extensions contribute
- * to node counts but not reported depths or root progress. Root ordering, PV hints and an optional
- * borrowed transposition table are retained across iterations; cached results may come from greater
- * search depths.
+ * current-side loss when the cycle's starting side always checked. Only opposing perpetual check
+ * continues ordinary search. Other repetitions and zero-depth nodes without check run thread-local
+ * quiescence. Extensions contribute to node counts but not reported depths or root progress. Root
+ * ordering, PV hints and an optional borrowed transposition table are retained across iterations;
+ * cached results may come from greater search depths.
  *
  * For each searched root iteration, the calling thread emits `STARTED` before dispatching work and
  * `FINISHED` after all root callbacks and helper work have completed. `FINISHED` may describe a

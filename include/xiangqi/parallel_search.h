@@ -78,16 +78,18 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * sibling paths are not consulted. The cycle contains the moves after that ancestor through the
  * current node: each resulting node's in-check flag records whether the previous mover gave check,
  * excluding the matching ancestor's flag and including the current node's flag. "Own side" means
- * the current repeated node's side to move. If every own-side move in the cycle gives check, return
- * an exact draw (zero) when every opponent move also gives check; otherwise the own side loses
- * (root-side score -30000 when it is the root color, +30000 otherwise). If any own-side move does
- * not give check, enter quiescence even when every opponent move gives check. This applies even in
- * check and regardless of remaining normal-search depth. Checks for missing kings or a previous
- * move exposing its mover's king take precedence. All repetition leaves return before current-node
- * TT lookup, PV extension or task splitting, and do not store their result as a normal-depth TT
- * entry. The table still uses position-only keys and retains its existing score cutoffs and
- * ancestor-result storage, so cached results can be reused across paths and bypass repetitions
- * that would otherwise be encountered in an unexpanded subtree.
+ * the cycle's starting side to move, which equals the repeated node's side. If every own-side move
+ * gives check, return an exact draw (zero) when every opponent move also gives check; otherwise the
+ * own side loses (root-side score -30000 when it is the root color, +30000 otherwise). If any
+ * own-side move does not give check but every opponent move does, return PATH_REPETITION_NONE and
+ * continue ordinary search. If neither side always gives check, return PATH_REPETITION_QUIESCENCE
+ * and enter quiescence. Repetition handling applies even in check and regardless of remaining
+ * normal-search depth. Checks for missing kings or an illegal previous move take precedence.
+ * Repetition leaves that adjudicate a result or enter quiescence return before
+ * current-node TT lookup, PV extension or task splitting, and do not store their result as a
+ * normal-depth TT entry. The table still uses position-only keys and retains its existing score
+ * cutoffs and ancestor-result storage, so cached results can be reused across paths and bypass
+ * repetitions that would otherwise be encountered in an unexpanded subtree.
  * Internal TT scores use the side-to-move perspective and may come from greater search depths.
  * A cached proven root win or loss returns before pool creation if its best move is legal and no
  * root candidates were history-filtered. A cached win may also return after history filtering if
@@ -105,8 +107,8 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * zero. Other ordinary nodes consume one ply. There is no separate check-extension limit; terminal
  * and path-repetition checks still take precedence. Zero-depth check-evasion nodes skip current-node
  * TT reads and writes, preserving the table's zero-depth empty marker.
- * Depth-zero nodes without check and repetition leaves where at least one own-side move does not
- * give check run quiescence in the executing thread: stand pat plus captures when not in check,
+ * Depth-zero nodes without check and repetition leaves where neither side always gives check run
+ * quiescence in the executing thread: stand pat plus captures when not in check,
  * all legal evasions without stand pat when in check.
  * All move lists are pseudo-legal; the move loop skips non-captures outside check and rejects moves
  * that leave the original mover in check when evading. Each quiescence entry starts a new private
