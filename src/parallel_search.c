@@ -1115,11 +1115,11 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2,
  * Position, `moves`, `depth`, `parent`, `parent_move_index`, `maximizing`, `in_check` and PV hints
  * are immutable once shared. The previous iteration's hint storage stays alive until the root and
  * all helpers return. Each batch PV has one writer; the owner reads helper PVs only after
- * completion synchronization. Bounds, window and `state` use atomic access, as do submission
- * counters and `best_index`. Each child slot has one writer and is immutable after publication
- * through `best_index`. Helper completion is acquired through each task completion record after
- * consuming its notification, before the owner returns. State combines finished/cancelled in one
- * atomic transition so readers never see a partial stop.
+ * completion synchronization. Bounds, window, `state` and `repetition_seen` use atomic access, as
+ * do submission counters and `best_index`. Each child slot has one writer and is immutable after
+ * publication through `best_index`. Helper completion is acquired through each task completion
+ * record after consuming its notification, before the owner returns. State combines
+ * finished/cancelled in one atomic transition so readers never see a partial stop.
  */
 typedef struct Node
 {
@@ -1140,6 +1140,7 @@ typedef struct Node
     atomic_int     best_index;
     atomic_int     alpha, beta;
     atomic_int     state;
+    atomic_int     repetition_seen;
 } Node;
 
 /* Sources enumerate positions only; lookup budgets and move acceptance are source-independent. */
@@ -1392,11 +1393,12 @@ static Interval parallel_tt_interval(const ParallelTtEntry *entry,
 /**
  * @brief Classifies a completed node's proven interval and attempts to cache its result.
  *
- * Skips cancelled results, disabled caching and history-filtered roots. In root perspective, equal
- * endpoints produce an exact score; otherwise `upper <= alpha` produces an upper-bound entry using
- * `value.upper`, and `lower >= beta` produces a lower-bound entry using `value.lower`. An interval
- * satisfying neither cutoff condition is not stored. Exact classification takes precedence over
- * cutoffs.
+ * Skips cancelled results, disabled caching, history-filtered roots and nodes marked inside
+ * DRAW/LOSS repetition cycles, excluding each cycle's matching ancestor. Repetition-driven
+ * quiescence does not prevent writes. In root perspective, equal endpoints produce an exact score;
+ * otherwise `upper <= alpha` produces an upper-bound entry using `value.upper`, and `lower >= beta`
+ * produces a lower-bound entry using `value.lower`. An interval satisfying neither cutoff condition
+ * is not stored. Exact classification takes precedence over cutoffs.
  *
  * Parallel search inherits a window that can tighten during execution, so classification uses the
  * proven interval rather than a scalar score compared with an original window. The stored score is
@@ -1410,7 +1412,7 @@ static Interval parallel_tt_interval(const ParallelTtEntry *entry,
  *
  * The caller must finish its own work and wait for all helpers accessing this node before supplying
  * the final interval and selected move. This function does not wait for completion; its relaxed
- * window loads rely on that existing synchronization and the node being quiescent.
+ * atomic loads rely on that existing synchronization and the node being quiescent.
  *
  * @param search    Non-null search state containing the optional borrowed table.
  * @param node      Non-null, completed node whose helper tasks have finished accessing it.
@@ -1427,6 +1429,7 @@ static void parallel_tt_store_node(Search               *search,
                                    XqTranspositionStats *stats)
 {
     if (value.cancelled || search->options.transposition_table == NULL ||
+        atomic_load_explicit(&node->repetition_seen, memory_order_relaxed) ||
         (node->parent == NULL && search->filtered_cycles))
         return;
     XqSearchScoreKind kind;
@@ -1563,7 +1566,7 @@ typedef enum PathRepetition
 } PathRepetition;
 
 /**
- * @brief Classifies the nearest repeated cycle on the ordinary-search ancestor path.
+ * @brief Classifies the nearest repeated cycle and marks DRAW/LOSS cycle nodes to skip TT writes.
  *
  * Search moves alternate sides, so same-side ancestors occur only at even distances. Walks toward
  * the root two moves at a time and uses the nearest matching ancestor. This detects the second
@@ -1584,20 +1587,21 @@ typedef enum PathRepetition
  * draw; otherwise the own side loses. If only the opponent always checked, return NONE and continue
  * ordinary search. If neither side always checked, request quiescence. Both check flags accumulate
  * until the nearest matching ancestor is found; non-checking moves alone cannot determine whether a
- * cycle exists. Matching and flag accumulation share one pass, with no per-move color calculation
- * or second traversal.
+ * cycle exists. Matching and flag accumulation share one pass, with no per-move color calculation.
+ * DRAW/LOSS walks `(ancestor, node]` once more to mark its nodes and prevent their TT writes; the
+ * matching ancestor and earlier nodes are not marked by this cycle. QUIESCENCE does not mark nodes.
  *
- * This read-only helper neither checks cancellation nor evaluates the position or runs quiescence.
- * The caller handles terminal positions first and consumes the result before table lookup or task
- * splitting. No memory is allocated and no locks are taken. The node and its acyclic parent chain
- * must remain alive with unchanged positions, check flags and parent links while being inspected;
- * the search's helper-completion protocol preserves their lifetime.
+ * This helper neither checks cancellation nor evaluates the position or runs quiescence. The caller
+ * handles terminal positions first and consumes the result before table lookup or task splitting.
+ * No memory is allocated and no locks are taken. The node and its acyclic parent chain must remain
+ * alive with unchanged positions, check flags and parent links while being inspected; the search's
+ * helper-completion protocol preserves their lifetime.
  *
  * @param node Non-null, initialized ordinary-search node with a valid, stable ancestor chain.
  * @return     NONE for no cycle or only opposing perpetual check, QUIESCENCE when neither side
  *             always checked, DRAW when both did, or LOSS for the cycle's starting side.
  */
-static PathRepetition parallel_path_repetition(const Node *node)
+static PathRepetition parallel_path_repetition(Node *node)
 {
     bool        own_all_checks      = true;
     bool        opponent_all_checks = true;
@@ -1619,7 +1623,11 @@ static PathRepetition parallel_path_repetition(const Node *node)
             0)
         {
             if (own_all_checks)
+            {
+                for (Node *mark = node; mark != ancestor; mark = mark->parent)
+                    atomic_store_explicit(&mark->repetition_seen, 1, memory_order_relaxed);
                 return opponent_all_checks ? PATH_REPETITION_DRAW : PATH_REPETITION_LOSS;
+            }
             return opponent_all_checks ? PATH_REPETITION_NONE : PATH_REPETITION_QUIESCENCE;
         }
 
@@ -2648,7 +2656,9 @@ static SearchRange split_node(Search           *search,
  * empty PV. The table remains position-only: ancestor results can depend on the path, and cache
  * cutoffs may skip descendant repetitions that would otherwise be adjudicated or enter quiescence.
  * Repetition leaves return before table access, PV extension or task splitting and do not store
- * their result.
+ * their result. DRAW/LOSS leaves also prevent writes for nodes in (matching ancestor, current
+ * node], even in non-best or subsequently cancelled branches. This excludes the matching ancestor
+ * itself and earlier nodes; QUIESCENCE leaves do not prevent ancestor writes.
  *
  * Continuing descendants apply stable capture ordering and collect hints from a bounded number of
  * similar positions without reordering the list. Similar-position sources currently enumerate
@@ -2736,6 +2746,7 @@ static Interval search_node(Search            *search,
     atomic_init(&node.best_index, -1);
     atomic_init(&node.alpha, -INFINITY_SCORE);
     atomic_init(&node.beta, INFINITY_SCORE);
+    atomic_init(&node.repetition_seen, 0);
 
     ++stats->nodes;
     if (stats->sampling != NULL)
@@ -3091,13 +3102,15 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * during that cycle, returns an exact draw when the opponent also always checked, or an exact loss
  * for the current side otherwise. Only opposing perpetual check returns NONE and continues ordinary
  * search; neither side always checking requests quiescence. Repetition handling precedes table
- * lookup. Position-only table cutoffs remain enabled and may skip descendant repetitions or reuse
- * path-dependent ancestor results. A nonzero time budget uses a monotonic deadline shared across
- * preparation and all iterations. Each physical thread checks at its first ordinary entry and then
- * every `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Preparation, pool-creation and iteration
- * boundaries also check the deadline; other search checkpoints only observe published stop state.
- * An unfinished iteration above `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline
- * check may finish before returning.
+ * lookup. DRAW/LOSS marks only (matching ancestor, repeated node] to skip table writes; QUIESCENCE
+ * does not mark nodes. Position-only table cutoffs remain enabled and may skip descendant
+ * repetitions or reuse path-dependent ancestor results. A nonzero time budget uses a monotonic
+ * deadline shared across preparation and all iterations. Each physical thread checks at its first
+ * ordinary entry and then every `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Preparation,
+ * pool-creation and iteration boundaries also check the deadline; other search checkpoints only
+ * observe published stop state. An unfinished iteration above
+ * `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline check may finish before
+ * returning.
  *
  * Only the adapter's `static_evaluate`, `user` and `history` are used; its `score_move` and serial
  * table are ignored. The parallel table remains in `options`. A null adapter or static evaluator
@@ -3130,9 +3143,9 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * reconstruction does not contribute to them. Per-call node/cache counters, depth progress and
  * monotonic elapsed time are returned in `stats`. Joins all created helpers and releases resources,
  * including after partial thread-creation failure. The input position is never modified, and no
- * helper remains running after the call. A filtered root is not cached; descendant ordinary-search
- * results remain cacheable under the position-only policy. Fully filtered roots return the original
- * legal fallback with no score.
+ * helper remains running after the call. A filtered root is not cached; DRAW/LOSS cycles also
+ * suppress writes for nodes in (matching ancestor, repeated node]. Fully filtered roots return the
+ * original legal fallback with no score.
  *
  * @param engine                        Optional adapter providing evaluation, user data and
  *                                      real-game history; keep borrowed state unchanged until

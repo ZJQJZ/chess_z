@@ -72,7 +72,7 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * filtering. Search moves are never appended to real history. Progress totals include only surviving
  * root moves. When all candidates are filtered, return the original legal fallback without a score,
  * at selected_move_depth == 0 and with no iteration events. A root result with any filtered
- * candidates is never stored in the position-only table; descendant results remain cacheable.
+ * candidates is never stored in the position-only table; descendants follow the repetition rules below.
  * Ordinary-search nodes find the nearest strict ancestor with matching board contents and side to
  * move on the current path, including the root. Move counters are ignored; real-game history and
  * sibling paths are not consulted. The cycle contains the moves after that ancestor through the
@@ -87,9 +87,12 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * normal-search depth. Checks for missing kings or an illegal previous move take precedence.
  * Repetition leaves that adjudicate a result or enter quiescence return before
  * current-node TT lookup, PV extension or task splitting, and do not store their result as a
- * normal-depth TT entry. The table still uses position-only keys and retains its existing score
- * cutoffs and ancestor-result storage, so cached results can be reused across paths and bypass
- * repetitions that would otherwise be encountered in an unexpanded subtree.
+ * normal-depth TT entry. DRAW/LOSS leaves also prevent writes for nodes in (matching ancestor,
+ * repeated node], including when such a leaf occurs in a non-best or subsequently cancelled branch.
+ * The matching ancestor and earlier nodes are not marked by this cycle and remain cacheable under
+ * the other rules. QUIESCENCE leaves do not prevent ancestor writes. The table still uses
+ * position-only keys and its existing score cutoffs, so cached results can be reused across paths
+ * and bypass repetitions that would otherwise be encountered in an unexpanded subtree.
  * Internal TT scores use the side-to-move perspective and may come from greater search depths.
  * A cached proven root win or loss returns before pool creation if its best move is legal and no
  * root candidates were history-filtered. A cached win may also return after history filtering if
