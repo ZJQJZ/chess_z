@@ -1115,11 +1115,11 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2,
  * Position, `moves`, `depth`, `parent`, `parent_move_index`, `maximizing`, `in_check` and PV hints
  * are immutable once shared. The previous iteration's hint storage stays alive until the root and
  * all helpers return. Each batch PV has one writer; the owner reads helper PVs only after
- * completion synchronization. Bounds, window, `state` and `repetition_seen` use atomic access, as
- * do submission counters and `best_index`. Each child slot has one writer and is immutable after
- * publication through `best_index`. Helper completion is acquired through each task completion
- * record after consuming its notification, before the owner returns. State combines
- * finished/cancelled in one atomic transition so readers never see a partial stop.
+ * completion synchronization. Bounds, window and `state` use atomic access, as do submission
+ * counters and `best_index`. Each child slot has one writer and is immutable after publication
+ * through `best_index`. Helper completion is acquired through each task completion record after
+ * consuming its notification, before the owner returns. State combines finished/cancelled in one
+ * atomic transition so readers never see a partial stop.
  */
 typedef struct Node
 {
@@ -1140,7 +1140,6 @@ typedef struct Node
     atomic_int     best_index;
     atomic_int     alpha, beta;
     atomic_int     state;
-    atomic_int     repetition_seen;
 } Node;
 
 /* Sources enumerate positions only; lookup budgets and move acceptance are source-independent. */
@@ -1393,11 +1392,11 @@ static Interval parallel_tt_interval(const ParallelTtEntry *entry,
 /**
  * @brief Classifies a completed node's proven interval and attempts to cache its result.
  *
- * Skips cancelled results, disabled caching, history-filtered roots and nodes with repetition
- * leaves in their searched subtree. In root perspective, equal endpoints produce an exact score;
- * otherwise `upper <= alpha` produces an upper-bound entry using `value.upper`, and `lower >= beta`
- * produces a lower-bound entry using `value.lower`. An interval satisfying neither cutoff condition
- * is not stored. Exact classification takes precedence over cutoffs.
+ * Skips cancelled results, disabled caching and history-filtered roots. In root perspective, equal
+ * endpoints produce an exact score; otherwise `upper <= alpha` produces an upper-bound entry using
+ * `value.upper`, and `lower >= beta` produces a lower-bound entry using `value.lower`. An interval
+ * satisfying neither cutoff condition is not stored. Exact classification takes precedence over
+ * cutoffs.
  *
  * Parallel search inherits a window that can tighten during execution, so classification uses the
  * proven interval rather than a scalar score compared with an original window. The stored score is
@@ -1411,7 +1410,7 @@ static Interval parallel_tt_interval(const ParallelTtEntry *entry,
  *
  * The caller must finish its own work and wait for all helpers accessing this node before supplying
  * the final interval and selected move. This function does not wait for completion; its relaxed
- * atomic loads rely on that existing synchronization and the node being quiescent.
+ * window loads rely on that existing synchronization and the node being quiescent.
  *
  * @param search    Non-null search state containing the optional borrowed table.
  * @param node      Non-null, completed node whose helper tasks have finished accessing it.
@@ -1428,7 +1427,6 @@ static void parallel_tt_store_node(Search               *search,
                                    XqTranspositionStats *stats)
 {
     if (value.cancelled || search->options.transposition_table == NULL ||
-        atomic_load_explicit(&node->repetition_seen, memory_order_relaxed) ||
         (node->parent == NULL && search->filtered_cycles))
         return;
     XqSearchScoreKind kind;
@@ -2647,10 +2645,10 @@ static SearchRange split_node(Search           *search,
  * intervals; the root already used its ordering-only lookup during preparation; subsequent
  * iterations reuse the previous root ordering. Cached deeper results may change fixed-depth scores.
  * Exact cache cutoffs reconstruct a PV prefix from guarded snapshots; bound-only cutoffs return an
- * empty PV. Repetition leaves return before table access, PV extension or task splitting and
- * prevent both themselves and all their ancestors from storing results, even if the triggering
- * branch is later cancelled. The table remains position-only, so cache cutoffs may still skip
- * descendant repetitions that would otherwise be adjudicated or enter quiescence.
+ * empty PV. The table remains position-only: ancestor results can depend on the path, and cache
+ * cutoffs may skip descendant repetitions that would otherwise be adjudicated or enter quiescence.
+ * Repetition leaves return before table access, PV extension or task splitting and do not store
+ * their result.
  *
  * Continuing descendants apply stable capture ordering and collect hints from a bounded number of
  * similar positions without reordering the list. Similar-position sources currently enumerate
@@ -2738,7 +2736,6 @@ static Interval search_node(Search            *search,
     atomic_init(&node.best_index, -1);
     atomic_init(&node.alpha, -INFINITY_SCORE);
     atomic_init(&node.beta, INFINITY_SCORE);
-    atomic_init(&node.repetition_seen, 0);
 
     ++stats->nodes;
     if (stats->sampling != NULL)
@@ -2788,9 +2785,6 @@ static Interval search_node(Search            *search,
     if (!leaf)
     {
         PathRepetition repetition = parallel_path_repetition(&node);
-        if (repetition != PATH_REPETITION_NONE)
-            for (Node *ancestor = &node; ancestor != NULL; ancestor = ancestor->parent)
-                atomic_store_explicit(&ancestor->repetition_seen, 1, memory_order_relaxed);
         if (repetition == PATH_REPETITION_DRAW)
         {
             score = 0;
@@ -3097,13 +3091,13 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * during that cycle, returns an exact draw when the opponent also always checked, or an exact loss
  * for the current side otherwise. Only opposing perpetual check returns NONE and continues ordinary
  * search; neither side always checking requests quiescence. Repetition handling precedes table
- * lookup. Repetition leaves and their ancestors skip table writes. Position-only table cutoffs
- * remain enabled and may skip descendant repetitions. A nonzero time budget uses a monotonic
- * deadline across preparation and all iterations. Each physical thread checks at its first ordinary
- * entry and then every `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Preparation, pool-creation
- * and iteration boundaries also check the deadline; other search checkpoints only observe published
- * stop state. An unfinished iteration above `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the
- * first deadline check may finish before returning.
+ * lookup. Position-only table cutoffs remain enabled and may skip descendant repetitions or reuse
+ * path-dependent ancestor results. A nonzero time budget uses a monotonic deadline shared across
+ * preparation and all iterations. Each physical thread checks at its first ordinary entry and then
+ * every `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Preparation, pool-creation and iteration
+ * boundaries also check the deadline; other search checkpoints only observe published stop state.
+ * An unfinished iteration above `PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT` at the first deadline
+ * check may finish before returning.
  *
  * Only the adapter's `static_evaluate`, `user` and `history` are used; its `score_move` and serial
  * table are ignored. The parallel table remains in `options`. A null adapter or static evaluator
@@ -3137,8 +3131,8 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * monotonic elapsed time are returned in `stats`. Joins all created helpers and releases resources,
  * including after partial thread-creation failure. The input position is never modified, and no
  * helper remains running after the call. A filtered root is not cached; descendant ordinary-search
- * results remain cacheable only when their searched subtrees contain no repetition leaves. Fully
- * filtered roots return the original legal fallback with no score.
+ * results remain cacheable under the position-only policy. Fully filtered roots return the original
+ * legal fallback with no score.
  *
  * @param engine                        Optional adapter providing evaluation, user data and
  *                                      real-game history; keep borrowed state unchanged until

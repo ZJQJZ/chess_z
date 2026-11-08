@@ -60,7 +60,6 @@ static void node_init(Node *node, const XqPosition *position, Node *parent, int 
     atomic_init(&node->alpha, -INFINITY_SCORE);
     atomic_init(&node->beta, INFINITY_SCORE);
     atomic_init(&node->state, NODE_RUNNING);
-    atomic_init(&node->repetition_seen, 0);
 }
 
 static XqPosition sibling_position(const Fixture *fixture, int index)
