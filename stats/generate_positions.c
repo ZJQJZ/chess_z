@@ -16,7 +16,6 @@
 #define POSITION_COUNT 100u
 #define MAX_RANDOM_PLIES 100u
 #define MAX_GENERATION_ATTEMPTS 256u
-#define RANDOM_SEED UINT32_C(0x00C0FFEE)
 
 static const char *default_output_path = "stats/random_fen/random_positions.fen";
 
@@ -24,6 +23,27 @@ typedef struct RandomState
 {
     uint32_t state;
 } RandomState;
+
+/**
+ * 用当前时间生成种子，优先混合秒和纳秒，减少连续启动时种子相同的情况。
+ * xorshift 的状态不能为 0，否则后续生成的随机数会一直为 0。
+ */
+static uint32_t random_seed_from_time(void)
+{
+    struct timespec now;
+    uint32_t seed;
+
+    if (timespec_get(&now, TIME_UTC) == TIME_UTC)
+    {
+        uint64_t seconds = (uint64_t)now.tv_sec;
+
+        seed = (uint32_t)(seconds ^ (seconds >> 32) ^ (uint64_t)now.tv_nsec);
+    }
+    else
+        seed = (uint32_t)time(NULL);
+
+    return seed != 0u ? seed : UINT32_C(1);
+}
 
 /**
  * 伪随机数生成器，用于生成下一个 uint32_t 随机数
@@ -161,7 +181,8 @@ int main(int argc, char **argv)
     const char *output_path;
     char *temp_path;
     FILE *output;
-    RandomState random = {RANDOM_SEED};
+    uint32_t seed = random_seed_from_time();
+    RandomState random = {seed};
     uint64_t checksum = UINT64_C(14695981039346656037);
     unsigned generated = 0;
     unsigned retries = 0;
@@ -183,7 +204,7 @@ int main(int argc, char **argv)
     }
 
     printf("generate: output=%s positions=%u plies=0..%u seed=0x%08" PRIx32 "\n",
-           output_path, POSITION_COUNT, MAX_RANDOM_PLIES, RANDOM_SEED);
+           output_path, POSITION_COUNT, MAX_RANDOM_PLIES, seed);
 
     output = fopen(temp_path, "wb");
     if (output == NULL)
