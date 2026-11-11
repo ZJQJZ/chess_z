@@ -325,6 +325,30 @@ void xq_generate_pseudo_legal(const XqPosition *pos, XqMoveList *list)
 }
 
 /**
+ * 枚举与目标同行或同列的棋子，按右、左、上、下顺序设置方向位。
+ * 这里只检查位置，路径上的阻挡留给攻击检测处理。
+ */
+static unsigned line_attack_directions(XqBitboard pieces, int target_file, int target_rank)
+{
+    unsigned directions = 0u;
+
+    while (!xq_bb_is_empty(pieces))
+    {
+        XqSquare from = xq_bb_first_square(pieces);
+        int file = xq_square_file(from);
+        int rank = xq_square_rank(from);
+
+        xq_bb_clear(&pieces, from);
+        if (rank == target_rank && file != target_file)
+            directions |= 1u << (file > target_file ? 0 : 1);
+        else if (file == target_file && rank != target_rank)
+            directions |= 1u << (rank > target_rank ? 2 : 3);
+    }
+
+    return directions;
+}
+
+/**
  * 判断棋盘上的 sq 棋子是否受到 by_color 方的进攻。
  * sq 必须放有 by_color 的敌方棋子。
  */
@@ -337,9 +361,10 @@ bool xq_square_attacked(const XqPosition *pos, XqSquare sq, XqColor by_color)
     int target_file;
     int target_rank;
     int target_piece;
-    bool has_rook;
-    bool has_cannon;
-    bool has_king;
+    unsigned rook_dirs;
+    unsigned cannon_dirs;
+    unsigned king_dirs;
+    unsigned line_dirs;
     int i;
 
     if (pos == NULL || sq < 0 || sq >= XQ_SQUARES ||
@@ -352,16 +377,25 @@ bool xq_square_attacked(const XqPosition *pos, XqSquare sq, XqColor by_color)
 
     target_file = xq_square_file(sq);
     target_rank = xq_square_rank(sq);
-    has_rook = !xq_bb_is_empty(pos->pieces[by_color][XQ_ROOK]);
-    has_cannon = !xq_bb_is_empty(pos->pieces[by_color][XQ_CANNON]);
-    has_king = !xq_bb_is_empty(pos->pieces[by_color][XQ_KING]);
+    rook_dirs = line_attack_directions(pos->pieces[by_color][XQ_ROOK], target_file, target_rank);
+    cannon_dirs = line_attack_directions(pos->pieces[by_color][XQ_CANNON], target_file, target_rank);
+    king_dirs = line_attack_directions(pos->pieces[by_color][XQ_KING], target_file, target_rank);
+    line_dirs = rook_dirs | cannon_dirs | king_dirs;
 
-    /* 车、炮、将帅都沿直线攻击。每个方向的第一个棋子可能是车；
+    /* 只扫描存在同行或同列的敌方车、炮、将帅的方向。
+     * 每个方向的第一个棋子可能是车；
      * 隔过恰好一个棋子后的第一个棋子可能是炮。将帅还需分别处理
      * 九宫内的一步攻击以及仅针对对方将帅的照面攻击。 */
-    if (has_rook || has_cannon || has_king)
+    if (line_dirs != 0u)
         for (i = 0; i < 4; ++i)
         {
+            unsigned direction = 1u << i;
+            if ((line_dirs & direction) == 0u)
+                continue;
+
+            bool has_rook = (rook_dirs & direction) != 0u;
+            bool has_cannon = (cannon_dirs & direction) != 0u;
+            bool has_king = (king_dirs & direction) != 0u;
             int file = target_file + dirs[i][0];
             int rank = target_rank + dirs[i][1];
             bool screen_seen = false;
