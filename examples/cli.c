@@ -22,6 +22,35 @@
 
 static const char *search_detail_path = "build/search_detail.txt";
 
+typedef struct CliSearchOutput
+{
+    bool show_progress;
+    bool sample_search;
+    bool sample_timeline;
+    uint64_t timeline_byte_limit;
+    size_t statistics_byte_limit;
+    uint64_t sample_interval_ms;
+    const char *sample_output_dir;
+} CliSearchOutput;
+
+typedef struct CliSearchResult
+{
+    bool found;
+    XqMove best;
+    XqSearchStats stats;
+    XqParallelStatus status;
+} CliSearchResult;
+
+typedef struct CliBatchSummary
+{
+    size_t processed; /* Successful roots, including positions with no legal move. */
+    size_t no_moves;
+    uint64_t nodes;
+    uint64_t search_elapsed_ms;
+    bool elapsed_unavailable;
+    XqTranspositionStats cache;
+} CliBatchSummary;
+
 /**
  * 返回指定棋子颜色对应的英文名称。
  *
@@ -56,7 +85,7 @@ static const char *score_kind_name(XqSearchScoreKind kind)
  */
 static void print_usage(const char *program)
 {
-    printf("usage: %s [--fen FEN] [--engine red|black] [--depth N] [--time-ms MS] [--tt-file PATH] [--search-detail] [--progress]\n", program);
+    printf("usage: %s [--fen FEN | --fen-file PATH] [--engine red|black] [--depth N] [--time-ms MS] [--tt-file PATH] [--search-detail] [--progress]\n", program);
     printf("\n");
     printf("options:\n");
     printf("  --search builtin|parallel  search implementation (default builtin)\n");
@@ -67,6 +96,9 @@ static void print_usage(const char *program)
     printf("  interleaved: per-node thread limit is set by PARALLEL_INTERLEAVED_SPLIT_THREADS in src/parallel_search.c (includes caller)\n");
     printf("  parallel: iterative deepening (default max depth 3), in-memory cache, no time limit by default; no TT files\n");
     printf("  %-21s  %s\n", "-f, --fen FEN", "initialize the position from FEN");
+    printf("  %-21s  %s\n", "    --fen-file PATH", "search once per FEN line, then exit (no interaction)");
+    printf("  %-21s  %s\n", "", "batch: use each FEN's side to move; ignore --engine; reject --fen/--tt-file");
+    printf("  %-21s  %s\n", "", "batch: no time limit unless --time-ms is set; clear cache before each FEN");
     printf("  %-21s  %s\n", "-e, --engine COLOR", "choose the engine side: red or black");
     printf("  %-21s  %s\n", "    --depth N", "maximum search depth in plies (builtin default 10; parallel default 3)");
     printf("  %-21s  %s\n", "    --time-ms MS", "default thinking time per engine move (positive integer milliseconds)");
@@ -342,7 +374,8 @@ static void flush_search_detail(FILE **log)
     }
 }
 
-static FILE *open_search_detail(const XqPosition *pos, XqColor engine_color)
+static FILE *open_search_detail(const XqPosition *pos, XqColor engine_color,
+                                const char *fen_file)
 {
     FILE *log;
     char fen[128];
@@ -373,10 +406,17 @@ static FILE *open_search_detail(const XqPosition *pos, XqColor engine_color)
     local = now == (time_t)-1 ? NULL : localtime(&now);
     if (local != NULL && strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S %Z", local) == 0)
         strcpy(timestamp, "unavailable");
-    if (!xq_position_to_fen(pos, fen, sizeof(fen)))
-        strcpy(fen, "unavailable");
-    fprintf(log, "\n=== new game ===\ntimestamp: %s\ninitial_fen: %s\nengine_color: %s\n",
-            timestamp, fen, color_name(engine_color));
+    if (fen_file != NULL)
+        fprintf(log, "\n=== batch FEN search ===\ntimestamp: %s\ninput_file: %s\n"
+                     "engine_color: fen_side_to_move\ncache_policy: clear_per_fen\n",
+                timestamp, fen_file);
+    else
+    {
+        if (!xq_position_to_fen(pos, fen, sizeof(fen)))
+            strcpy(fen, "unavailable");
+        fprintf(log, "\n=== new game ===\ntimestamp: %s\ninitial_fen: %s\nengine_color: %s\n",
+                timestamp, fen, color_name(engine_color));
+    }
     flush_search_detail(&log);
     return log;
 }
@@ -517,6 +557,250 @@ static void write_parallel_detail(FILE **log, const XqPosition *pos,
     flush_search_detail(log);
 }
 
+/* Keep one thought's observers and diagnostics identical in interactive and batch modes. */
+static CliSearchResult search_once(const XqEngineAdapter *engine, XqPosition *pos,
+                                   const XqSearchLimits *limits, bool parallel,
+                                   XqParallelOptions *parallel_options,
+                                   const CliSearchOutput *output, FILE **search_log,
+                                   bool collect_stats)
+{
+    CliSearchResult search = {.status = XQ_PARALLEL_OK};
+    unsigned depth = parallel ? parallel_options->depth : limits->max_depth;
+    CliSearchProgress *progress = output->sample_search ?
+        cli_search_progress_start_sampling_with_limits(
+            depth, limits->time_limit_ms, output->show_progress,
+            parallel ? parallel_options->thread_count : 1,
+            output->sample_interval_ms, output->sample_output_dir, pos,
+            parallel ? "parallel" : "builtin", output->sample_timeline,
+            output->timeline_byte_limit, output->statistics_byte_limit) :
+        output->show_progress ? cli_search_progress_start(depth, limits->time_limit_ms) : NULL;
+    XqSearchProgressFn on_progress = progress != NULL ? cli_search_progress_update : NULL;
+    XqSearchSampler *sampler = cli_search_progress_sampler(progress);
+
+    if (parallel)
+    {
+        XqParallelResult result = {0};
+
+        parallel_options->time_limit_ms = limits->time_limit_ms;
+        search.status = xq_engine_parallel_search_with_observer(
+            engine, pos, parallel_options, &result, on_progress, progress, sampler);
+        search.found = search.status == XQ_PARALLEL_OK && result.move_available;
+        search.best = result.best_move;
+        search.stats = result.stats;
+        cli_search_progress_finish(progress,
+            search.status != XQ_PARALLEL_OK ? "search failed" :
+            !search.found ? "no move" : result.stats.winning_move_found ? "winning move found" :
+            result.stats.stopped ? "time limit / clock stop" : "finished", &result.stats);
+        if (*search_log != NULL)
+            write_parallel_detail(search_log, pos, parallel_options, search.status, &result);
+    }
+    else
+    {
+        search.found = xq_engine_find_best_move_with_sampling(
+            engine, pos, limits, &search.best,
+            collect_stats || *search_log != NULL || progress != NULL ? &search.stats : NULL,
+            on_progress, progress, sampler);
+        if (progress != NULL)
+            cli_search_progress_finish(progress,
+                !search.found ? "no move" : search.stats.winning_move_found ? "winning move found" :
+                search.stats.stopped ? "time limit / clock stop" : "finished", &search.stats);
+        if (*search_log != NULL)
+            write_search_detail(search_log, pos, limits, search.found, search.best, &search.stats);
+    }
+
+    return search;
+}
+
+static void print_batch_position(size_t line_number, XqColor side, const char *status,
+                                  const CliSearchResult *search)
+{
+    char move[8];
+
+    printf("batch position: line=%zu side=%s status=%s best_move=%s ",
+           line_number, color_name(side), status,
+           search->found ? xq_move_to_string(search->best, move, sizeof(move)) : "none");
+    if (search->stats.available)
+        printf("completed_depth=%u nodes=%" PRIu64 " ",
+               search->stats.completed_depth, search->stats.nodes);
+    else
+        printf("completed_depth=unavailable nodes=unavailable ");
+    if (search->stats.elapsed_available)
+        printf("elapsed_ms=%" PRIu64 "\n", search->stats.elapsed_ms);
+    else
+        printf("elapsed_ms=unavailable\n");
+}
+
+static void print_batch_summary(const CliBatchSummary *summary, unsigned failures,
+                                 clock_t start)
+{
+    clock_t end = clock();
+
+    printf("batch summary: processed=%zu no_move=%zu failures=%u total_nodes=%" PRIu64
+           " search_elapsed_ms=", summary->processed, summary->no_moves, failures, summary->nodes);
+    if (summary->elapsed_unavailable)
+        printf("unavailable");
+    else
+        printf("%" PRIu64, summary->search_elapsed_ms);
+    if (start == (clock_t)-1 || end == (clock_t)-1 || end < start)
+        printf(" cpu_seconds=unavailable\n");
+    else
+        printf(" cpu_seconds=%.3f\n", (double)(end - start) / (double)CLOCKS_PER_SEC);
+    printf("batch tt summary: probes=%" PRIu64 " hits=%" PRIu64 " cutoffs=%" PRIu64
+           " stores=%" PRIu64 " replacements=%" PRIu64 "\n",
+           summary->cache.probes, summary->cache.hits, summary->cache.cutoffs,
+           summary->cache.stores, summary->cache.replacements);
+}
+
+/* A file is a sequence of independent roots, never a game or a source of stdin commands. */
+static int run_fen_batch(const char *path, bool parallel, const XqSearchLimits *limits,
+                          XqParallelOptions parallel_options, const CliSearchOutput *output,
+                          bool search_detail)
+{
+    clock_t start = clock();
+    FILE *input = NULL;
+    FILE *search_log = NULL;
+    XqTranspositionTable *table = NULL;
+    XqEngineAdapter engine = {0};
+    CliBatchSummary summary = {0};
+    const char *failure = NULL;
+    size_t line_number = 0;
+    char line[4096];
+
+    parallel_options.transposition_table = NULL;
+    input = fopen(path, "rb");
+    if (input == NULL)
+    {
+        failure = "could not open input file";
+        goto cleanup;
+    }
+    if (parallel)
+    {
+        parallel_options.transposition_table = xq_parallel_transposition_table_create();
+        if (parallel_options.transposition_table == NULL)
+            fprintf(stderr, "warning: parallel transposition table allocation failed; continuing without cache\n");
+    }
+    else
+    {
+        table = xq_transposition_table_create();
+        if (table == NULL)
+            fprintf(stderr, "warning: transposition table allocation failed; continuing without cache\n");
+    }
+    engine.transposition_table = table;
+    engine.history = NULL;
+    if (search_detail)
+        search_log = open_search_detail(NULL, XQ_COLOR_NB, path);
+    printf("batch: input=%s search=%s depth=%u time_limit_ms=%" PRIu64
+           " cache_policy=clear_per_fen engine_side=fen\n", path,
+           parallel ? "parallel" : "builtin", parallel ? parallel_options.depth : limits->max_depth,
+           limits->time_limit_ms);
+    if (parallel)
+        printf("batch parallel: threads=%u split_strategy=%s split_percent=%u%s\n",
+               parallel_options.thread_count, split_strategy_name(parallel_options.split_strategy),
+               parallel_options.split_percent,
+               parallel_options.split_strategy == XQ_PARALLEL_SPLIT_INTERLEAVED ? " (ignored)" : "");
+
+    while (fgets(line, sizeof(line), input) != NULL)
+    {
+        XqPosition pos;
+        XqMoveList legal;
+        CliSearchResult search;
+        char *text = line;
+        char *end;
+
+        ++line_number;
+        if (ferror(input))
+        {
+            failure = "failed while reading input file";
+            break;
+        }
+        if (strchr(line, '\n') == NULL && strlen(line) == sizeof(line) - 1u)
+        {
+            int ch = fgetc(input);
+            if (ch != '\n' && ch != EOF)
+            {
+                failure = "line is too long (maximum 4095 bytes)";
+                break;
+            }
+            if (ferror(input))
+            {
+                failure = "failed while reading input file";
+                break;
+            }
+        }
+        while (isspace((unsigned char)*text))
+            ++text;
+        end = text + strlen(text);
+        while (end > text && isspace((unsigned char)end[-1]))
+            --end;
+        *end = '\0';
+        if (*text == '\0')
+            continue;
+        if (!xq_position_from_fen(&pos, text))
+        {
+            failure = "invalid FEN";
+            break;
+        }
+
+        /* Clearing occurs outside the search/observer lifetime and its elapsed time. */
+        if (parallel)
+            xq_parallel_transposition_table_clear(parallel_options.transposition_table);
+        else
+            xq_transposition_table_clear(table);
+        xq_generate_legal(&pos, &legal);
+        if (search_log != NULL)
+        {
+            fprintf(search_log, "\n--- batch position ---\ninput_file: %s\nline_number: %zu\n"
+                                "side_to_move: %s\n", path, line_number, color_name(pos.side_to_move));
+            flush_search_detail(&search_log);
+        }
+        search = search_once(&engine, &pos, limits, parallel, &parallel_options,
+                             output, &search_log, true);
+        summary.nodes += search.stats.nodes;
+        if (search.stats.elapsed_available)
+            summary.search_elapsed_ms += search.stats.elapsed_ms;
+        else
+            summary.elapsed_unavailable = true;
+        summary.cache.probes += search.stats.cache.probes;
+        summary.cache.hits += search.stats.cache.hits;
+        summary.cache.cutoffs += search.stats.cache.cutoffs;
+        summary.cache.stores += search.stats.cache.stores;
+        summary.cache.replacements += search.stats.cache.replacements;
+
+        if (search.status != XQ_PARALLEL_OK)
+            failure = xq_parallel_status_text(search.status);
+        else if (!search.found && legal.count > 0)
+            failure = "engine failed to find a move";
+        print_batch_position(line_number, pos.side_to_move,
+                             failure != NULL ? "error" : search.found ? "ok" : "no_move", &search);
+        if (failure != NULL)
+            break;
+        ++summary.processed;
+        if (!search.found)
+            ++summary.no_moves;
+    }
+    if (failure == NULL && ferror(input))
+        failure = "failed while reading input file";
+
+cleanup:
+    if (input != NULL && fclose(input) != 0 && failure == NULL)
+        failure = "failed to close input file";
+    if (failure == NULL && summary.processed == 0)
+        failure = "input file contains no positions";
+    if (failure != NULL)
+    {
+        if (line_number == 0)
+            fprintf(stderr, "error: %s: %s\n", path, failure);
+        else
+            fprintf(stderr, "error: %s:%zu: %s\n", path, line_number, failure);
+    }
+    if (search_log != NULL && fclose(search_log) == EOF)
+        fprintf(stderr, "warning: cannot close %s\n", search_detail_path);
+    xq_transposition_table_destroy(table);
+    xq_parallel_transposition_table_destroy(parallel_options.transposition_table);
+    print_batch_summary(&summary, failure != NULL ? 1u : 0u, start);
+    return failure != NULL ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
 int main(int argc, char **argv)
 {
     XqPosition pos;
@@ -531,18 +815,17 @@ int main(int argc, char **argv)
     bool parallel_options_set = false;
     XqParallelOptions parallel_options = xq_parallel_options_default();
     bool search_detail = false;
-    bool show_progress = false;
-    bool sample_search = false;
-    bool sample_timeline = false, timeline_limit_set = false;
-    uint64_t timeline_byte_limit = 0;
-    size_t statistics_byte_limit = 0;
+    CliSearchOutput search_output = {
+        .sample_interval_ms = 20,
+        .sample_output_dir = "build/search_samples",
+    };
+    bool timeline_limit_set = false;
     bool sample_options_set = false;
-    uint64_t sample_interval_ms = 20;
-    const char *sample_output_dir = "build/search_samples";
     bool board_flipped = false;
     FILE *search_log = NULL;
     int exit_status = EXIT_SUCCESS;
     const char *fen = NULL;
+    const char *fen_file = NULL;
     const char *tt_file = NULL;
     XqColor engine_color = XQ_BLACK;
     char input[4096];
@@ -601,17 +884,17 @@ int main(int argc, char **argv)
         }
         if (strcmp(argv[i], "--progress") == 0)
         {
-            show_progress = true;
+            search_output.show_progress = true;
             continue;
         }
         if (strcmp(argv[i], "--sample-search") == 0)
         {
-            sample_search = true;
+            search_output.sample_search = true;
             continue;
         }
         if (strcmp(argv[i], "--sample-timeline") == 0)
         {
-            sample_timeline = sample_search = true;
+            search_output.sample_timeline = search_output.sample_search = true;
             continue;
         }
         if (strcmp(argv[i], "--sample-timeline-max-mib") == 0)
@@ -622,7 +905,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "error: --sample-timeline-max-mib requires nonnegative integer MiB (0 = unlimited)\n");
                 return EXIT_FAILURE;
             }
-            timeline_byte_limit = mib * 1024u * 1024u;
+            search_output.timeline_byte_limit = mib * 1024u * 1024u;
             timeline_limit_set = true;
             continue;
         }
@@ -634,13 +917,13 @@ int main(int argc, char **argv)
                 fprintf(stderr, "error: --sample-statistics-max-mib requires nonnegative integer MiB (0 = unlimited)\n");
                 return EXIT_FAILURE;
             }
-            statistics_byte_limit = (size_t)(mib * 1024u * 1024u);
+            search_output.statistics_byte_limit = (size_t)(mib * 1024u * 1024u);
             sample_options_set = true;
             continue;
         }
         if (strcmp(argv[i], "--sample-interval-ms") == 0)
         {
-            if (++i >= argc || !parse_time_ms(argv[i], &sample_interval_ms))
+            if (++i >= argc || !parse_time_ms(argv[i], &search_output.sample_interval_ms))
             {
                 fprintf(stderr, "error: --sample-interval-ms requires positive integer milliseconds\n");
                 return EXIT_FAILURE;
@@ -655,7 +938,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "error: --sample-output-dir requires a nonempty directory\n");
                 return EXIT_FAILURE;
             }
-            sample_output_dir = argv[i];
+            search_output.sample_output_dir = argv[i];
             sample_options_set = true;
             continue;
         }
@@ -708,6 +991,16 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        if (strcmp(argv[i], "--fen-file") == 0)
+        {
+            if (++i >= argc || argv[i][0] == '\0')
+            {
+                fprintf(stderr, "error: --fen-file requires a nonempty file path\n");
+                return EXIT_FAILURE;
+            }
+            fen_file = argv[i];
+            continue;
+        }
         if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--fen") == 0)
         {
             if (++i >= argc)
@@ -740,12 +1033,17 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    if (timeline_limit_set && !sample_timeline)
+    if (fen_file != NULL && (fen != NULL || tt_file != NULL))
+    {
+        fprintf(stderr, "error: --fen-file cannot be combined with --fen or --tt-file\n");
+        return EXIT_FAILURE;
+    }
+    if (timeline_limit_set && !search_output.sample_timeline)
     {
         fprintf(stderr, "error: --sample-timeline-max-mib requires --sample-timeline\n");
         return EXIT_FAILURE;
     }
-    if (sample_options_set && !sample_search)
+    if (sample_options_set && !search_output.sample_search)
     {
         fprintf(stderr, "error: sampling options require --sample-search\n");
         return EXIT_FAILURE;
@@ -762,12 +1060,18 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 #endif
+    if (fen_file != NULL && !explicit_time)
+        default_limits.time_limit_ms = 0;
     if (parallel)
     {
         if (explicit_depth) parallel_options.depth = default_limits.max_depth;
-        if (!explicit_time) default_limits.time_limit_ms = parallel_options.time_limit_ms;
+        if (!explicit_time && fen_file == NULL)
+            default_limits.time_limit_ms = parallel_options.time_limit_ms;
         parallel_options.time_limit_ms = default_limits.time_limit_ms;
     }
+    if (fen_file != NULL)
+        return run_fen_batch(fen_file, parallel, &default_limits, parallel_options,
+                              &search_output, search_detail);
     limits = default_limits;
     if (fen != NULL)
     {
@@ -817,7 +1121,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "warning: transposition table allocation failed; continuing without cache\n");
 
     if (search_detail)
-        search_log = open_search_detail(&pos, engine_color);
+        search_log = open_search_detail(&pos, engine_color, NULL);
     if (parallel)
     {
         printf("Search mode: parallel, iterative deepening to max depth %u, threads %u, split strategy %s, split %u%%%s; ",
@@ -856,64 +1160,25 @@ int main(int argc, char **argv)
 
         if (legal.count > 0 && pos.side_to_move == engine_color)
         {
-            XqMove best = {0};
-            XqSearchStats stats;
-            bool found;
+            CliSearchResult search = search_once(&engine, &pos, &limits, parallel,
+                                                  &parallel_options, &search_output,
+                                                  &search_log, false);
             char text[8];
-            CliSearchProgress *progress = sample_search ?
-                cli_search_progress_start_sampling_with_limits(
-                    parallel ? parallel_options.depth : limits.max_depth, limits.time_limit_ms,
-                    show_progress, parallel ? parallel_options.thread_count : 1,
-                    sample_interval_ms, sample_output_dir, &pos, parallel ? "parallel" : "builtin",
-                    sample_timeline, timeline_byte_limit, statistics_byte_limit) :
-                show_progress ?
-                cli_search_progress_start(parallel ? parallel_options.depth : limits.max_depth,
-                                           limits.time_limit_ms) : NULL;
-            XqSearchProgressFn on_progress = progress != NULL ? cli_search_progress_update : NULL;
-            XqSearchSampler *sampler = cli_search_progress_sampler(progress);
-            if (parallel)
+
+            if (search.status != XQ_PARALLEL_OK)
             {
-                XqParallelResult result;
-                XqParallelStatus status;
-                parallel_options.time_limit_ms = limits.time_limit_ms;
-                status = xq_engine_parallel_search_with_observer(
-                    &engine, &pos, &parallel_options, &result, on_progress, progress, sampler);
-                found = status == XQ_PARALLEL_OK && result.move_available;
-                best = result.best_move;
-                cli_search_progress_finish(progress,
-                    status != XQ_PARALLEL_OK ? "search failed" :
-                    !found ? "no move" : result.stats.winning_move_found ? "winning move found" :
-                    result.stats.stopped ? "time limit / clock stop" : "finished", &result.stats);
-                if (status != XQ_PARALLEL_OK)
-                {
-                    fprintf(stderr, "error: %s\n", xq_parallel_status_text(status));
-                    exit_status = EXIT_FAILURE;
-                }
-                if (search_log != NULL)
-                    write_parallel_detail(&search_log, &pos, &parallel_options, status, &result);
+                fprintf(stderr, "error: %s\n", xq_parallel_status_text(search.status));
+                exit_status = EXIT_FAILURE;
             }
-            else
-            {
-                found = xq_engine_find_best_move_with_sampling(
-                    &engine, &pos, &limits, &best,
-                    search_log != NULL || progress != NULL ? &stats : NULL, on_progress, progress,
-                    sampler);
-                if (progress != NULL)
-                    cli_search_progress_finish(progress,
-                        !found ? "no move" : stats.winning_move_found ? "winning move found" :
-                        stats.stopped ? "time limit / clock stop" : "finished", &stats);
-                if (search_log != NULL)
-                    write_search_detail(&search_log, &pos, &limits, found, best, &stats);
-            }
-            if (!found)
+            if (!search.found)
             {
                 printf("engine failed to move\n");
                 break;
             }
             printf("%s engine plays: %s\n", color_name(engine_color),
-                   xq_move_to_string(best, text, sizeof(text)));
-            xq_position_make_move(&pos, best);
-            if (!xq_history_push(&history, best, &pos))
+                   xq_move_to_string(search.best, text, sizeof(text)));
+            xq_position_make_move(&pos, search.best);
+            if (!xq_history_push(&history, search.best, &pos))
             {
                 fprintf(stderr, "error: history allocation failed; stopping game\n");
                 exit_status = EXIT_FAILURE;

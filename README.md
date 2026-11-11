@@ -751,6 +751,37 @@ quit   退出
 生成器使用固定随机种子，从初始局面随机行走 `0..100` 步，共输出 100 个局面，每行一个 FEN。
 搜索程序顺序读取一次文件，以最大深度 6、不限时的配置为每个局面搜索一步，适合作为性能分析的非交互式入口。
 
+CLI 也支持用 `--fen-file PATH` 批量搜索文件中的局面，可选择内置或并行搜索：
+
+```sh
+./build/xiangqi_cli --fen-file build/profile_positions.fen --depth 6
+./build/xiangqi_cli --fen-file build/profile_positions.fen --search parallel --depth 6 --threads 4
+```
+
+每个非空白行包含一个 FEN，程序按该 FEN 的行棋方思考一次，输出结果后读取下一行；不落子、不进入交互，文件处理完即退出。
+`--engine` 在此模式下不决定思考方，但其参数仍须是合法颜色。
+`--fen-file` 不能与 `--fen` 或 `--tt-file` 同时使用。每个 FEN 独立处理，搜索前清空相应置换表，行间不共享搜索历史。
+
+批量模式默认不限时，内置搜索默认最大深度为 10，并行搜索默认最大深度为 3；可用 `--depth` 修改。
+显式指定 `--time-ms` 时，该预算对每个 FEN 分别生效，接近完成的迭代仍可能超过预算后才结束。
+`--progress`、采样选项和 `--search-detail` 均可继续使用，例如：
+
+```sh
+./build/xiangqi_cli --fen-file build/profile_positions.fen --depth 8 --time-ms 2000 --progress
+./build/xiangqi_cli --fen-file build/profile_positions.fen --search parallel --threads 4 --sample-search --search-detail
+```
+
+程序逐行输出搜索结果，并在结束时打印批量汇总。无合法着法的终局记录为 `no_move`，继续处理后续局面；
+无效 FEN、过长行或输入文件打开、读取、关闭错误会立即报错并以非零状态退出。空白行会被跳过，支持 CRLF 行尾和末行没有换行符的文件；
+空文件或仅含空白行的文件视为错误。
+
+逐局面结果包含文件行号、行棋方、状态、最佳走法、完成深度、节点数和搜索耗时。
+汇总的 `processed` 包含成功搜索及 `no_move` 局面，`failures` 表示是否因错误提前终止；
+节点数、累计搜索耗时和置换表统计累加每次搜索返回的数据，也包含失败搜索已报告的工作量。计时不可用时显示 `unavailable`。
+
+汇总中的 CPU 时间覆盖整次批处理，包括置换表分配与清空、文件读取、输出和诊断；
+累计搜索耗时只累加搜索接口报告的 elapsed，不包含搜索外的清表等工作。启用进度、采样或详细日志会增加批处理开销，比较性能时应保持这些选项一致。
+
 ## AI 接入
 
 外部 AI 可以直接复用规则层：
