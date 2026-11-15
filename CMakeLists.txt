@@ -16,6 +16,8 @@ set(XIANGQI_SOURCES
     src/jieqi/position_jq.c
     src/jieqi/movegen_jq.c
     src/jieqi/engine_jq.c
+    src/jieqi/history_jq.c
+    src/jieqi/parallel_search_jq.c
 )
 
 add_library(xiangqi ${XIANGQI_SOURCES})
