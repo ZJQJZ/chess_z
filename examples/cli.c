@@ -1602,7 +1602,7 @@ static int run_jieqi(const char *fen, XqColor engine_color, XqJqParallelOptions 
     else
         printf("default time limit %" PRIu64 " ms; ", default_time_limit_ms);
     printf("in-memory cache %s.\n", options.transposition_table != NULL ? "enabled" : "disabled");
-    printf("Use coordinates a-i and ranks 0-9. A trailing * marks a dark piece on the board.\n");
+    printf("Use coordinates a-i and ranks 0-9. Dark pieces are shown as * until revealed.\n");
     printf("Last move: cyan background = from, yellow background = to.\n");
     print_help_jq(reveal_mode);
 

@@ -56,7 +56,8 @@ gcc -pthread -std=c11 -O2 -Wall -Wextra -Wpedantic -I include \
 ./build/xiangqi_cli --game jieqi --reveal manual --depth 3 --threads 2 --time-ms 2000 --progress
 ```
 
-未指定 FEN 时沿用普通象棋布局，除将帅外全部为暗子。暗子先按该位置原棋子的类型
+未指定 FEN 时沿用普通象棋布局，除将帅外全部为暗子。棋盘上的未揭暗子只显示 `*`，
+揭示后显示对应棋子名称。暗子先按该位置原棋子的类型
 移动、吃子，落地后揭示一次，此后按揭示后的类型行棋，新身份立即生效，也可以立即形成将军。
 士可以在全盘斜走一格；象可以在全盘斜走两格，仍受象眼限制。
 

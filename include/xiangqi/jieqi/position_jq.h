@@ -105,6 +105,7 @@ bool xq_jq_hidden_init(XqJqHiddenState *hidden, const XqJqPosition *pos, uint64_
 bool xq_jq_hidden_get_type(const XqJqHiddenState *hidden, XqSquare original_square,
                           XqPieceType *type);
 
+/* Unrevealed pieces are displayed as '*' without their initial piece names. */
 void xq_jq_position_print(const XqJqPosition *pos);
 void xq_jq_position_print_oriented(const XqJqPosition *pos, bool flipped);
 void xq_jq_position_print_with_last_move(const XqJqPosition *pos, bool flipped,

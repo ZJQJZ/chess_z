@@ -860,22 +860,22 @@ void xq_jq_position_print_with_last_move(const XqJqPosition *pos, bool flipped, 
             int file = flipped ? XQ_FILES - 1 - column : column;
             XqSquare sq = xq_square_make(file, rank);
             int piece = pos->board[sq];
-            const char *text = xq_jq_piece_to_text(piece);
-            const char *marker = xq_jq_position_is_dark(pos, sq) ? "*" : " ";
+            bool dark = xq_jq_position_is_dark(pos, sq);
+            const char *text = dark ? "*" : xq_jq_piece_to_text(piece);
+            const char *padding = dark || piece == XQ_EMPTY_PIECE ? " " : "";
             if (last_move != NULL && (sq == last_move->from || sq == last_move->to))
             {
                 int foreground = piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == XQ_RED ? 31 : 30;
                 int background = sq == last_move->from ? 106 : 103;
-                /* All cells reserve one column for the public dark marker. */
-                printf("\x1b[%d;%dm%s%s%s\x1b[0m ", foreground, background, text,
-                       piece == XQ_EMPTY_PIECE ? " " : "", marker);
+                /* Match ordinary chess: highlight two columns, then leave one separator. */
+                printf("\x1b[%d;%dm%s%s\x1b[0m ", foreground, background, text, padding);
             }
             else if (piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == XQ_RED)
-                printf("\x1b[31m%s%s\x1b[0m ", text, marker);
+                printf("\x1b[31m%s%s\x1b[0m ", text, padding);
             else if (piece != XQ_EMPTY_PIECE)
-                printf("%s%s ", text, marker);
+                printf("%s%s ", text, padding);
             else
-                printf("%s   ", text);
+                printf("%s  ", text);
         }
         printf("\n");
     }
@@ -883,7 +883,7 @@ void xq_jq_position_print_with_last_move(const XqJqPosition *pos, bool flipped, 
     for (column = 0; column < XQ_FILES; ++column)
     {
         int file = flipped ? XQ_FILES - 1 - column : column;
-        printf("%c%s", 'a' + file, column == XQ_FILES - 1 ? "\n" : "   ");
+        printf("%c%s", 'a' + file, column == XQ_FILES - 1 ? "\n" : "  ");
     }
     printf("side: %s\n", pos->side_to_move == XQ_RED ? "red" : "black");
 }
