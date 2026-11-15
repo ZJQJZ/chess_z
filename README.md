@@ -36,9 +36,88 @@ cmake --build build
 编译交互式人机示例：
 
 ```sh
-gcc -pthread -std=c11 -O2 -Wall -Wextra -Wpedantic -I include src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c src/search_sampling.c examples/cli.c examples/search_progress.c examples/search_sample_report.c -o build/xiangqi_cli
+gcc -pthread -std=c11 -O2 -Wall -Wextra -Wpedantic -I include \
+  src/position.c src/movegen.c src/history.c src/engine.c src/parallel_search.c src/search_sampling.c \
+  src/jieqi/position_jq.c src/jieqi/movegen_jq.c src/jieqi/engine_jq.c \
+  src/jieqi/history_jq.c src/jieqi/parallel_search_jq.c \
+  examples/cli.c examples/search_progress.c examples/search_sample_report.c -o build/xiangqi_cli
 ./build/xiangqi_cli
 ```
+
+## 揭棋模式（macOS / Linux）
+
+同一个 CLI 用 `--game xiangqi|jieqi` 选择玩法，默认仍为 `xiangqi`。
+揭棋自动使用并行搜索，默认最大深度 **3**、总线程数 **2**、不限时；
+可用 `--depth`、`--threads`、`--time-ms`、`--split-strategy` 和 `--split-percent` 调整。
+`--progress` 和 `--search-detail` 同样可用，例如玩家执红、电脑执黑：
+
+```sh
+./build/xiangqi_cli --game jieqi --engine black
+./build/xiangqi_cli --game jieqi --reveal manual --depth 3 --threads 2 --time-ms 2000 --progress
+```
+
+未指定 FEN 时沿用普通象棋布局，除将帅外全部为暗子。暗子先按该位置原棋子的类型
+移动、吃子，落地后揭示一次，此后按揭示后的类型行棋，新身份立即生效，也可以立即形成将军。
+士可以在全盘斜走一格；象可以在全盘斜走两格，仍受象眼限制。
+
+双方初始身份库公开，揭示时按相应类型扣减。吃掉尚未揭示的暗子不会公开其真实类型，
+也不会从公共库扣除某个具体类型。因此公共未知身份库也包含已经被吃、但从未揭示的棋子，
+库内总数可能大于棋盘上仍存活的暗子数。输入 `pool` 可以查看当前公共未知身份库。
+
+### 手动输入揭示身份
+
+`--reveal manual|random` 只用于揭棋，默认 `manual`。手动模式中，玩家移动暗子时
+在坐标后加 `=类型`；明子走法不加后缀。从默认开局开始，以下是三种独立的输入示例：
+
+```text
+a0a1=R
+a0a1=R 2000
+a0a1=R a9a8=N
+```
+
+第一种走出红方暗车并将其揭示为车；第二种额外设置紧接着的一次电脑搜索预算为 2000 毫秒；
+第三种直接指定黑方暗车的应手及其揭示身份为马，跳过该次电脑搜索。
+两步会依次在各自的局面中验证，格式、身份或任一步走法非法时，整行不执行。
+
+类型使用 FEN 字母：`R` 车、`N`（或 `H`）马、`C` 炮、`A` 士、`B` 象、`P` 兵，
+不区分大小写。不能揭示为将帅，指定类型必须在当前对应身份库中可用。
+电脑自动搜索选中暗子走法时，会先公布坐标，再提示输入一个类型字母；收到有效身份后才落子。
+暗子被吃时不需要输入它的类型。
+
+### 本地随机揭示身份
+
+```sh
+./build/xiangqi_cli --game jieqi --reveal random --engine black --time-ms 2000 --progress
+```
+
+随机模式在开局时按各方身份库独立预分配真实身份，暗子移动后再公开。
+输入四字符坐标即可，不添加 `=类型`。本地真实身份及其随机状态不会传给搜索；
+搜索只依据公共局面和身份库，使用独立的随机状态评估揭示结果。
+搜索默认种子为 0，CLI 不提供修改搜索种子的参数。
+
+`undo`（或 `u`）会同步恢复棋盘、历史和身份库。手动模式悔棋后可以重新输入不同的合法身份；
+随机模式中同一枚暗子再次揭示仍是原来的身份。其他走子、指定电脑应手、临时时间限制和翻转操作
+沿用现有 CLI 的方式。
+
+### 自定义起点与批量搜索
+
+揭棋 FEN 沿用普通 FEN，在暗子字母后紧跟 `*`，如 `R*` 表示初始按车行棋的红方暗子；
+不带星号的棋子是明子，将帅不能带星号。每方所有带星号棋子的初始类型组成该方初始身份库。
+下面是完整的默认揭棋起点，以及从该起点交互对局和批量搜索的示例：
+
+```sh
+jieqi_start_fen='r*n*b*a*ka*b*n*r*/9/1c*5c*1/p*1p*1p*1p*1p*/9/9/P*1P*1P*1P*1P*/1C*5C*1/9/R*N*B*A*KA*B*N*R* r - - 0 1'
+./build/xiangqi_cli --game jieqi --reveal manual --fen "$jieqi_start_fen" --time-ms 2000
+printf '%s\n' "$jieqi_start_fen" > build/jieqi_positions.fen
+./build/xiangqi_cli --game jieqi --fen-file build/jieqi_positions.fen --depth 3 --threads 2 --time-ms 2000 --progress
+```
+
+每行 FEN 都定义一个新起点。批量模式按各行行棋方搜索一次，不落子、不询问揭示类型，
+所以 `manual` 和 `random` 都可用于批量搜索。每行独立处理，行间清空搜索缓存。
+对局中的 `fen` 命令只输出可见棋面；其中没有中盘剩余身份库，不能用它完整恢复中盘对局。
+
+揭棋拒绝显式的 `--search builtin`，也不支持 `--tt-file`、`save-tt` 或全部 `--sample-*`
+路径／时间栈采样参数；可省略 `--search`，或显式使用 `--search parallel`。
 
 ## 实时搜索进度
 
