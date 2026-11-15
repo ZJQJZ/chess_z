@@ -90,6 +90,7 @@ static void real_searches(const char *directory)
             display = start(directory, names[strategy][i], threads[i], &position);
             XqParallelOptions options = xq_parallel_options_default();
             options.depth = 6;
+            options.time_limit_ms = 0;
             options.thread_count = threads[i];
             options.split_strategy = (XqParallelSplitStrategy)strategy;
             XqParallelResult result;

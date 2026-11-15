@@ -81,6 +81,7 @@ static void fixture_init(Fixture *fixture)
 {
     memset(fixture, 0, sizeof(*fixture));
     fixture->search.options = xq_parallel_options_default();
+    fixture->search.options.time_limit_ms = 0;
     fixture->search.options.thread_count = 1;
     fixture->search.options.transposition_table = xq_parallel_transposition_table_create();
     CHECK(fixture->search.options.transposition_table != NULL);
@@ -876,6 +877,7 @@ static void searches_and_sampling(void)
         xq_search_sampler_request(check.sampler);
         XqParallelOptions options = xq_parallel_options_default();
         options.depth = 6;
+        options.time_limit_ms = 0;
         options.thread_count = threads;
         options.split_strategy = mode == 2 ? XQ_PARALLEL_SPLIT_INTERLEAVED :
                                              XQ_PARALLEL_SPLIT_CONTIGUOUS;

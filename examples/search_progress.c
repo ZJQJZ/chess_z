@@ -149,11 +149,15 @@ static void unlock_display(CliSearchProgress *display)
 static void format_progress(const CliSearchProgress *display, XqSearchProgress snapshot,
                             unsigned width, char *text, size_t capacity)
 {
-    char elapsed[48], timing[80], bar[21];
+    char depth[32], elapsed[48], timing[80], bar[21];
     uint64_t now;
     unsigned percent = snapshot.total_moves == 0 ? 0 :
         (unsigned)(100 * (uint64_t)snapshot.completed_moves / snapshot.total_moves);
     unsigned i;
+    if (display->max_depth == UINT_MAX)
+        snprintf(depth, sizeof(depth), "%u", snapshot.depth);
+    else
+        snprintf(depth, sizeof(depth), "%u/%u", snapshot.depth, display->max_depth);
     if (display->clock_available && monotonic_ms(&now) && now >= display->started_ms)
         snprintf(elapsed, sizeof(elapsed), "%.1fs", (double)(now - display->started_ms) / 1000);
     else
@@ -165,8 +169,8 @@ static void format_progress(const CliSearchProgress *display, XqSearchProgress s
     for (i = 0; i < 20; ++i)
         bar[i] = i < percent / 5 ? '#' : '-';
     bar[20] = '\0';
-    snprintf(text, capacity, "search depth %u/%u  [%s] %u%%  roots %u/%u  elapsed %s",
-             snapshot.depth, display->max_depth, bar, percent,
+    snprintf(text, capacity, "search depth %s  [%s] %u%%  roots %u/%u  elapsed %s",
+             depth, bar, percent,
              snapshot.completed_moves, snapshot.total_moves, timing);
     if (strlen(text) > width)
     {
@@ -174,8 +178,8 @@ static void format_progress(const CliSearchProgress *display, XqSearchProgress s
         char metadata[192];
         size_t metadata_width;
         unsigned bars;
-        snprintf(metadata, sizeof(metadata), "depth %u/%u %u%% roots %u/%u elapsed %s",
-                 snapshot.depth, display->max_depth, percent,
+        snprintf(metadata, sizeof(metadata), "depth %s %u%% roots %u/%u elapsed %s",
+                 depth, percent,
                  snapshot.completed_moves, snapshot.total_moves, timing);
         metadata_width = strlen(metadata);
         bars = width > metadata_width + 3 ? (unsigned)(width - metadata_width - 3) : 0;

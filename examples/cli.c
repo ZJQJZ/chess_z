@@ -97,24 +97,24 @@ static void print_usage(const char *program)
     printf("options:\n");
     printf("  --game xiangqi|jieqi       game rules (default xiangqi)\n");
     printf("  --reveal manual|random     jieqi reveal mode (default manual; jieqi only)\n");
-    printf("  --search builtin|parallel  search implementation (default builtin)\n");
+    printf("  --search builtin|parallel  search implementation (default parallel)\n");
     printf("  jieqi: parallel search by default; builtin, TT files and --sample-* are unsupported\n");
     printf("  jieqi manual: append the reveal type to dark moves, e.g. a0a1=R; engine dark moves prompt for a type\n");
     printf("  --threads N                parallel threads including caller (default 2)\n");
-    printf("  --split-strategy contiguous|interleaved  parallel split strategy (default contiguous)\n");
+    printf("  --split-strategy contiguous|interleaved  parallel split strategy (default interleaved)\n");
     printf("  --split-percent P          contiguous batch percentage, 0..100 (default 50; 0 disables splitting)\n");
     printf("  interleaved: sorted moves are shared round-robin among caller and available helpers; split-percent is ignored\n");
     printf("  interleaved: per-node thread limit is set by PARALLEL_INTERLEAVED_SPLIT_THREADS in src/parallel_search.c (includes caller)\n");
-    printf("  parallel: iterative deepening (default max depth 3), in-memory cache, no time limit by default; no TT files\n");
+    printf("  parallel: iterative deepening (default unlimited depth), in-memory cache, 5000 ms time limit by default; no TT files\n");
     printf("  %-21s  %s\n", "-f, --fen FEN", "initialize the position from FEN");
     printf("  %-21s  %s\n", "    --fen-file PATH", "search once per FEN line, then exit (no interaction)");
     printf("  %-21s  %s\n", "", "batch: use each FEN's side to move; ignore --engine; reject --fen/--tt-file");
-    printf("  %-21s  %s\n", "", "batch: no time limit unless --time-ms is set; clear cache before each FEN");
+    printf("  %-21s  %s\n", "", "batch: builtin has no default time limit; parallel defaults to 5000 ms; clear cache before each FEN");
     printf("  %-21s  %s\n", "-e, --engine COLOR", "choose the engine side: red or black");
-    printf("  %-21s  %s\n", "    --depth N", "maximum search depth in plies (builtin default 10; parallel default 3)");
+    printf("  %-21s  %s\n", "    --depth N", "maximum search depth in plies (builtin default 10; parallel default unlimited)");
     printf("  %-21s  %s\n", "    --time-ms MS", "default thinking time per engine move (positive integer milliseconds)");
     printf("  %-21s  %s\n", "", "a nearly complete iteration may finish after this budget");
-    printf("  %-21s  %s\n", "    --tt-file PATH", "load a saved transposition table before the first search");
+    printf("  %-21s  %s\n", "    --tt-file PATH", "load a saved transposition table before the first search (requires --search builtin)");
     printf("  %-21s  %s\n", "    --progress", "show live per-depth root-move progress on stderr");
     printf("  %-21s  %s\n", "    --sample-search", "sample logical move paths (independent of --progress)");
     printf("  %-21s  %s\n", "    --sample-timeline", "record per-thread time stacks and wait states (implies --sample-search)");
@@ -1823,7 +1823,7 @@ int main(int argc, char **argv)
     XqHistory history;
     XqSearchLimits default_limits = xq_search_limits_default();
     XqSearchLimits limits;
-    bool parallel = false, explicit_depth = false, explicit_time = false;
+    bool parallel = true, explicit_depth = false, explicit_time = false;
     bool jieqi = false, explicit_search = false, explicit_reveal = false;
     CliJqRevealMode reveal_mode = CLI_JQ_REVEAL_MANUAL;
     bool parallel_options_set = false;
@@ -2111,7 +2111,7 @@ int main(int argc, char **argv)
     }
     if ((!parallel && parallel_options_set) || (parallel && tt_file != NULL))
     {
-        fprintf(stderr, "error: parallel options require --search parallel; parallel search does not accept TT files\n");
+        fprintf(stderr, "error: parallel options require --search parallel; --tt-file requires --search builtin\n");
         return EXIT_FAILURE;
     }
 #ifdef _WIN32
@@ -2121,12 +2121,12 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 #endif
-    if (fen_file != NULL && !explicit_time)
+    if (fen_file != NULL && !parallel && !explicit_time)
         default_limits.time_limit_ms = 0;
     if (parallel)
     {
         if (explicit_depth) parallel_options.depth = default_limits.max_depth;
-        if (!explicit_time && fen_file == NULL)
+        if (!explicit_time)
             default_limits.time_limit_ms = parallel_options.time_limit_ms;
         parallel_options.time_limit_ms = default_limits.time_limit_ms;
     }

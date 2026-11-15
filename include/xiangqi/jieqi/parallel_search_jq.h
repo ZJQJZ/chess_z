@@ -106,12 +106,12 @@ unsigned xq_jq_parallel_sample_count_default(unsigned remaining_depth, unsigned 
 
 typedef struct XqJqParallelOptions
 {
-    unsigned depth;          /* Maximum normal-search budget >= 1; default 3. Excludes quiescence. */
+    unsigned depth;          /* Maximum normal-search budget >= 1; default UINT_MAX (effectively unlimited). Excludes quiescence. */
     unsigned thread_count;   /* >= 1, includes calling thread; default 2. */
     unsigned split_percent;  /* 0..100, default 50; contiguous only (0 disables); ignored by interleaved. */
     XqJqParallelTranspositionTable *transposition_table; /* Borrowed; NULL disables caching (default). */
-    XqJqParallelSplitStrategy split_strategy; /* Default CONTIGUOUS; applied after all move ordering. */
-    uint64_t time_limit_ms;  /* Monotonic wall time; 0 disables timing (default). */
+    XqJqParallelSplitStrategy split_strategy; /* Default INTERLEAVED; applied after all move ordering. */
+    uint64_t time_limit_ms;  /* Monotonic wall time; default 5000 ms; 0 disables timing. */
     XqJqSampleCountFn sample_count; /* NULL selects xq_jq_parallel_sample_count_default. */
     void *sample_user;       /* Borrowed by sample_count; unused by the default policy. */
     uint64_t random_seed;    /* Search-only randomness; independent of hidden real-game identities. */

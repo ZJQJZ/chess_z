@@ -213,6 +213,7 @@ static void parallel_paths(void)
             check_init(&check, quiet_fen, counts[c]);
             XqParallelOptions options = xq_parallel_options_default();
             options.depth = 7; /* Root and descendant nodes both meet the split threshold. */
+            options.time_limit_ms = 0;
             options.thread_count = counts[c];
             options.split_strategy = (XqParallelSplitStrategy)strategy;
             XqParallelResult result;
@@ -241,6 +242,7 @@ static void parallel_paths(void)
     check_init(&check, capture_fen, 2);
     XqParallelOptions options = xq_parallel_options_default();
     options.depth = 2;
+    options.time_limit_ms = 0;
     XqParallelResult result;
     CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
@@ -259,6 +261,7 @@ static void idle_workers_without_samples(void)
         check.request_each_event = false;
         XqParallelOptions options = xq_parallel_options_default();
         options.depth = 2;
+        options.time_limit_ms = 0;
         options.thread_count = 16;
         options.split_strategy = (XqParallelSplitStrategy)strategy;
         XqParallelResult result;
@@ -451,6 +454,7 @@ static void disabled_and_terminal(void)
 #ifndef _WIN32
     XqParallelOptions options = xq_parallel_options_default();
     options.depth = 2;
+    options.time_limit_ms = 0;
     options.thread_count = 2; /* A capacity-one sampler disables the entire invocation. */
     XqParallelResult result;
     CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
@@ -491,6 +495,7 @@ static void winning_and_no_moves(void)
     check_init(&check, "4k4/9/9/9/4R4/9/9/9/9/3K5 r - -", 1);
     XqParallelOptions options = xq_parallel_options_default();
     options.depth = 5;
+    options.time_limit_ms = 0;
     options.thread_count = 1;
     XqParallelResult result;
     CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,

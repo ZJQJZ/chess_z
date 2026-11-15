@@ -34,12 +34,12 @@ typedef enum XqParallelSplitStrategy
 
 typedef struct XqParallelOptions
 {
-    unsigned depth;          /* Maximum normal-search budget >= 1; default 3. Excludes check evasions and quiescence. */
+    unsigned depth;          /* Maximum normal-search budget >= 1; default UINT_MAX (effectively unlimited). Excludes check evasions and quiescence. */
     unsigned thread_count;   /* >= 1, includes calling thread; default 2. */
     unsigned split_percent;  /* 0..100, default 50; contiguous only (0 disables); ignored by interleaved. */
     XqParallelTranspositionTable *transposition_table; /* Borrowed; NULL disables caching (default). */
-    XqParallelSplitStrategy split_strategy; /* Default CONTIGUOUS; applied after all move ordering. */
-    uint64_t time_limit_ms;  /* Monotonic wall time; 0 disables timing (default). */
+    XqParallelSplitStrategy split_strategy; /* Default INTERLEAVED; applied after all move ordering. */
+    uint64_t time_limit_ms;  /* Monotonic wall time; default 5000 ms; 0 disables timing. */
 } XqParallelOptions;
 
 typedef struct XqParallelResult
@@ -171,7 +171,7 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * PARALLEL_MIN_SPLIT_DEPTH (5, defined in parallel_search.c). This budget excludes check-evasion
  * and quiescence extensions; it applies to root and descendant nodes under both strategies.
  * Shallower nodes search serially. Pruning, terminal positions and cancellation may still end a
- * task early. The default maximum depth of 3 therefore dispatches no helper tasks.
+ * task early. Helper tasks may first be dispatched in the depth-5 iteration, if reached.
  * CONTIGUOUS assigns a tail batch to at most one helper according to split_percent.
  * INTERLEAVED uses at most PARALLEL_INTERLEAVED_SPLIT_THREADS participants (3, defined in
  * parallel_search.c), including the owner, and ignores split_percent even when zero. It prepares

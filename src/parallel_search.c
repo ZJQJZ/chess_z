@@ -15,17 +15,16 @@
 /**
  * @brief Creates a default configuration for the parallel minimax search.
  *
- * The default configuration iteratively deepens to a normal-search budget of 3 plies and uses 2
- * threads including the calling thread. Contiguous splitting assigns a tail batch of 50 percent of
- * a node's children to an available helper when the remaining depth permits splitting. The default
- * depth is below `PARALLEL_MIN_SPLIT_DEPTH`, so helpers receive no tasks. The search has no time
- * limit and no transposition table by default.
+ * The default configuration iteratively deepens up to UINT_MAX plies and uses 2 threads including
+ * the calling thread. Interleaved splitting shares ordered children round-robin among the owner and
+ * available helpers when the remaining depth permits splitting. The search has a 5000 ms time limit
+ * and no transposition table by default.
  *
  * @return The default parallel-search configuration.
  */
 XqParallelOptions xq_parallel_options_default(void)
 {
-    XqParallelOptions options = {3, 2, 50, NULL, XQ_PARALLEL_SPLIT_CONTIGUOUS, 0};
+    XqParallelOptions options = {UINT_MAX, 2, 50, NULL, XQ_PARALLEL_SPLIT_INTERLEAVED, 5000};
     return options;
 }
 

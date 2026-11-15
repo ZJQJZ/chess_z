@@ -6,7 +6,7 @@
 - 同步维护 `board[90]` 邮箱数组，便于规则生成和调试。
 - 支持初始局面、FEN 读写、走子、合法着法生成、将军检测和 perft。
 - 提供 `XqEngineAdapter`，可为内置搜索接入自定义估值和走法排序函数。
-- 内置子力与位置估值、迭代加深 negamax 搜索，以及可选的固定视角并行 Minimax。
+- 内置子力与位置估值、迭代加深 negamax 搜索，以及固定视角并行 Minimax；CLI 默认使用并行搜索。
 
 ## 目录
 
@@ -44,10 +44,12 @@ gcc -pthread -std=c11 -O2 -Wall -Wextra -Wpedantic -I include \
 ./build/xiangqi_cli
 ```
 
+CLI 默认使用并行搜索；可通过 `--search builtin` 切换到内置 negamax 搜索。
+
 ## 揭棋模式（macOS / Linux）
 
 同一个 CLI 用 `--game xiangqi|jieqi` 选择玩法，默认仍为 `xiangqi`。
-揭棋自动使用并行搜索，默认最大深度 **3**、总线程数 **2**、不限时；
+揭棋自动使用并行搜索，默认不设实际深度上限（`UINT_MAX`）、总线程数 **2**、每步时间预算 **5000 毫秒**；
 可用 `--depth`、`--threads`、`--time-ms`、`--split-strategy` 和 `--split-percent` 调整。
 `--progress` 和 `--search-detail` 同样可用，例如玩家执红、电脑执黑：
 
@@ -125,19 +127,25 @@ printf '%s\n' "$jieqi_start_fen" > build/jieqi_positions.fen
 两种搜索模式均可加 `--progress`，默认关闭：
 
 ```sh
-./build/xiangqi_cli --engine red --depth 10 --time-ms 5000 --progress
-./build/xiangqi_cli --search parallel --engine red --depth 5 --threads 4 --time-ms 5000 --progress
+./build/xiangqi_cli --engine red --progress
+./build/xiangqi_cli --search builtin --engine red --depth 10 --time-ms 5000 --progress
 ```
 
-终端中约每 100ms 在 stderr 原地刷新，例如：
+终端中约每 100ms 在 stderr 原地刷新。设置有限深度上限时显示当前深度与上限，例如：
 
 ```text
 search depth 5/10  [############--------] 60%  roots 24/40  elapsed 2.3s / 5.0s
 ```
 
+默认并行搜索的深度上限为 `UINT_MAX`，进度只显示当前深度：
+
+```text
+search depth 5  [############--------] 60%  roots 24/40  elapsed 2.3s / 5.0s
+```
+
 百分比仅表示当前深度完成的根走法比例，每轮重新开始；每个走法耗时不同，
 不代表整次搜索完成比例，也不估算剩余时间。用时在长分支搜索期间继续刷新。
-并行搜索默认不限时；设置 `--time-ms` 后也显示时间预算。提前结束保留实际比例；
+并行搜索默认时间预算为 **5000 毫秒**；可通过 `--time-ms` 修改。提前结束保留实际比例；
 结束摘要中的 `selected depth` 表示最终采用的深度（0 表示未搜索的保底走法）。
 时间限制允许完成已超过进度阈值的迭代，因此已用时间可能超过预算。
 重定向 stderr 时只输出每轮结束及最终摘要，不输出终端控制字符。
@@ -280,15 +288,16 @@ Shift+滚轮或 Shift+拖动平移；上下滚动查看深层走法，Ctrl／⌘
 
 ## 固定视角并行搜索（macOS / Linux）
 
-默认仍使用原引擎。通过 `--search parallel` 选择可读性优先的并行 Minimax：
+CLI 默认使用可读性优先的并行 Minimax，也可显式指定 `--search parallel`；通过 `--search builtin` 切换到原引擎：
 
 ```sh
-./build/xiangqi_cli --search parallel --depth 5 --threads 4 --split-percent 50 --engine red --search-detail
+./build/xiangqi_cli --search parallel --split-strategy contiguous --depth 5 --threads 4 --split-percent 50 --engine red --search-detail
 ./build/xiangqi_cli --search parallel --split-strategy interleaved --threads 4 --depth 5
 ```
 
-并行模式默认迭代加深最大深度 **3**、总线程数 **2**（包括调用线程）、连续分块策略 **contiguous**、分配比例 **50%**。
-`--depth` 必须为正整数；从深度 1 逐层搜索到该上限，默认不限时，也可用 `--time-ms` 设置预算。
+并行模式默认不设实际深度上限（`UINT_MAX`）、每步时间预算 **5000 毫秒**、总线程数 **2**（包括调用线程）、交错划分策略 **interleaved**。
+`--split-percent` 默认 **50%**，仅在连续分块策略 `contiguous` 下生效。
+`--depth` 必须为正整数；从深度 1 逐层搜索到该上限，可用 `--time-ms` 修改时间预算。
 并行普通搜索进入节点时判断当前行棋方是否被将军：被将军时，应将这一步不消耗深度，
 子节点继续使用相同预算；否则递减 1。深度为 0 但被将军时仍继续普通搜索应将，
 直到进入未被将军的零深度节点才转入静态搜索；终局及路径重复的处理仍优先。
@@ -303,7 +312,7 @@ Shift+滚轮或 Shift+拖动平移；上下滚动查看深层走法，Ctrl／⌘
 `PARALLEL_MIN_SPLIT_DEPTH = 5` 控制，修改后需重新编译。
 该门槛使用剩余深度预算；未被将军时从当前节点到子节点消耗一层，不计应将及静态搜索延伸。
 不足 5 层的节点由当前线程完成搜索；剪枝、终局和超时仍可使任务提前结束。
-默认最大深度为 3，因此默认配置不会派发辅助任务；搜索达到第 5 轮时才可能开始拆分。
+搜索达到第 5 轮时才可能开始拆分；默认配置下能否达到该轮取决于局面和时间预算。
 两种拆分策略如下：
 
 - `contiguous`：最多使用一个辅助线程，从着法列表尾部取 `ceil(孩子数量 × 比例 / 100)` 个，
@@ -334,7 +343,7 @@ Shift+滚轮或 Shift+拖动平移；上下滚动查看深层走法，Ctrl／⌘
 
 实现位于 `src/parallel_search.c`，接口为 `include/xiangqi/parallel_search.h` 中的
 `xq_engine_parallel_search`。库调用通过 `XqParallelOptions.split_strategy` 选择
-`XQ_PARALLEL_SPLIT_CONTIGUOUS`（默认）或 `XQ_PARALLEL_SPLIT_INTERLEAVED`。
+`XQ_PARALLEL_SPLIT_CONTIGUOUS` 或 `XQ_PARALLEL_SPLIT_INTERLEAVED`（默认）。
 调用形式为 `xq_engine_parallel_search(&engine, &pos, &options, &result)`；
 `xq_engine_parallel_search_with_observer()` 在相同参数后附加回调、回调用户指针和可选 `sampler`；
 `sampler` 传 `NULL` 时关闭采样。旧签名中的独立 `evaluate`、`evaluate_user` 参数已移除，调用方需将其迁移到适配器。
@@ -465,7 +474,7 @@ MIN 节点的分数、窗口和上下界会转换视角；缓存边界仍作为�
 评估参数发生变化，调用方必须主动清表。该表不与 `engine.c` 的置换表或磁盘格式混用。
 
 并行模式支持 `--time-ms` 和走法后附加正整数毫秒数；单步覆盖后，下次省略时间恢复启动默认，
-启动时未设置时间则恢复不限时。库调用通过 `XqParallelOptions.time_limit_ms` 设置预算，0 表示不限时。
+启动时未设置时间则恢复 **5000 毫秒**。库调用通过 `XqParallelOptions.time_limit_ms` 设置预算，默认 5000，0 表示不限时。
 预算使用单调墙钟，覆盖根候选准备、线程池创建及所有迭代。每个物理搜索线程在首次进入普通节点时
 读钟，此后每 256 次普通节点入口读钟一次；间隔由 `src/parallel_search.c` 中的
 `PARALLEL_TIME_CHECK_INTERVAL` 控制，计数跨任务和迭代保留，静态搜索不计入间隔。
@@ -475,7 +484,7 @@ MIN 节点的分数、窗口和上下界会转换视角；缓存边界仍作为�
 不再开始下一层；否则协作取消当前轮。
 计时失败始终停止。返回前会等待所有辅助任务和回调结束，实际耗时可能超过预算。
 并行模式仍不支持 `--tt-file` 和 `save-tt`。普通走棋、指定电脑应手、悔棋、翻转照常使用。
-原模式默认深度 10 和限时行为保持不变。Windows 可以编译、使用原引擎，新模式返回不支持。
+内置模式默认深度 10 和限时行为保持不变。Windows 可通过 `--search builtin` 使用原引擎，并行模式返回不支持。
 
 `--search-detail` 记录并行搜索的局面、状态、最佳走法、根分数可用性及类型、预算、
 实际完成和选着深度、节点数、停止状态、耗时、线程数、拆分策略和分配比例。
@@ -508,11 +517,13 @@ release/acquire CAS 发布对应结果，避免索引与评分不一致，同分
 
 ## 原引擎的限时搜索与对局操作
 
+以下原引擎示例通过 `--search builtin` 启用内置搜索。
+
 启动时可用 `--time-ms` 设置整局默认的每步思考时间（正整数，单位毫秒），例如 2 秒：
 
 ```sh
-./build/xiangqi_cli --time-ms 2000
-./build/xiangqi_cli --engine red --time-ms 2000 --search-detail
+./build/xiangqi_cli --search builtin --time-ms 2000
+./build/xiangqi_cli --search builtin --engine red --time-ms 2000 --search-detail
 ```
 
 不传此参数时使用引擎默认的 3000 毫秒。引擎先手时的第一步也使用该设置。
@@ -520,7 +531,7 @@ release/acquire CAS 发布对应结果，避免索引与评分不一致，同分
 启动时可用 `--depth N` 设置整局最大搜索深度，默认 10 层，每层为一方走一步（ply）：
 
 ```sh
-./build/xiangqi_cli --depth 12 --time-ms 5000 --search-detail
+./build/xiangqi_cli --search builtin --depth 12 --time-ms 5000 --search-detail
 ```
 
 `N` 必须是 1 至 `INT_MAX` 的整数；缺少参数、零、负数、小数、溢出或多余非空白字符会被拒绝。
@@ -575,6 +586,7 @@ a0a1 a9a8
 走法仍按棋盘上标注的原始坐标输入，例如 `b2b9` 的含义不变。
 显示方向会保持到再次输入 `flip`，走棋和悔棋不会重置它；对局结束后的输入提示中也可使用。
 
+`save-tt` 和 `--tt-file` 仅用于内置搜索，需以 `--search builtin` 启动 CLI。
 在玩家输入提示或对局结束后的提示处，输入 `save-tt PATH` 可以保存当前置换表：
 
 ```text
@@ -591,8 +603,8 @@ save-tt "build/my cache.tt"
 下次启动时通过 `--tt-file PATH` 加载：
 
 ```sh
-./build/xiangqi_cli --tt-file build/cache.tt --time-ms 5000
-./build/xiangqi_cli --engine red --tt-file "build/my cache.tt"
+./build/xiangqi_cli --search builtin --tt-file build/cache.tt --time-ms 5000
+./build/xiangqi_cli --search builtin --engine red --tt-file "build/my cache.tt"
 ```
 
 加载在第一次搜索前完成，包括引擎先手的情况；之后继续复用和更新这张表。
@@ -616,7 +628,7 @@ save-tt "build/my cache.tt"
 
 ```sh
 ./build/xiangqi_cli --search-detail
-./build/xiangqi_cli --engine red --search-detail
+./build/xiangqi_cli --search builtin --engine red --search-detail
 ./build/xiangqi_cli --search parallel --threads 4 --engine red --search-detail
 ```
 
@@ -629,7 +641,7 @@ save-tt "build/my cache.tt"
 
 | 字段 | 含义 |
 | --- | --- |
-| `depth_limit` / `time_limit_ms` / `time_mode` | 本次搜索配置，默认 10 层、3000 毫秒、单调墙钟；可通过 `--depth` 设置最大深度、`--time-ms` 设置默认时间，输入走法时可指定下一步的时间限制 |
+| `depth_limit` / `time_limit_ms` / `time_mode` | 本次搜索配置；内置搜索默认 10 层、3000 毫秒，并行搜索默认 `UINT_MAX`、5000 毫秒，均使用单调墙钟；可通过 `--depth` 设置最大深度、`--time-ms` 设置默认时间，输入走法时可指定下一步的时间限制 |
 | `max_started_depth` | 实际开始搜索至少一个根走法的最大迭代深度 |
 | `iteration_progress` | `max_started_depth` 所属轮次已完成的根候选数量／过滤后的候选总数及百分比，例如 `12/44 (27.3%)`；从未开始搜索时为 `not-started (0/N)` |
 | `completed_depth` | 全部根候选走法均已完成的最大迭代深度 |
@@ -682,7 +694,7 @@ save-tt "build/my cache.tt"
 只需最佳走法时，可使用 `xq_engine_find_best_move()`。
 普通找最佳走法接口统一使用内置搜索，可获取其内部深度、节点和可用缓存的统计。
 
-示例入口默认是“你执红，内置简易引擎执黑”。输入格式是 `起点+终点`，文件用 `a..i`，行号用 `0..9`，例如：
+示例入口默认是“你执红，并行引擎执黑”。输入格式是 `起点+终点`，文件用 `a..i`，行号用 `0..9`，例如：
 
 ```text
 b2b9
@@ -703,7 +715,7 @@ quit   退出
 和 `--depth N`。设置 `--time-ms`、`--moves` 或 `--tt-file` 后，只输出一次目标节点的信息并退出：
 
 ```sh
-# 从根局面迭代加深，总搜索预算为 2 秒；默认最大深度与 CLI 相同，为 10。
+# 从根局面迭代加深，总搜索预算为 2 秒；默认最大深度与 CLI 的 builtin 模式相同，为 10。
 ./build/xiangqi_explain --time-ms 2000
 
 # 载入置换表，单次解释根节点；也可组合时间预算和目标路径。
@@ -724,7 +736,7 @@ quit   退出
 静态搜索的路径不生成解释记录。迭代加深时，从根深度大于路径长度的轮次起才可能记录目标。
 重复的 `--moves` 按出现顺序追加；每段序列读取到下一个 `--` 选项。
 
-单次模式的搜索规则与 CLI 一致，默认最大深度 **10**、时间预算 **3000 毫秒**。
+单次模式的搜索规则与 CLI 的 `--search builtin` 模式一致，默认最大深度 **10**、时间预算 **3000 毫秒**。
 `--time-ms` 必须为正整数毫秒，指定整个根搜索的单调墙钟预算；
 路径校验、加载缓存和结果输出不计入预算。所有搜索都从 1 层迭代加深，同时设置
 `--depth` 与 `--time-ms` 时，以先到的限制为准，但到时限时进度严格超过 50% 可完成当前层后退出。
@@ -742,7 +754,7 @@ quit   退出
 完整迭代结束时按根分数选择；到时限时满足上述阈值则完成当前轮并采用其结果。若当前轮
 因超时或计时失败被中断，则返回上一完整轮的最佳着法，候选表也恢复
 为该完整轮的快照，不混用不同深度的评分。若第 1 轮尚未完成，选择该轮已完成候选中的
-最佳着法；没有任何候选完成时使用与 CLI 相同的初始兜底着法。同分保留搜索顺序中最先
+最佳着法；没有任何候选完成时使用与 CLI 的 builtin 模式相同的初始兜底着法。同分保留搜索顺序中最先
 达到该分数的着法。若最后一个候选完成后才检测到超时，仍采用刚完成的整轮结果。
 
 `policy` 优先显示 `winning-move`（发现必胜走法立即返回）；其他情况为 `completed-iteration`
@@ -774,7 +786,7 @@ quit   退出
 两条命令从同一 FEN 启动时没有过去对局的历史；如要重现进行中的 CLI 对局，
 库调用方还需提供相同历史。原有逐层解释接口和交互导航保持兼容。
 
-`--tt-file PATH` 使用与 CLI 相同的缓存格式和兼容性检查；加载失败报错退出，不回退。
+`--tt-file PATH` 使用与 CLI 的 builtin 模式相同的缓存格式和兼容性检查；加载失败报错退出，不回退。
 没有指定文件时，与 CLI 一样创建一张空置换表。搜索正常更新内存中的条目、代次及替换
 信息，输入文件不会被改写。
 
@@ -831,10 +843,10 @@ quit   退出
 生成器使用当前时间初始化随机种子，并在启动时打印实际使用的种子；从初始局面随机行走 `0..100` 步，共输出 100 个局面，每行一个 FEN。
 搜索程序顺序读取一次文件，以最大深度 6、不限时的配置为每个局面搜索一步，适合作为性能分析的非交互式入口。
 
-CLI 也支持用 `--fen-file PATH` 批量搜索文件中的局面，可选择内置或并行搜索：
+CLI 也支持用 `--fen-file PATH` 批量搜索文件中的局面，默认使用并行搜索，可通过 `--search builtin` 选择内置搜索：
 
 ```sh
-./build/xiangqi_cli --fen-file build/profile_positions.fen --depth 6
+./build/xiangqi_cli --fen-file build/profile_positions.fen --search builtin --depth 6
 ./build/xiangqi_cli --fen-file build/profile_positions.fen --search parallel --depth 6 --threads 4
 ```
 
@@ -842,7 +854,7 @@ CLI 也支持用 `--fen-file PATH` 批量搜索文件中的局面，可选择内
 `--engine` 在此模式下不决定思考方，但其参数仍须是合法颜色。
 `--fen-file` 不能与 `--fen` 或 `--tt-file` 同时使用。每个 FEN 独立处理，搜索前清空相应置换表，行间不共享搜索历史。
 
-批量模式默认不限时，内置搜索默认最大深度为 10，并行搜索默认最大深度为 3；可用 `--depth` 修改。
+批量模式中，内置搜索仍默认不限时、最大深度为 10；并行搜索（含揭棋）默认不设实际深度上限（`UINT_MAX`）、每个 FEN 时间预算为 **5000 毫秒**。可用 `--depth` 修改最大深度。
 显式指定 `--time-ms` 时，该预算对每个 FEN 分别生效，接近完成的迭代仍可能超过预算后才结束。
 `--progress`、采样选项和 `--search-detail` 均可继续使用，例如：
 
