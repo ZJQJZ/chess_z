@@ -114,20 +114,22 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * quiescence in the executing thread: stand pat plus captures when not in check,
  * all legal evasions without stand pat when in check.
  * All move lists are pseudo-legal; the move loop skips non-captures outside check and rejects moves
- * that leave the original mover in check when evading. Each quiescence entry starts a new private
- * stack history at its entry position, excluding real-game history and the normal-search prefix.
- * Quiescence filters moves that lose
- * under the same three-cycle rule above, without sharing history between entries or branches.
- * Six consecutive actual quiescence moves that give check (three per side) produce a draw scored
- * as zero, unless the resulting position is checkmate. A non-checking move breaks the run; check
- * at the entry position does not count. Checkmate takes precedence over this draw, which takes
- * precedence over a cycle loss: legal moves completing the run survive cycle filtering. A parent
- * may still choose another move with a better score.
- * An originally empty list or an in-check position with no surviving legal evasion is a loss;
- * outside check stand pat remains available, without an extra legal-move scan. King and loss
- * checks, the six-check draw and cycle filtering precede the 500-ply extension cap. A draw reached
- * at ply 500 is recognized, without extending to ply 501. At the cap an in-check position
- * must have a surviving legal evasion before the original position is statically evaluated.
+ * that leave the original mover in check when evading. Each quiescence invocation records a private
+ * stack path from its entry position, excluding real-game history and the normal-search prefix.
+ * Paths are not shared between invocations or sibling branches. The nearest strict ancestor with
+ * matching board contents and side to move determines repetition at the first recurrence; equal
+ * cached piece hashes still require an exact board comparison, and move counters are ignored.
+ * The cycle excludes the matching ancestor's check flag and includes the current node's flag.
+ * With "own side" meaning the current side to move, the same four classifications apply: when every
+ * own-side move gives check, return zero if every opposing move also does, or -30000 otherwise.
+ * If only the opponent always gives check, continue quiescence. If neither side always gives check,
+ * end this branch by statically evaluating the current position. Repetition draws/losses take
+ * precedence over the 500-ply cap. A PATH_REPETITION_QUIESCENCE result or reaching the cap
+ * returns a static score before generating candidates, even while in check; no legal evasion check
+ * is performed, and the search never extends to ply 501.
+ * Quiescence repetition does not mark ordinary nodes to prevent table writes.
+ * At nodes that continue searching, an empty candidate list or an in-check position with no legal
+ * evasion is a loss; outside check stand pat remains available, without an extra legal-move scan.
  * The evaluator receives the side to move, and its result is clamped to +/-28999 for negamax.
  * Quiescence flips child scores and windows, then ordinary search converts its result back to
  * the root perspective. Wins/losses remain +/-30000. Quiescence observes the published time stop
