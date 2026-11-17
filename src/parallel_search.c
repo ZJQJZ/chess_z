@@ -1487,10 +1487,11 @@ static int tighten_bound(atomic_int *bound,
 /**
  * @brief Refreshes the window and publishes completion or cancellation without taking any lock.
  *
- * Scans strict ancestors for completion and proven thresholds, then tightens atomic `alpha`/`beta`
- * with CAS. Bounds and thresholds only tighten, so mixed or stale observations remain conservative:
- * they can cause extra work but cannot justify an invalid cutoff. The node's own proven bounds are
- * never replaced by inherited thresholds.
+ * Checks for a published time stop and scans strict ancestors for completion and proven thresholds.
+ * On observing a stop, requests cancellation and returns immediately. Otherwise tightens atomic
+ * `alpha`/`beta` with CAS. Bounds and thresholds only tighten, so mixed or stale observations
+ * remain conservative: they can cause extra work but cannot justify an invalid cutoff. The node's
+ * own proven bounds are never replaced by inherited thresholds.
  *
  * If timing requests a stop or an ancestor has stopped, proposes `NODE_CANCELLED`. Otherwise an
  * exact interval or a cutoff proposes `NODE_FINISHED`. One CAS changes `NODE_RUNNING` to the chosen
@@ -1515,15 +1516,27 @@ static int tighten_bound(atomic_int *bound,
 static bool check_node(Search *search,
                        Node   *node)
 {
-    bool cancelled = atomic_load_explicit(&search->time_state, memory_order_relaxed) == TIME_STOP;
     if (atomic_load_explicit(&node->state, memory_order_relaxed) != NODE_RUNNING)
         return true;
+    if (atomic_load_explicit(&search->time_state, memory_order_relaxed) == TIME_STOP)
+    {
+        int expected = NODE_RUNNING;
+        (void)atomic_compare_exchange_strong_explicit(&node->state, &expected, NODE_CANCELLED,
+                                                      memory_order_relaxed, memory_order_relaxed);
+        return true;
+    }
     int alpha = -INFINITY_SCORE;
     int beta  = INFINITY_SCORE;
     for (const Node *ancestor = node->parent; ancestor != NULL; ancestor = ancestor->parent)
     {
         if (atomic_load_explicit(&ancestor->state, memory_order_relaxed) != NODE_RUNNING)
-            cancelled = true;
+        {
+            int expected = NODE_RUNNING;
+            (void)atomic_compare_exchange_strong_explicit(&node->state, &expected, NODE_CANCELLED,
+                                                          memory_order_relaxed,
+                                                          memory_order_relaxed);
+            return true;
+        }
         if (ancestor->maximizing)
         {
             int bound = atomic_load_explicit(&ancestor->value.lower, memory_order_relaxed);
@@ -1541,19 +1554,15 @@ static bool check_node(Search *search,
     beta      = tighten_bound(&node->beta, beta, false);
     int lower = atomic_load_explicit(&node->value.lower, memory_order_relaxed);
     int upper = atomic_load_explicit(&node->value.upper, memory_order_relaxed);
-    int desired;
-    if (cancelled)
-        desired = NODE_CANCELLED;
-    else if (lower == upper || upper <= alpha || lower >= beta)
-        desired = NODE_FINISHED;
-    else
-        return atomic_load_explicit(&node->state, memory_order_relaxed) != NODE_RUNNING;
-
-    int expected = NODE_RUNNING;
-    /* Failure means another checker already published an immutable terminal state. */
-    (void)atomic_compare_exchange_strong_explicit(&node->state, &expected, desired,
-                                                  memory_order_relaxed, memory_order_relaxed);
-    return true;
+    if (lower == upper || upper <= alpha || lower >= beta)
+    {
+        int expected = NODE_RUNNING;
+        /* Failure means another checker already published an immutable terminal state. */
+        (void)atomic_compare_exchange_strong_explicit(&node->state, &expected, NODE_FINISHED,
+                                                      memory_order_relaxed, memory_order_relaxed);
+        return true;
+    }
+    return atomic_load_explicit(&node->state, memory_order_relaxed) != NODE_RUNNING;
 }
 
 typedef enum PathRepetition
