@@ -27,8 +27,8 @@ The CMake build registers the following CTest cases when `BUILD_TESTING` is on:
   No overflow gap or overwritten sample is expected. The normal
   and overflow targets use separate report directories; CTest fixtures generate
   fresh reports before running either Python validator.
-- `parallel_similarity`: white-box coverage of sibling enumeration, shared query
-  budgets, invalid/duplicate positions, read-only hint collection, unified
+- `parallel_similarity`: white-box coverage of incremental move hashes, sibling-key enumeration,
+  shared query budgets, invalid moves, duplicate keys, read-only hint collection, unified
   winning/quiet-move ordering and read-only TT
   snapshots, plus serial and parallel search, sampling and cancellation checks.
 - `parallel_similarity_disabled`: the same driver with a query limit of `0` to check
@@ -61,7 +61,8 @@ PV/cache/capture priority. A matching `XQ_SEARCH_SCORE_EXACT` or
 side-to-move perspective) can instead promote a capture or quiet move below PV but
 ahead of same-position cache moves. Winning hints do not end enumeration: later
 winning and ordinary hints are collected until the query budget or sources are
-exhausted, or the node stops. Distinct winning hints retain their discovery order.
+exhausted. The caller checks node stop state after collection. Distinct winning hints retain
+their discovery order.
 `parallel_collect_similar_hints()` returns complete current-move records without
 reordering the list. `parallel_apply_move_hints()` applies all collected, cache and PV
 hints in one stage, after stable capture ordering and before task splitting.
@@ -69,7 +70,9 @@ Tests check collection leaves move order unchanged, the full
 `PV > WIN > TT > captures > similar quiet > other quiet` precedence, continuation
 after wins, post-win misses, busy buckets and unusable hits against the budget,
 duplicate hints, source exhaustion, exact `from`/`to`/`piece` matching, and
-current-move metadata. They also check PV suffix propagation for valid matching or
+current-move metadata. Sibling keys are computed without copying positions or filtering missing
+kings and self-check; tests compare them with hashes after applying the same moves to position
+copies. They also check PV suffix propagation for valid matching or
 conflicting PV first moves and suffix clearing for absent, empty or invalid PV hints.
 Similar scores determine ordering priority only and cannot directly cause a search cutoff.
 

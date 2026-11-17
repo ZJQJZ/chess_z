@@ -378,6 +378,35 @@ uint64_t xq_position_hash(const XqPosition *pos)
 }
 
 /**
+ * 增量计算走棋后的局面哈希，包含行棋方切换，不复制或修改局面。
+ * 与 xq_position_make_move 一样，只检查起终点范围及起点是否有棋子，不检查走法是否合法。
+ * 使用棋盘上的实际棋子，不依赖 move.piece 或 move.captured；失败时不修改 *key。
+ */
+bool xq_position_hash_after_move(const XqPosition *pos, XqMove move, uint64_t *key)
+{
+    XqSquare from = (XqSquare)move.from;
+    XqSquare to   = (XqSquare)move.to;
+    if (!valid_square(from) || !valid_square(to))
+        return false;
+
+    int piece = pos->board[from];
+    if (piece == XQ_EMPTY_PIECE)
+        return false;
+
+    uint64_t hash = pos->piece_hash;
+    if (from != to)
+    {
+        hash ^= zobrist_piece_key(piece, from) ^ zobrist_piece_key(piece, to);
+        int captured = pos->board[to];
+        if (captured != XQ_EMPTY_PIECE)
+            hash ^= zobrist_piece_key(captured, to);
+    }
+    *key = hash ^
+           (xq_color_opponent(pos->side_to_move) == XQ_BLACK ? zobrist_side_key() : UINT64_C(0));
+    return true;
+}
+
+/**
  * 用于检查某个 *pos 是否数据一致且双方存在将帅
  * 根据 *pos 的 board 信息复制一份相匹配的 XqPosition 中的 pieces、occupied、all 信息
  * 然后和 *pos 中的进行比较查看是否一致，最后看是否存在双方将帅

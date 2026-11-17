@@ -160,6 +160,64 @@ static unsigned collect_and_apply(Search *search, Node *node, unsigned *winning_
     return queries;
 }
 
+static void check_hash_after_move(const XqPosition *position, XqMove move)
+{
+    XqPosition before = *position;
+    XqPosition expected = *position;
+    uint64_t key = UINT64_C(0x123456789abcdef0);
+    CHECK(xq_position_hash_after_move(position, move, &key));
+    CHECK(xq_position_make_move(&expected, move));
+    CHECK(key == xq_position_hash(&expected));
+    CHECK(memcmp(position, &before, sizeof(before)) == 0);
+}
+
+static void hash_after_move(void)
+{
+    XqPosition position;
+    xq_position_startpos(&position);
+    for (unsigned color = 0; color < XQ_COLOR_NB; ++color)
+    {
+        position.side_to_move = (XqColor)color;
+        XqMoveList moves;
+        xq_generate_pseudo_legal(&position, &moves);
+        /* Includes captures and quiet moves for both sides, using board metadata. */
+        for (int i = 0; i < moves.count; ++i)
+        {
+            XqMove move = moves.moves[i];
+            move.piece = XQ_EMPTY_PIECE;
+            move.captured = XQ_EMPTY_PIECE;
+            check_hash_after_move(&position, move);
+        }
+        XqSquare square = xq_position_king_square(&position, (XqColor)color);
+        check_hash_after_move(&position, (XqMove){.from = (uint8_t)square, .to = (uint8_t)square});
+    }
+
+    CHECK(xq_position_from_fen(&position,
+        "3k5/9/9/9/4r4/9/9/4R4/9/4K4 r - -"));
+    /* Hash construction accepts self-check and king captures, just like make_move. */
+    XqMove move = find_move(&position, 4, 2, 3, 2);
+    check_hash_after_move(&position, move);
+    for (unsigned color = 0; color < XQ_COLOR_NB; ++color)
+    {
+        move.to = (uint8_t)xq_position_king_square(&position, (XqColor)color);
+        check_hash_after_move(&position, move);
+    }
+
+    const XqMove invalid[] = {
+        {.from = XQ_SQUARES, .to = 0},
+        {.from = (uint8_t)xq_square_make(4, 2), .to = XQ_SQUARES},
+        {.from = (uint8_t)xq_square_make(0, 0), .to = 0},
+    };
+    XqPosition before = position;
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
+    {
+        uint64_t key = UINT64_C(0x123456789abcdef0);
+        CHECK(!xq_position_hash_after_move(&position, invalid[i], &key));
+        CHECK(key == UINT64_C(0x123456789abcdef0));
+        CHECK(memcmp(&position, &before, sizeof(before)) == 0);
+    }
+}
+
 static void iterator_order(void)
 {
     Fixture fixture;
@@ -171,28 +229,34 @@ static void iterator_order(void)
     const int expected[] = {3, 1, 2, 4};
     for (unsigned i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i)
     {
-        XqPosition candidate;
-        CHECK(parallel_similar_position_next(&iterator, &candidate));
-        CHECK(xq_position_hash(&candidate) == sibling_key(&fixture, expected[i]));
+        uint64_t key;
+        CHECK(parallel_similar_position_next(&iterator, &key));
+        CHECK(key == sibling_key(&fixture, expected[i]));
     }
-    XqPosition candidate;
-    CHECK(!parallel_similar_position_next(&iterator, &candidate));
+    uint64_t key;
+    CHECK(!parallel_similar_position_next(&iterator, &key));
     atomic_store(&fixture.parent.best_index, 0);
     iterator = parallel_similar_positions(&fixture.node);
     for (int i = 1; i < 5; ++i)
     {
-        CHECK(parallel_similar_position_next(&iterator, &candidate));
-        CHECK(xq_position_hash(&candidate) == sibling_key(&fixture, i));
+        CHECK(parallel_similar_position_next(&iterator, &key));
+        CHECK(key == sibling_key(&fixture, i));
     }
-    CHECK(!parallel_similar_position_next(&iterator, &candidate));
+    CHECK(!parallel_similar_position_next(&iterator, &key));
     iterator = parallel_similar_positions(&fixture.parent);
-    CHECK(!parallel_similar_position_next(&iterator, &candidate));
-    /* Failed construction is skipped without yielding a position. */
+    CHECK(!parallel_similar_position_next(&iterator, &key));
+    /* Failed construction is skipped without yielding a key. */
     fixture.parent.moves.moves[1].from = XQ_SQUARES;
     atomic_store(&fixture.parent.best_index, 1);
     iterator = parallel_similar_positions(&fixture.node);
-    CHECK(parallel_similar_position_next(&iterator, &candidate));
-    CHECK(xq_position_hash(&candidate) == sibling_key(&fixture, 2));
+    CHECK(parallel_similar_position_next(&iterator, &key));
+    CHECK(key == sibling_key(&fixture, 2));
+    fixture.parent.moves.moves[2].to = XQ_SQUARES;
+    fixture.parent.moves.moves[3].from = (uint8_t)xq_square_make(0, 1);
+    iterator = parallel_similar_positions(&fixture.node);
+    CHECK(parallel_similar_position_next(&iterator, &key));
+    CHECK(key == sibling_key(&fixture, 4));
+    CHECK(!parallel_similar_position_next(&iterator, &key));
     fixture_destroy(&fixture);
 }
 
@@ -258,10 +322,6 @@ static void disabled_or_inapplicable(void)
     fixture.search.options.transposition_table = table;
     winning = 123;
     CHECK(collect_and_apply(&fixture.search, &fixture.parent, &winning) == 0);
-    CHECK(winning == 0);
-    atomic_store(&fixture.parent.state, NODE_CANCELLED);
-    winning = 123;
-    CHECK(collect_and_apply(&fixture.search, &fixture.node, &winning) == 0);
     CHECK(winning == 0);
     check_moves(&fixture.node.moves, &original);
     fixture_destroy(&fixture);
@@ -597,19 +657,31 @@ static void duplicate_candidates_and_hints(void)
 static void invalid_candidates(void)
 {
     Fixture fixture;
-    fixture_init(&fixture);
-    /* Failed construction followed by a missing king does not consume queries. */
-    fixture.parent.moves.moves[1].from = XQ_SQUARES;
-    fixture.parent.moves.moves[2].to = (uint8_t)xq_position_king_square(
-        &fixture.parent.position, XQ_BLACK);
-    store_hint(&fixture, 3, XQ_SEARCH_SCORE_EXACT, fixture.quiet[3]);
-    store_hint(&fixture, 4, XQ_SEARCH_SCORE_EXACT, fixture.quiet[4]);
-    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 2);
-    CHECK(equal_move(fixture.node.moves.moves[2], fixture.quiet[3]));
-    CHECK(equal_move(fixture.node.moves.moves[3], fixture.quiet[4]));
-    fixture_destroy(&fixture);
+    for (unsigned color = 0; color < XQ_COLOR_NB; ++color)
+    {
+        fixture_init(&fixture);
+        /* Failed construction is skipped, but a missing king still yields a lookup key. */
+        fixture.parent.moves.moves[1].from = XQ_SQUARES;
+        fixture.parent.moves.moves[2].to = (uint8_t)xq_position_king_square(
+            &fixture.parent.position, (XqColor)color);
+        SimilarPositionIterator iterator = parallel_similar_positions(&fixture.node);
+        uint64_t key;
+        for (int i = 2; i < 5; ++i)
+        {
+            CHECK(parallel_similar_position_next(&iterator, &key));
+            CHECK(key == sibling_key(&fixture, i));
+        }
+        CHECK(!parallel_similar_position_next(&iterator, &key));
+        store_hint(&fixture, 2, XQ_SEARCH_SCORE_EXACT, fixture.quiet[2]);
+        store_hint(&fixture, 3, XQ_SEARCH_SCORE_EXACT, fixture.quiet[3]);
+        store_hint(&fixture, 4, XQ_SEARCH_SCORE_EXACT, fixture.quiet[4]);
+        CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 2);
+        CHECK(equal_move(fixture.node.moves.moves[2], fixture.quiet[2]));
+        CHECK(equal_move(fixture.node.moves.moves[3], fixture.quiet[3]));
+        fixture_destroy(&fixture);
+    }
 
-    /* A pinned rook's pseudo-legal move exposes the mover's king. */
+    /* A pinned rook's pseudo-legal move is still enumerated and consumes query budget. */
     fixture_init(&fixture);
     CHECK(xq_position_from_fen(&fixture.parent.position,
         "3k5/9/9/9/4r4/9/9/4R4/9/4K4 r - -"));
@@ -620,22 +692,50 @@ static void invalid_candidates(void)
     fixture.node.position = sibling_position(&fixture, 0);
     xq_generate_pseudo_legal(&fixture.node.position, &fixture.node.moves);
     parallel_order_moves(&fixture.node.position, &fixture.node.moves);
-    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 1);
-    /* A source whose resulting side differs from this node is ignored. */
-    fixture.node.position.side_to_move = XQ_RED;
-    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 0);
+    SimilarPositionIterator iterator = parallel_similar_positions(&fixture.node);
+    uint64_t key;
+    for (int i = 1; i < 3; ++i)
+    {
+        CHECK(parallel_similar_position_next(&iterator, &key));
+        CHECK(key == sibling_key(&fixture, i));
+    }
+    CHECK(!parallel_similar_position_next(&iterator, &key));
+    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 2);
     fixture_destroy(&fixture);
 }
 
 static void timing_and_cutoff_isolation(void)
 {
     Fixture fixture;
-    fixture_init(&fixture);
-    /* Hint collection observes a published stop without checking the deadline itself. */
-    atomic_store(&fixture.search.time_state, TIME_STOP);
-    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 0);
-    CHECK(atomic_load(&fixture.search.time_state) == TIME_STOP);
-    fixture_destroy(&fixture);
+    for (int timed_stop = 0; timed_stop < 2; ++timed_stop)
+    {
+        fixture_init(&fixture);
+        if (timed_stop)
+            atomic_store(&fixture.search.time_state, TIME_STOP);
+        else
+            atomic_store(&fixture.parent.state, NODE_CANCELLED);
+        store_hint(&fixture, 1, XQ_SEARCH_SCORE_EXACT, fixture.quiet[4]);
+        XqMoveList original = fixture.node.moves;
+        SimilarMoveHints hints = {0};
+        /* Collection finishes its bounded reads without observing or changing stop state. */
+        CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, &hints) == 2);
+        CHECK(hints.quiet_count == 1 && equal_move(hints.quiet_moves[0], fixture.quiet[4]));
+        CHECK(hints.winning_count == 0);
+        check_moves(&fixture.node.moves, &original);
+        CHECK(atomic_load(&fixture.node.state) == NODE_RUNNING);
+        CHECK(atomic_load(&fixture.parent.state) ==
+              (timed_stop ? NODE_RUNNING : NODE_CANCELLED));
+        CHECK(atomic_load(&fixture.search.time_state) ==
+              (timed_stop ? TIME_STOP : TIME_ACTIVE));
+
+        /* The enclosing search still consumes the stop before searching any children. */
+        SearchThreadStats stopped_stats = {0};
+        ParallelPv stopped_pv = {0};
+        Interval stopped = search_node(&fixture.search, &fixture.node.position, &fixture.parent,
+            0, 1, NULL, NULL, 0, &stopped_pv, &stopped_stats);
+        CHECK(stopped.cancelled && stopped_stats.nodes == 1 && stopped_pv.count == 0);
+        fixture_destroy(&fixture);
+    }
 
     fixture_init(&fixture);
     /* An exact, very deep sibling score must never return as this node's score. */
@@ -923,6 +1023,7 @@ static void searches_and_sampling(void)
 
 int main(void)
 {
+    hash_after_move();
     iterator_order();
     readonly_peek();
     disabled_or_inapplicable();
