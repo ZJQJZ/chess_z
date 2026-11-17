@@ -113,6 +113,11 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Depth-zero nodes without check and repetition leaves where neither side always gives check run
  * quiescence in the executing thread: stand pat plus captures when not in check,
  * all legal evasions without stand pat when in check.
+ * Ordinary search checks that both kings exist before entering quiescence. Quiescence generates
+ * pseudo-legal candidates and returns +30000 if any candidate captures the opposing king, including
+ * when both kings are attacked. King-capture candidates are never played, keeping both kings present
+ * throughout recursion. Their detection precedes repetition, the extension cap and legal evasion
+ * filtering.
  * All move lists are pseudo-legal; the move loop skips non-captures outside check and rejects moves
  * that leave the original mover in check when evading. Each quiescence invocation records a private
  * stack path from its entry position, excluding real-game history and the normal-search prefix.
@@ -123,10 +128,10 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * With "own side" meaning the current side to move, the same four classifications apply: when every
  * own-side move gives check, return zero if every opposing move also does, or -30000 otherwise.
  * If only the opponent always gives check, continue quiescence. If neither side always gives check,
- * end this branch by statically evaluating the current position. Repetition draws/losses take
- * precedence over the 500-ply cap. A PATH_REPETITION_QUIESCENCE result or reaching the cap
- * returns a static score before generating candidates, even while in check; no legal evasion check
- * is performed, and the search never extends to ply 501.
+ * end this branch by statically evaluating the current position. Repetition draws/losses follow
+ * king-capture detection and precede the 500-ply cap. A PATH_REPETITION_QUIESCENCE result or
+ * reaching the cap returns a static score after the king-capture scan, even while in check; no
+ * legal evasion check is performed, and the search never extends to ply 501.
  * Quiescence repetition does not mark ordinary nodes to prevent table writes.
  * At nodes that continue searching, an empty candidate list or an in-check position with no legal
  * evasion is a loss; outside check stand pat remains available, without an extra legal-move scan.

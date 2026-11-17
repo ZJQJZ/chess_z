@@ -2057,16 +2057,18 @@ static PathRepetition parallel_quiescence_repetition(const QuiescencePathEntry *
  * on return. The evaluator receives the side to move and must return opposite scores for opposite
  * perspectives. Its result is clamped before use. Continuing nodes outside check use static
  * evaluation as a stand-pat candidate and search only captures. In check, they search all legal
- * evasions without stand pat. The ordinary caller handles missing kings before entry; an attacked
- * opponent king is scored as a win before any king-capture move is played. All move lists are
- * pseudo-legal: the move loop skips non-captures outside check and rejects evasions that leave the
- * original mover in check. The nearest repeated position on the private path uses ordinary search's
- * checking-cycle classification: DRAW returns zero; LOSS returns -WIN; NONE continues searching;
- * QUIESCENCE ends the branch with a static evaluation. Repetition is checked before the extension
- * limit. At either a QUIESCENCE repetition or that limit, the current position is statically
- * evaluated immediately, even in check, before generating or validating any moves. Continuing
- * in-check nodes without a legal evasion lose. Outside check, no separate test for a legal
- * continuation is performed before stand pat.
+ * evasions without stand pat. Both kings exist on entry: the ordinary caller checks them, and
+ * king-capture candidates return a win before being played, preserving both kings during recursion.
+ * Generated pseudo-legal moves are first scanned for a capture of the opposing king, which wins
+ * before repetition, the extension limit, stand pat or evasion validation, even when both kings are
+ * attacked. The move loop skips non-captures outside check and rejects evasions that leave the
+ * original mover in check. The nearest repeated position on the private path uses the same rules as
+ * ordinary search: DRAW returns zero; LOSS returns -WIN; NONE continues searching; QUIESCENCE ends
+ * the branch with a static evaluation. Repetition is checked before the extension limit. After the
+ * king-capture scan, either a QUIESCENCE repetition or that limit returns the current position's
+ * static evaluation immediately, even in check, without validating any moves. Continuing in-check
+ * nodes without a legal evasion lose. Outside check, no separate test for a legal continuation is
+ * performed before stand pat.
  *
  * `position` is a private mutable copy owned by the ordinary leaf. Every made move is unmade before
  * inspecting cancellation or returning. Recursion uses only local windows and move lists, not the
@@ -2124,9 +2126,13 @@ static QuiescenceResult parallel_quiescence(Search              *search,
     if (quiescence_should_stop(search, leaf))
         return (QuiescenceResult){0, true};
 
-    XqColor mover = position->side_to_move;
-    if (xq_position_in_check(position, xq_color_opponent(mover)))
-        return (QuiescenceResult){WIN, false};
+    XqColor    mover = position->side_to_move;
+    XqMoveList moves;
+    xq_generate_pseudo_legal(position, &moves);
+    const int opponent_king = xq_make_piece(xq_color_opponent(mover), XQ_KING);
+    for (int i = 0; i < moves.count; ++i)
+        if (moves.moves[i].captured == opponent_king)
+            return (QuiescenceResult){WIN, false};
 
     assert(ply <= PARALLEL_MAX_QUIESCENCE_DEPTH);
     QuiescencePathEntry *current = &path[ply];
@@ -2152,9 +2158,6 @@ static QuiescenceResult parallel_quiescence(Search              *search,
             score = -STATIC_LIMIT;
         return (QuiescenceResult){score, false};
     }
-
-    XqMoveList moves;
-    xq_generate_pseudo_legal(position, &moves);
 
     if (moves.count == 0)
         return (QuiescenceResult){-WIN, false};
