@@ -2410,8 +2410,6 @@ static void search_range(Search            *search,
     const unsigned child_depth = node->in_check ? node->depth : node->depth - 1;
     for (int i = range.begin; i < range.end; i += range.step)
     {
-        if (check_node(search, node))
-            break;
         if (node->parent == NULL)
             atomic_store_explicit(&search->root_started, 1, memory_order_relaxed);
 
@@ -2454,7 +2452,8 @@ static void search_range(Search            *search,
                 search->progress(&update, search->progress_user);
             }
         }
-        (void)check_node(search, node);
+        if (check_node(search, node))
+            break;
     }
 }
 
