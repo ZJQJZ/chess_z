@@ -66,13 +66,18 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * explicitly after mutating evaluation parameters behind the same user pointer. Keep the adapter,
  * history, evaluator data and table alive until return; callers must not mutate the adapter,
  * history, evaluator parameters or table while the search is running.
- * Before iterative deepening, real-game history filters legal root moves that close the third of
- * three consecutive identical even-length move sequences with four matching boundary position
- * hashes, using the same rule as built-in search. NULL, empty or mismatched history disables this
- * filtering. Search moves are never appended to real history. Progress totals include only surviving
- * root moves. When all candidates are filtered, return the original legal fallback without a score,
- * at selected_move_depth == 0 and with no iteration events. A root result with any filtered
- * candidates is never stored in the position-only table; descendants follow the repetition rules below.
+ * A root missing a king is terminal. Before iterative deepening, real-game history filters legal
+ * root moves that close the third of three consecutive identical even-length move sequences with
+ * four matching boundary position hashes, using the same rule as built-in search. NULL, empty or
+ * mismatched history disables this filtering. Search moves are never appended to real history.
+ * Progress totals include only surviving root moves. When all candidates are filtered, return the
+ * original legal fallback without a score at selected_move_depth == 0 and with no iteration events.
+ * A root result with any filtered candidates is never stored in the position-only table.
+ * In ordinary search, a legal root candidate that captures the opposing king proves a win for
+ * that move. Non-root nodes generate pseudo-legal candidates and return an exact win for the
+ * side to move if any candidate captures the opposing king, even when both kings are attacked.
+ * This check precedes path repetition, quiescence and table lookup. Recursive search keeps both
+ * kings on the board by scoring king-capture candidates without playing them.
  * Ordinary-search nodes find the nearest strict ancestor with matching board contents and side to
  * move on the current path, including the root. Move counters are ignored; real-game history and
  * sibling paths are not consulted. The cycle contains the moves after that ancestor through the
@@ -84,7 +89,7 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * own-side move does not give check but every opponent move does, return PATH_REPETITION_NONE and
  * continue ordinary search. If neither side always gives check, return PATH_REPETITION_QUIESCENCE
  * and enter quiescence. Repetition handling applies even in check and regardless of remaining
- * normal-search depth. Checks for missing kings or an illegal previous move take precedence.
+ * normal-search depth.
  * Repetition leaves that adjudicate a result or enter quiescence return before
  * current-node TT lookup, PV extension or task splitting, and do not store their result as a
  * normal-depth TT entry. DRAW/LOSS leaves also prevent writes for nodes in (matching ancestor,
@@ -113,12 +118,10 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Depth-zero nodes without check and repetition leaves where neither side always gives check run
  * quiescence in the executing thread: stand pat plus captures when not in check,
  * all legal evasions without stand pat when in check.
- * Ordinary search checks that both kings exist before entering quiescence. Quiescence generates
- * pseudo-legal candidates and returns +30000 if any candidate captures the opposing king, including
- * when both kings are attacked. King-capture candidates are never played, keeping both kings present
- * throughout recursion. Their detection precedes repetition, the extension cap and legal evasion
- * filtering.
- * All move lists are pseudo-legal; the move loop skips non-captures outside check and rejects moves
+ * Quiescence generates pseudo-legal candidates and returns +30000 if any candidate captures the
+ * opposing king, including when both kings are attacked. The capture is scored without being played.
+ * Its detection precedes quiescence repetition, the extension cap and legal evasion filtering.
+ * The quiescence move loop skips non-captures outside check and rejects moves
  * that leave the original mover in check when evading. Each quiescence invocation records a private
  * stack path from its entry position, excluding real-game history and the normal-search prefix.
  * Paths are not shared between invocations or sibling branches. The nearest strict ancestor with

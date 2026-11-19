@@ -916,6 +916,67 @@ static void repetition_rule_checks(void)
     }
 }
 
+static void king_capture_terminals(void)
+{
+    Fixture fixture;
+    fixture_init(&fixture);
+    const int black_king = xq_make_piece(XQ_BLACK, XQ_KING);
+
+    /* At depth zero a rook can capture the black king before the cycle is adjudicated. */
+    XqPosition position;
+    CHECK(xq_position_from_fen(&position, "4k4/9/9/9/4R4/9/9/9/9/3K5 r - -"));
+    CHECK(!xq_position_in_check(&position, XQ_RED));
+    Node ancestor;
+    node_init(&ancestor, &position, NULL, -1);
+    fixture.parent.parent = &ancestor;
+    fixture.parent.in_check = true;
+    SearchThreadStats stats = {0};
+    ParallelPv pv = {0};
+    Interval value = search_node(&fixture.search, &position, &fixture.parent, 0,
+                                 0, NULL, NULL, 0, &pv, &stats);
+    CHECK(!value.cancelled && value.lower == WIN && value.upper == WIN);
+    CHECK(stats.nodes == 1 && stats.cache.probes == 0 && pv.count == 0);
+    CHECK(!atomic_load_explicit(&fixture.parent.repetition_seen, memory_order_relaxed));
+
+    XqParallelOptions options = fixture.search.options;
+    options.depth = 1;
+    options.transposition_table = NULL;
+    XqParallelResult result;
+    CHECK(xq_engine_parallel_search(NULL, &position, &options, &result) == XQ_PARALLEL_OK);
+    CHECK(result.move_available && result.best_move.captured == black_king);
+    CHECK(result.score_available && result.score_kind == XQ_SEARCH_SCORE_EXACT && result.score == WIN);
+
+    /* Both generals are attacked. The side to move can win before any cache cutoff. */
+    CHECK(xq_position_from_fen(&position, "4k4/9/9/9/9/9/9/9/9/4K4 r - -"));
+    CHECK(xq_position_in_check(&position, XQ_RED) && xq_position_in_check(&position, XQ_BLACK));
+    XqMove capture = find_move(&position, 4, 0, 4, 9);
+    CHECK(capture.captured == black_king);
+    XqTranspositionStats ignored = {0};
+    parallel_tt_store(fixture.search.options.transposition_table, xq_position_hash(&position),
+                      1, 12345, XQ_SEARCH_SCORE_EXACT, capture, &ignored);
+    fixture.parent.parent = NULL;
+    fixture.search.root_color = XQ_BLACK;
+    stats = (SearchThreadStats){0};
+    value = search_node(&fixture.search, &position, &fixture.parent, 0,
+                        1, NULL, NULL, 0, &pv, &stats);
+    CHECK(!value.cancelled && value.lower == -WIN && value.upper == -WIN);
+    CHECK(stats.nodes == 1 && stats.cache.probes == 0 && pv.count == 0);
+
+    /* The parser also accepts reversed generals. Facing alone generates no capture here. */
+    CHECK(xq_position_from_fen(&position, "4K4/9/9/9/9/9/9/9/9/4k4 r - -"));
+    CHECK(xq_position_in_check(&position, XQ_RED) && xq_position_in_check(&position, XQ_BLACK));
+    XqMoveList moves;
+    xq_generate_pseudo_legal(&position, &moves);
+    CHECK(moves.count == 0);
+    stats = (SearchThreadStats){0};
+    value = search_node(&fixture.search, &position, &fixture.parent, 0,
+                        1, NULL, NULL, 0, &pv, &stats);
+    CHECK(!value.cancelled && value.lower == WIN && value.upper == WIN);
+    CHECK(stats.nodes == 1 && pv.count == 0);
+
+    fixture_destroy(&fixture);
+}
+
 typedef struct SampleCheck
 {
     XqSearchSampler *sampler;
@@ -1039,6 +1100,7 @@ int main(void)
     winning_search_order_and_pv();
 #endif
     repetition_rule_checks();
+    king_capture_terminals();
     searches_and_sampling();
     puts("parallel similarity checks passed");
     return 0;
