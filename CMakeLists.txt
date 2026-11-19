@@ -68,6 +68,12 @@ xq_enable_warnings(xiangqi_search_positions)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(xiangqi_move_cache_tests tests/move_cache_tests.c)
+    target_include_directories(xiangqi_move_cache_tests PRIVATE src)
+    target_link_libraries(xiangqi_move_cache_tests PRIVATE xiangqi)
+    xq_enable_warnings(xiangqi_move_cache_tests)
+    add_test(NAME move_cache COMMAND xiangqi_move_cache_tests)
+
     find_program(XQ_VIEWER_NODE NAMES node nodejs)
     if(XQ_VIEWER_NODE)
         add_test(NAME search_sample_viewer_model COMMAND ${XQ_VIEWER_NODE}

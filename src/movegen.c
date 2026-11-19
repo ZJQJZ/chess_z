@@ -1,11 +1,22 @@
-#include "xiangqi/movegen.h"
+#include "movegen_internal.h"
 
+#include <assert.h>
 #include <stdio.h>
+#include <string.h>
+
+static const int orthogonal[4][2]    = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+static const int advisor_steps[4][2] = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+static const int bishop_steps[4][2]  = {{2, 2}, {2, -2}, {-2, 2}, {-2, -2}};
+static const int knight_steps[8][4]  = {{0, 1, 1, 2},    {0, 1, -1, 2},  {0, -1, 1, -2},
+                                        {0, -1, -1, -2}, {1, 0, 2, 1},   {1, 0, 2, -1},
+                                        {-1, 0, -2, 1},  {-1, 0, -2, -1}};
 
 /**
  * 是否为队友
  */
-static bool is_friend(const XqPosition *pos, XqSquare sq, XqColor color)
+static bool is_friend(const XqPosition *pos,
+                      XqSquare          sq,
+                      XqColor           color)
 {
     int piece = pos->board[sq];
     return piece != XQ_EMPTY_PIECE && xq_piece_color(piece) == color;
@@ -14,17 +25,20 @@ static bool is_friend(const XqPosition *pos, XqSquare sq, XqColor color)
 /**
  * 是否是敌人
  */
-static bool is_enemy(const XqPosition *pos, XqSquare sq, XqColor color)
+static bool is_enemy(const XqPosition *pos,
+                     XqSquare          sq,
+                     XqColor           color)
 {
     int piece = pos->board[sq];
     return piece != XQ_EMPTY_PIECE && xq_piece_color(piece) != color;
 }
 
 /**
- * 是否在九宫
- * file 列  rank 行
+ * 是否在九宫 file 列 rank 行
  */
-static bool in_palace(XqColor color, int file, int rank)
+static bool in_palace(XqColor color,
+                      int     file,
+                      int     rank)
 {
     if (file < 3 || file > 5)
         return false;
@@ -32,9 +46,10 @@ static bool in_palace(XqColor color, int file, int rank)
 }
 
 /**
- * 象是不是没过河
+ * rank 是否在 color 一方的河岸
  */
-static bool bishop_on_own_side(XqColor color, int rank)
+static bool on_own_side(XqColor color,
+                        int     rank)
 {
     return color == XQ_RED ? rank <= 4 : rank >= 5;
 }
@@ -42,7 +57,10 @@ static bool bishop_on_own_side(XqColor color, int rank)
 /**
  * 将 *pos 的 from->to 走棋追加到 *list 中
  */
-static void add_move(const XqPosition *pos, XqMoveList *list, XqSquare from, XqSquare to)
+static void add_move(const XqPosition *pos,
+                     XqMoveList       *list,
+                     XqSquare          from,
+                     XqSquare          to)
 {
     int piece;
     int captured;
@@ -50,14 +68,14 @@ static void add_move(const XqPosition *pos, XqMoveList *list, XqSquare from, XqS
     if (list->count >= XQ_MAX_MOVES || to < 0 || to >= XQ_SQUARES)
         return;
 
-    piece = pos->board[from];
+    piece    = pos->board[from];
     captured = pos->board[to];
     if (captured != XQ_EMPTY_PIECE && xq_piece_color(captured) == xq_piece_color(piece))
         return;
 
-    list->moves[list->count].from = (uint8_t)from;
-    list->moves[list->count].to = (uint8_t)to;
-    list->moves[list->count].piece = (int8_t)piece;
+    list->moves[list->count].from     = (uint8_t)from;
+    list->moves[list->count].to       = (uint8_t)to;
+    list->moves[list->count].piece    = (int8_t)piece;
     list->moves[list->count].captured = (int8_t)captured;
     ++list->count;
 }
@@ -65,7 +83,11 @@ static void add_move(const XqPosition *pos, XqMoveList *list, XqSquare from, XqS
 /**
  * 带有棋盘合法位置检测和友伤判断的 add_move
  */
-static void add_step_if_valid(const XqPosition *pos, XqMoveList *list, XqSquare from, int file, int rank)
+static void add_step_if_valid(const XqPosition *pos,
+                              XqMoveList       *list,
+                              XqSquare          from,
+                              int               file,
+                              int               rank)
 {
     XqColor color = xq_piece_color(pos->board[from]);
     if (xq_square_is_valid(file, rank) && !is_friend(pos, xq_square_make(file, rank), color))
@@ -75,13 +97,15 @@ static void add_step_if_valid(const XqPosition *pos, XqMoveList *list, XqSquare 
 /**
  * 生成车的走法，放到 *list 中
  */
-static void gen_rook(const XqPosition *pos, XqMoveList *list, XqSquare from)
+static void gen_rook(const XqPosition *pos,
+                     XqMoveList       *list,
+                     XqSquare          from)
 {
     static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-    XqColor color = xq_piece_color(pos->board[from]);
-    int from_file = xq_square_file(from);
-    int from_rank = xq_square_rank(from);
-    int i;
+    XqColor          color      = xq_piece_color(pos->board[from]);
+    int              from_file  = xq_square_file(from);
+    int              from_rank  = xq_square_rank(from);
+    int              i;
 
     for (i = 0; i < 4; ++i)
     {
@@ -107,19 +131,21 @@ static void gen_rook(const XqPosition *pos, XqMoveList *list, XqSquare from)
 /**
  * 生成炮的走法，放到 *list 中
  */
-static void gen_cannon(const XqPosition *pos, XqMoveList *list, XqSquare from)
+static void gen_cannon(const XqPosition *pos,
+                       XqMoveList       *list,
+                       XqSquare          from)
 {
     static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-    XqColor color = xq_piece_color(pos->board[from]);
-    int from_file = xq_square_file(from);
-    int from_rank = xq_square_rank(from);
-    int i;
+    XqColor          color      = xq_piece_color(pos->board[from]);
+    int              from_file  = xq_square_file(from);
+    int              from_rank  = xq_square_rank(from);
+    int              i;
 
     for (i = 0; i < 4; ++i)
     {
         bool screen_seen = false;
-        int file = from_file + dirs[i][0];
-        int rank = from_rank + dirs[i][1];
+        int  file        = from_file + dirs[i][0];
+        int  rank        = from_rank + dirs[i][1];
 
         while (xq_square_is_valid(file, rank))
         {
@@ -146,20 +172,21 @@ static void gen_cannon(const XqPosition *pos, XqMoveList *list, XqSquare from)
 /**
  * 生成将/帅走法，放到 *list 中
  */
-static void gen_king(const XqPosition *pos, XqMoveList *list, XqSquare from)
+static void gen_king(const XqPosition *pos,
+                     XqMoveList       *list,
+                     XqSquare          from)
 {
-    static const int steps[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-    XqColor color = xq_piece_color(pos->board[from]);
-    int file = xq_square_file(from);
-    int rank = xq_square_rank(from);
-    int rank_step = color == XQ_RED ? 1 : -1;
-    int i;
-    int scan_rank;
+    XqColor color     = xq_piece_color(pos->board[from]);
+    int     file      = xq_square_file(from);
+    int     rank      = xq_square_rank(from);
+    int     rank_step = color == XQ_RED ? 1 : -1;
+    int     i;
+    int     scan_rank;
 
     for (i = 0; i < 4; ++i)
     {
-        int to_file = file + steps[i][0];
-        int to_rank = rank + steps[i][1];
+        int to_file = file + orthogonal[i][0];
+        int to_rank = rank + orthogonal[i][1];
         if (in_palace(color, to_file, to_rank))
             add_step_if_valid(pos, list, from, to_file, to_rank);
     }
@@ -167,8 +194,8 @@ static void gen_king(const XqPosition *pos, XqMoveList *list, XqSquare from)
     scan_rank = rank + rank_step;
     while (scan_rank >= 0 && scan_rank < XQ_RANKS)
     {
-        XqSquare to = xq_square_make(file, scan_rank);
-        int piece = pos->board[to];
+        XqSquare to    = xq_square_make(file, scan_rank);
+        int      piece = pos->board[to];
         if (piece != XQ_EMPTY_PIECE)
         {
             if (xq_piece_type(piece) == XQ_KING && xq_piece_color(piece) != color)
@@ -182,18 +209,19 @@ static void gen_king(const XqPosition *pos, XqMoveList *list, XqSquare from)
 /**
  * 生成士的走法，放到 *list 中
  */
-static void gen_advisor(const XqPosition *pos, XqMoveList *list, XqSquare from)
+static void gen_advisor(const XqPosition *pos,
+                        XqMoveList       *list,
+                        XqSquare          from)
 {
-    static const int steps[4][2] = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
     XqColor color = xq_piece_color(pos->board[from]);
-    int file = xq_square_file(from);
-    int rank = xq_square_rank(from);
-    int i;
+    int     file  = xq_square_file(from);
+    int     rank  = xq_square_rank(from);
+    int     i;
 
     for (i = 0; i < 4; ++i)
     {
-        int to_file = file + steps[i][0];
-        int to_rank = rank + steps[i][1];
+        int to_file = file + advisor_steps[i][0];
+        int to_rank = rank + advisor_steps[i][1];
         if (in_palace(color, to_file, to_rank))
             add_step_if_valid(pos, list, from, to_file, to_rank);
     }
@@ -202,22 +230,23 @@ static void gen_advisor(const XqPosition *pos, XqMoveList *list, XqSquare from)
 /**
  * 生成象的走法，放到 *list 中
  */
-static void gen_bishop(const XqPosition *pos, XqMoveList *list, XqSquare from)
+static void gen_bishop(const XqPosition *pos,
+                       XqMoveList       *list,
+                       XqSquare          from)
 {
-    static const int steps[4][2] = {{2, 2}, {2, -2}, {-2, 2}, {-2, -2}};
     XqColor color = xq_piece_color(pos->board[from]);
-    int file = xq_square_file(from);
-    int rank = xq_square_rank(from);
-    int i;
+    int     file  = xq_square_file(from);
+    int     rank  = xq_square_rank(from);
+    int     i;
 
     for (i = 0; i < 4; ++i)
     {
-        int to_file = file + steps[i][0];
-        int to_rank = rank + steps[i][1];
-        int eye_file = file + steps[i][0] / 2;
-        int eye_rank = rank + steps[i][1] / 2;
+        int to_file  = file + bishop_steps[i][0];
+        int to_rank  = rank + bishop_steps[i][1];
+        int eye_file = file + bishop_steps[i][0] / 2;
+        int eye_rank = rank + bishop_steps[i][1] / 2;
 
-        if (!xq_square_is_valid(to_file, to_rank) || !bishop_on_own_side(color, to_rank))
+        if (!xq_square_is_valid(to_file, to_rank) || !on_own_side(color, to_rank))
             continue;
         if (pos->board[xq_square_make(eye_file, eye_rank)] != XQ_EMPTY_PIECE)
             continue;
@@ -228,20 +257,20 @@ static void gen_bishop(const XqPosition *pos, XqMoveList *list, XqSquare from)
 /**
  * 生成马的走法，放到 *list 中
  */
-static void gen_knight(const XqPosition *pos, XqMoveList *list, XqSquare from)
+static void gen_knight(const XqPosition *pos,
+                       XqMoveList       *list,
+                       XqSquare          from)
 {
-    static const int legs[8][4] = {
-        {0, 1, 1, 2}, {0, 1, -1, 2}, {0, -1, 1, -2}, {0, -1, -1, -2}, {1, 0, 2, 1}, {1, 0, 2, -1}, {-1, 0, -2, 1}, {-1, 0, -2, -1}};
     int file = xq_square_file(from);
     int rank = xq_square_rank(from);
     int i;
 
     for (i = 0; i < 8; ++i)
     {
-        int leg_file = file + legs[i][0];
-        int leg_rank = rank + legs[i][1];
-        int to_file = file + legs[i][2];
-        int to_rank = rank + legs[i][3];
+        int leg_file = file + knight_steps[i][0];
+        int leg_rank = rank + knight_steps[i][1];
+        int to_file  = file + knight_steps[i][2];
+        int to_rank  = rank + knight_steps[i][3];
 
         if (!xq_square_is_valid(to_file, to_rank))
             continue;
@@ -254,19 +283,54 @@ static void gen_knight(const XqPosition *pos, XqMoveList *list, XqSquare from)
 /**
  * 生成兵卒的走法，放到 *list 中
  */
-static void gen_pawn(const XqPosition *pos, XqMoveList *list, XqSquare from)
+static void gen_pawn(const XqPosition *pos,
+                     XqMoveList       *list,
+                     XqSquare          from)
 {
-    XqColor color = xq_piece_color(pos->board[from]);
-    int file = xq_square_file(from);
-    int rank = xq_square_rank(from);
-    int forward = color == XQ_RED ? 1 : -1;
-    bool crossed = color == XQ_RED ? rank >= 5 : rank <= 4;
+    XqColor color   = xq_piece_color(pos->board[from]);
+    int     file    = xq_square_file(from);
+    int     rank    = xq_square_rank(from);
+    int     forward = color == XQ_RED ? 1 : -1;
+    bool    crossed = !on_own_side(color, rank);
 
     add_step_if_valid(pos, list, from, file, rank + forward);
     if (crossed)
     {
         add_step_if_valid(pos, list, from, file - 1, rank);
         add_step_if_valid(pos, list, from, file + 1, rank);
+    }
+}
+
+static inline void gen_piece(const XqPosition *pos,
+                             XqMoveList       *list,
+                             XqSquare          sq,
+                             int               piece)
+{
+    switch (xq_piece_type(piece))
+    {
+    case XQ_KING:
+        gen_king(pos, list, sq);
+        break;
+    case XQ_ADVISOR:
+        gen_advisor(pos, list, sq);
+        break;
+    case XQ_BISHOP:
+        gen_bishop(pos, list, sq);
+        break;
+    case XQ_KNIGHT:
+        gen_knight(pos, list, sq);
+        break;
+    case XQ_ROOK:
+        gen_rook(pos, list, sq);
+        break;
+    case XQ_CANNON:
+        gen_cannon(pos, list, sq);
+        break;
+    case XQ_PAWN:
+        gen_pawn(pos, list, sq);
+        break;
+    default:
+        break;
     }
 }
 
@@ -279,11 +343,10 @@ void xq_movelist_clear(XqMoveList *list)
 }
 
 /**
- * 生成伪合法走法
- * 生成某一方的所有可行走法
- * 之所以称为 "伪"，是因为没考察将军的情况
+ * 生成伪合法走法生成某一方的所有可行走法之所以称为 "伪"，是因为没考察将军的情况
  */
-void xq_generate_pseudo_legal(const XqPosition *pos, XqMoveList *list)
+void xq_generate_pseudo_legal(const XqPosition *pos,
+                              XqMoveList       *list)
 {
     XqBitboard remaining = pos->occupied[pos->side_to_move];
 
@@ -291,79 +354,212 @@ void xq_generate_pseudo_legal(const XqPosition *pos, XqMoveList *list)
     while (!xq_bb_is_empty(remaining))
     {
         XqSquare sq = xq_bb_first_square(remaining);
-        int piece = pos->board[sq];
-
         xq_bb_clear(&remaining, sq);
-
-        switch (xq_piece_type(piece))
-        {
-        case XQ_KING:
-            gen_king(pos, list, sq);
-            break;
-        case XQ_ADVISOR:
-            gen_advisor(pos, list, sq);
-            break;
-        case XQ_BISHOP:
-            gen_bishop(pos, list, sq);
-            break;
-        case XQ_KNIGHT:
-            gen_knight(pos, list, sq);
-            break;
-        case XQ_ROOK:
-            gen_rook(pos, list, sq);
-            break;
-        case XQ_CANNON:
-            gen_cannon(pos, list, sq);
-            break;
-        case XQ_PAWN:
-            gen_pawn(pos, list, sq);
-            break;
-        default:
-            break;
-        }
+        gen_piece(pos, list, sq, pos->board[sq]);
     }
 }
 
-/**
- * 判断棋盘上的 sq 棋子是否受到 by_color 方的进攻。
- * sq 必须放有 by_color 的敌方棋子。
- */
-bool xq_square_attacked(const XqPosition *pos, XqSquare sq, XqColor by_color)
+static void add_dependency(XqBitboard *dependencies,
+                           int         file,
+                           int         rank)
 {
-    static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-    static const int knight_sources[8][4] = {
-        {-1, -2, -1, -1}, {1, -2, 1, -1}, {-1, 2, -1, 1}, {1, 2, 1, 1}, {-2, -1, -1, -1}, {-2, 1, -1, 1}, {2, -1, 1, -1}, {2, 1, 1, 1}};
-    static const int diagonals[4][2] = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
-    int target_file;
-    int target_rank;
-    int target_piece;
-    bool has_rook;
-    bool has_cannon;
-    bool has_king;
-    int i;
+    if (xq_square_is_valid(file, rank))
+        xq_bb_set(dependencies, xq_square_make(file, rank));
+}
 
-    if (pos == NULL || sq < 0 || sq >= XQ_SQUARES ||
-        by_color < 0 || by_color >= XQ_COLOR_NB)
+/* Geometry is independent of occupancy, so blocked rays can retain the same mask. */
+static XqBitboard piece_dependencies(XqSquare sq,
+                                     int      piece)
+{
+    XqBitboard dependencies = xq_bb_empty();
+    XqColor    color        = xq_piece_color(piece);
+    int        file         = xq_square_file(sq);
+    int        rank         = xq_square_rank(sq);
+    /* A piece can leave and later return to a slot that still holds its previous row. */
+    xq_bb_set(&dependencies, sq);
+    switch (xq_piece_type(piece))
+    {
+    case XQ_ROOK:
+    case XQ_CANNON:
+        for (int f = 0; f < XQ_FILES; ++f)
+            xq_bb_set(&dependencies, xq_square_make(f, rank));
+        for (int r = 0; r < XQ_RANKS; ++r)
+            xq_bb_set(&dependencies, xq_square_make(file, r));
+        break;
+    case XQ_KING:
+    case XQ_ADVISOR: {
+        bool king             = xq_piece_type(piece) == XQ_KING;
+        const int (*steps)[2] = king ? orthogonal : advisor_steps;
+        for (int i = 0; i < 4; ++i)
+        {
+            int f = file + steps[i][0];
+            int r = rank + steps[i][1];
+            if (in_palace(color, f, r))
+                xq_bb_set(&dependencies, xq_square_make(f, r));
+        }
+        if (king)
+        {
+            int direction = color == XQ_RED ? 1 : -1;
+            for (int r = rank + direction; r >= 0 && r < XQ_RANKS; r += direction)
+                xq_bb_set(&dependencies, xq_square_make(file, r));
+        }
+        break;
+    }
+    case XQ_BISHOP:
+        for (int i = 0; i < 4; ++i)
+        {
+            int f = file + bishop_steps[i][0];
+            int r = rank + bishop_steps[i][1];
+            if (xq_square_is_valid(f, r) && on_own_side(color, r))
+            {
+                xq_bb_set(&dependencies, xq_square_make(f, r));
+                xq_bb_set(&dependencies, xq_square_make((file + f) / 2, (rank + r) / 2));
+            }
+        }
+        break;
+    case XQ_KNIGHT:
+        for (int i = 0; i < 8; ++i)
+        {
+            int f = file + knight_steps[i][2];
+            int r = rank + knight_steps[i][3];
+            if (xq_square_is_valid(f, r))
+            {
+                xq_bb_set(&dependencies, xq_square_make(f, r));
+                xq_bb_set(&dependencies,
+                          xq_square_make(file + knight_steps[i][0], rank + knight_steps[i][1]));
+            }
+        }
+        break;
+    case XQ_PAWN:
+        add_dependency(&dependencies, file, rank + (color == XQ_RED ? 1 : -1));
+        if (!on_own_side(color, rank))
+        {
+            add_dependency(&dependencies, file - 1, rank);
+            add_dependency(&dependencies, file + 1, rank);
+        }
+        break;
+    default:
+        break;
+    }
+    return dependencies;
+}
+
+/* Copy short rows with fixed-size operations so the compiler can inline them. */
+static inline void copy_piece_moves(XqMove       *dst,
+                                    const XqMove *src,
+                                    int           count)
+{
+    _Static_assert(XQ_MAX_PIECE_MOVES <= 17, "piece move copy must cover a full row");
+    if (count >= 9)
+    {
+        memcpy(dst, src, 8 * sizeof(*src));
+        memcpy(dst + count - 8, src + count - 8, 8 * sizeof(*src));
+        if (count == 17)
+            dst[8] = src[8];
+    }
+    else if (count >= 4)
+    {
+        memcpy(dst, src, 4 * sizeof(*src));
+        memcpy(dst + count - 4, src + count - 4, 4 * sizeof(*src));
+    }
+    else if (count >= 2)
+    {
+        memcpy(dst, src, 2 * sizeof(*src));
+        dst[count - 1] = src[count - 1];
+    }
+    else if (count == 1)
+        dst[0] = src[0];
+}
+
+void xq_move_cache_generate(XqMoveCache      *cache,
+                            const XqPosition *pos,
+                            XqMoveList       *list)
+{
+    XqColor    color     = pos->side_to_move;
+    XqBitboard remaining = pos->occupied[color];
+    XqBitboard changed   = cache->changed[color];
+    list->count          = 0;
+    while (!xq_bb_is_empty(remaining))
+    {
+        XqSquare sq = xq_bb_first_square(remaining);
+        xq_bb_clear(&remaining, sq);
+        XqCachedPieceMoves *row           = &cache->rows[sq];
+        XqBitboard          dependencies  = row->dependencies;
+        bool                uninitialized = xq_bb_is_empty(dependencies);
+        if (uninitialized || ((dependencies.lo & changed.lo) | (dependencies.hi & changed.hi)) != 0)
+        {
+            int piece = pos->board[sq];
+            if (uninitialized || row->piece != piece)
+            {
+                row->dependencies = piece_dependencies(sq, piece);
+                row->piece        = (int8_t)piece;
+            }
+            if (list->count <= XQ_MAX_MOVES - XQ_MAX_PIECE_MOVES)
+            {
+                int start = list->count;
+                gen_piece(pos, list, sq, piece);
+                row->count = (uint8_t)(list->count - start);
+                assert(row->count <= XQ_MAX_PIECE_MOVES);
+                copy_piece_moves(row->moves, list->moves + start, row->count);
+                continue;
+            }
+            XqMoveList scratch;
+            scratch.count = 0;
+            gen_piece(pos, &scratch, sq, piece);
+            assert(scratch.count <= XQ_MAX_PIECE_MOVES);
+            row->count = (uint8_t)scratch.count;
+            copy_piece_moves(row->moves, scratch.moves, row->count);
+        }
+        int available = XQ_MAX_MOVES - list->count;
+        int count     = row->count < available ? row->count : available;
+        copy_piece_moves(list->moves + list->count, row->moves, count);
+        list->count += count;
+    }
+    /* Even when the output was truncated, all rows for this color have been refreshed. */
+    cache->changed[color] = xq_bb_empty();
+}
+
+/**
+ * 判断棋盘上的 sq 棋子是否受到 by_color 方的进攻。 sq 必须放有 by_color 的敌方棋子。
+ */
+bool xq_square_attacked(const XqPosition *pos,
+                        XqSquare          sq,
+                        XqColor           by_color)
+{
+    static const int dirs[4][2]           = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    static const int knight_sources[8][4] = {{-1, -2, -1, -1}, {1, -2, 1, -1},   {-1, 2, -1, 1},
+                                             {1, 2, 1, 1},     {-2, -1, -1, -1}, {-2, 1, -1, 1},
+                                             {2, -1, 1, -1},   {2, 1, 1, 1}};
+    static const int diagonals[4][2]      = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+    int              target_file;
+    int              target_rank;
+    int              target_piece;
+    bool             has_rook;
+    bool             has_cannon;
+    bool             has_king;
+    int              i;
+
+    if (pos == NULL || sq < 0 || sq >= XQ_SQUARES || by_color < 0 || by_color >= XQ_COLOR_NB)
         return false;
     target_piece = pos->board[sq];
-    if (target_piece == XQ_EMPTY_PIECE ||
-        xq_piece_color(target_piece) == by_color)
+    if (target_piece == XQ_EMPTY_PIECE || xq_piece_color(target_piece) == by_color)
         return false;
 
     target_file = xq_square_file(sq);
     target_rank = xq_square_rank(sq);
-    has_rook = !xq_bb_is_empty(pos->pieces[by_color][XQ_ROOK]);
-    has_cannon = !xq_bb_is_empty(pos->pieces[by_color][XQ_CANNON]);
-    has_king = !xq_bb_is_empty(pos->pieces[by_color][XQ_KING]);
+    has_rook    = !xq_bb_is_empty(pos->pieces[by_color][XQ_ROOK]);
+    has_cannon  = !xq_bb_is_empty(pos->pieces[by_color][XQ_CANNON]);
+    has_king    = !xq_bb_is_empty(pos->pieces[by_color][XQ_KING]);
 
-    /* 车、炮、将帅都沿直线攻击。每个方向的第一个棋子可能是车；
-     * 隔过恰好一个棋子后的第一个棋子可能是炮。将帅还需分别处理
-     * 九宫内的一步攻击以及仅针对对方将帅的照面攻击。 */
+    /*
+     * 车、炮、将帅都沿直线攻击。每个方向的第一个棋子可能是车；隔过恰好一个棋子后的第一个棋子可能是
+     * 炮。将帅还需分别处理九宫内的一步攻击以及仅针对对方将帅的照面攻击。
+     */
     if (has_rook || has_cannon || has_king)
         for (i = 0; i < 4; ++i)
         {
-            int file = target_file + dirs[i][0];
-            int rank = target_rank + dirs[i][1];
+            int  file        = target_file + dirs[i][0];
+            int  rank        = target_rank + dirs[i][1];
             bool screen_seen = false;
 
             while (xq_square_is_valid(file, rank))
@@ -383,10 +579,10 @@ bool xq_square_attacked(const XqPosition *pos, XqSquare sq, XqColor by_color)
                         return true;
                     if (has_king && xq_bb_test(pos->pieces[by_color][XQ_KING], from))
                     {
-                        bool adjacent = (file == target_file ? rank == target_rank + dirs[i][1] : file == target_file + dirs[i][0]) &&
+                        bool adjacent = (file == target_file ? rank == target_rank + dirs[i][1]
+                                                             : file == target_file + dirs[i][0]) &&
                                         in_palace(by_color, target_file, target_rank);
-                        bool flying = file == target_file &&
-                                      xq_piece_type(target_piece) == XQ_KING;
+                        bool flying = file == target_file && xq_piece_type(target_piece) == XQ_KING;
                         if (adjacent || flying)
                             return true;
                     }
@@ -410,8 +606,8 @@ bool xq_square_attacked(const XqPosition *pos, XqSquare sq, XqColor by_color)
     if (!xq_bb_is_empty(pos->pieces[by_color][XQ_KNIGHT]))
         for (i = 0; i < 8; ++i)
         {
-            int file = target_file + knight_sources[i][0];
-            int rank = target_rank + knight_sources[i][1];
+            int file     = target_file + knight_sources[i][0];
+            int rank     = target_rank + knight_sources[i][1];
             int leg_file = target_file + knight_sources[i][2];
             int leg_rank = target_rank + knight_sources[i][3];
 
@@ -438,8 +634,7 @@ bool xq_square_attacked(const XqPosition *pos, XqSquare sq, XqColor by_color)
             {
                 int file = target_file + i;
                 if (xq_square_is_valid(file, target_rank) &&
-                    xq_bb_test(pos->pieces[by_color][XQ_PAWN],
-                               xq_square_make(file, target_rank)))
+                    xq_bb_test(pos->pieces[by_color][XQ_PAWN], xq_square_make(file, target_rank)))
                     return true;
             }
     }
@@ -452,23 +647,20 @@ bool xq_square_attacked(const XqPosition *pos, XqSquare sq, XqColor by_color)
             int file = target_file + diagonals[i][0];
             int rank = target_rank + diagonals[i][1];
             if (xq_square_is_valid(file, rank) &&
-                xq_bb_test(pos->pieces[by_color][XQ_ADVISOR],
-                           xq_square_make(file, rank)))
+                xq_bb_test(pos->pieces[by_color][XQ_ADVISOR], xq_square_make(file, rank)))
                 return true;
         }
 
     /* 象从两格外攻击，目标必须未过河且象眼为空。 */
-    if (!xq_bb_is_empty(pos->pieces[by_color][XQ_BISHOP]) &&
-        bishop_on_own_side(by_color, target_rank))
+    if (!xq_bb_is_empty(pos->pieces[by_color][XQ_BISHOP]) && on_own_side(by_color, target_rank))
         for (i = 0; i < 4; ++i)
         {
-            int file = target_file + diagonals[i][0] * 2;
-            int rank = target_rank + diagonals[i][1] * 2;
+            int file     = target_file + diagonals[i][0] * 2;
+            int rank     = target_rank + diagonals[i][1] * 2;
             int eye_file = target_file + diagonals[i][0];
             int eye_rank = target_rank + diagonals[i][1];
             if (xq_square_is_valid(file, rank) &&
-                xq_bb_test(pos->pieces[by_color][XQ_BISHOP],
-                           xq_square_make(file, rank)) &&
+                xq_bb_test(pos->pieces[by_color][XQ_BISHOP], xq_square_make(file, rank)) &&
                 pos->board[xq_square_make(eye_file, eye_rank)] == XQ_EMPTY_PIECE)
                 return true;
         }
@@ -479,7 +671,8 @@ bool xq_square_attacked(const XqPosition *pos, XqSquare sq, XqColor by_color)
 /**
  * 查看某一方是否正在被将军，如果此方甚至找不到将帅了（虽然很少见），也算
  */
-bool xq_position_in_check(const XqPosition *pos, XqColor color)
+bool xq_position_in_check(const XqPosition *pos,
+                          XqColor           color)
 {
     XqSquare king = xq_position_king_square(pos, color);
     if (king == XQ_NO_SQUARE)
@@ -490,17 +683,18 @@ bool xq_position_in_check(const XqPosition *pos, XqColor color)
 /**
  * 生成合法走法
  */
-void xq_generate_legal(const XqPosition *pos, XqMoveList *list)
+void xq_generate_legal(const XqPosition *pos,
+                       XqMoveList       *list)
 {
     XqMoveList pseudo;
-    int i;
+    int        i;
 
     xq_movelist_clear(list);
     xq_generate_pseudo_legal(pos, &pseudo);
     for (i = 0; i < pseudo.count; ++i)
     {
-        XqPosition next = *pos;
-        XqColor mover = pos->side_to_move;
+        XqPosition next  = *pos;
+        XqColor    mover = pos->side_to_move;
         if (!xq_position_make_move(&next, pseudo.moves[i]))
             continue;
         if (!xq_position_in_check(&next, mover))
@@ -512,11 +706,12 @@ void xq_generate_legal(const XqPosition *pos, XqMoveList *list)
 /**
  * 测试
  */
-uint64_t xq_perft(const XqPosition *pos, int depth)
+uint64_t xq_perft(const XqPosition *pos,
+                  int               depth)
 {
     XqMoveList list;
-    uint64_t nodes = 0;
-    int i;
+    uint64_t   nodes = 0;
+    int        i;
 
     if (depth == 0)
         return 1u;
@@ -537,18 +732,16 @@ uint64_t xq_perft(const XqPosition *pos, int depth)
 /**
  * 将一个 XqMove 转换为字符串
  */
-const char *xq_move_to_string(XqMove move, char *buffer, size_t buffer_size)
+const char *xq_move_to_string(XqMove move,
+                              char  *buffer,
+                              size_t buffer_size)
 {
     if (buffer == NULL || buffer_size < 6)
         return "";
 
     (void)snprintf(
-        buffer,
-        buffer_size,
-        "%c%d%c%d",
-        (char)('a' + xq_square_file((XqSquare)move.from)),
-        xq_square_rank((XqSquare)move.from),
-        (char)('a' + xq_square_file((XqSquare)move.to)),
+        buffer, buffer_size, "%c%d%c%d", (char)('a' + xq_square_file((XqSquare)move.from)),
+        xq_square_rank((XqSquare)move.from), (char)('a' + xq_square_file((XqSquare)move.to)),
         xq_square_rank((XqSquare)move.to));
     return buffer;
 }

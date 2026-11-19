@@ -3,6 +3,7 @@
 #endif
 #include "xiangqi/parallel_search.h"
 #include "history_internal.h"
+#include "movegen_internal.h"
 #include "search_sampling_internal.h"
 #include "xiangqi/movegen.h"
 
@@ -1186,6 +1187,7 @@ typedef struct SearchRange
 /* One writer per physical thread; statistics are merged only after joining the pool. */
 typedef struct SearchThreadStats
 {
+    XqMoveCache          move_cache;
     XqTranspositionStats cache;
     uint64_t             nodes;
     XqSamplingThread    *sampling;
@@ -2153,7 +2155,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
     if (ply > 0)
     {
         moves = &generated_moves;
-        xq_generate_pseudo_legal(position, moves);
+        xq_move_cache_generate(&stats->move_cache, position, moves);
         if (parallel_find_king_capture(moves, mover) != NULL)
             return (QuiescenceResult){WIN, false};
         in_check = xq_position_in_check(position, mover);
@@ -2215,6 +2217,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
             xq_position_unmake_move(position, move);
             continue;
         }
+        xq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
         if (stats->sampling != NULL)
             xq_sampling_push(stats->sampling, move, true);
         QuiescenceResult child =
@@ -2222,6 +2225,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
         if (stats->sampling != NULL)
             xq_sampling_pop(stats->sampling, true);
         xq_position_unmake_move(position, move);
+        xq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
         if (child.stopped)
             return (QuiescenceResult){0, true};
 
@@ -2448,6 +2452,7 @@ static void search_range(Search            *search,
         XqMove     move           = node->moves.moves[i];
         XqPosition child_position = node->position;
         xq_position_make_move(&child_position, move);
+        xq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
         if (stats->sampling != NULL)
             xq_sampling_push(stats->sampling, move, false);
         ParallelPv child_pv;
@@ -2455,6 +2460,7 @@ static void search_range(Search            *search,
                                        child_hint, child_hint_count, &child_pv, stats);
         if (stats->sampling != NULL)
             xq_sampling_pop(stats->sampling, false);
+        xq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
 
         if (!child.cancelled)
         {
@@ -2515,6 +2521,8 @@ static void *worker_main(void *argument)
         TaskCompletion *completion = worker->completion;
         if (worker->stats.sampling != NULL)
             xq_sampling_state(worker->stats.sampling, XQ_SEARCH_THREAD_SEARCH);
+        /* A new task may start on a different path from the worker's previous task. */
+        xq_move_cache_reset(&worker->stats.move_cache);
         search_range(search, worker->node, worker->range, &completion->pv, &worker->stats);
         worker->node       = NULL;
         worker->range      = (SearchRange){0, 0, 1};
@@ -2801,7 +2809,7 @@ static Interval search_node(Search            *search,
         node.moves = search->root_moves;
     else
     {
-        xq_generate_pseudo_legal(position, &node.moves);
+        xq_move_cache_generate(&stats->move_cache, position, &node.moves);
         if (parallel_find_king_capture(&node.moves, position->side_to_move) != NULL)
         {
             score = node.maximizing ? WIN : -WIN;
