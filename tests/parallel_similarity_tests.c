@@ -938,20 +938,36 @@ static void king_capture_terminals(void)
     CHECK(stats.nodes == 1 && stats.cache.probes == 0 && pv.count == 0);
     CHECK(!atomic_load_explicit(&fixture.parent.repetition_seen, memory_order_relaxed));
 
+    /* A root king capture takes precedence over a legal quiet cache hint. */
+    XqMove quiet = find_move(&position, 4, 5, 0, 5);
+    XqMoveList legal;
+    xq_generate_legal(&position, &legal);
+    CHECK(quiet.captured == XQ_EMPTY_PIECE && parallel_prioritize_move(&legal, quiet));
+    XqTranspositionStats ignored = {0};
+    uint64_t root_key = xq_position_hash(&position);
     XqParallelOptions options = fixture.search.options;
-    options.depth = 1;
-    options.transposition_table = NULL;
+    options.depth = 5;
+    parallel_tt_store(options.transposition_table, root_key, 1, 12345,
+                      XQ_SEARCH_SCORE_EXACT, quiet, &ignored);
     XqParallelResult result;
     CHECK(xq_engine_parallel_search(NULL, &position, &options, &result) == XQ_PARALLEL_OK);
     CHECK(result.move_available && result.best_move.captured == black_king);
     CHECK(result.score_available && result.score_kind == XQ_SEARCH_SCORE_EXACT && result.score == WIN);
+    CHECK(result.stats.nodes == 0 && result.stats.selected_move_depth == 1);
+    CHECK(result.stats.iteration_total_moves == (unsigned)legal.count);
+    CHECK(result.stats.cache.hits == 1 && result.stats.cache.cutoffs == 0);
+    CHECK(result.stats.cache.stores == 1);
+    const ParallelTtEntry *cached = entry_for(options.transposition_table, root_key);
+    CHECK(cached->depth == 1 && cached->score == WIN && cached->score_kind == XQ_SEARCH_SCORE_EXACT);
+    CHECK(equal_move(cached->best_move, result.best_move));
+    CHECK(xq_engine_parallel_search(NULL, &position, &options, &result) == XQ_PARALLEL_OK);
+    CHECK(result.stats.cache.cutoffs == 1 && result.stats.cache.stores == 0);
 
     /* Both generals are attacked. The side to move can win before any cache cutoff. */
     CHECK(xq_position_from_fen(&position, "4k4/9/9/9/9/9/9/9/9/4K4 r - -"));
     CHECK(xq_position_in_check(&position, XQ_RED) && xq_position_in_check(&position, XQ_BLACK));
     XqMove capture = find_move(&position, 4, 0, 4, 9);
     CHECK(capture.captured == black_king);
-    XqTranspositionStats ignored = {0};
     parallel_tt_store(fixture.search.options.transposition_table, xq_position_hash(&position),
                       1, 12345, XQ_SEARCH_SCORE_EXACT, capture, &ignored);
     fixture.parent.parent = NULL;

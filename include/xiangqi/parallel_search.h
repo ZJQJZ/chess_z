@@ -73,11 +73,10 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Progress totals include only surviving root moves. When all candidates are filtered, return the
  * original legal fallback without a score at selected_move_depth == 0 and with no iteration events.
  * A root result with any filtered candidates is never stored in the position-only table.
- * In ordinary search, a legal root candidate that captures the opposing king proves a win for
- * that move. Non-root nodes generate pseudo-legal candidates and return an exact win for the
- * side to move if any candidate captures the opposing king, even when both kings are attacked.
- * This check precedes path repetition, quiescence and table lookup. Recursive search keeps both
- * kings on the board by scoring king-capture candidates without playing them.
+ * Non-root ordinary nodes generate pseudo-legal candidates and return an exact win for the side
+ * to move if any candidate captures the opposing king, even when both kings are attacked. This
+ * check precedes path repetition, quiescence and table lookup. Recursive search keeps both kings
+ * on the board by scoring king-capture candidates without playing them.
  * Ordinary-search nodes find the nearest strict ancestor with matching board contents and side to
  * move on the current path, including the root. Move counters are ignored; real-game history and
  * sibling paths are not consulted. The cycle contains the moves after that ancestor through the
@@ -105,8 +104,14 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * an upper bound of -30000 proves the outcome regardless of cached depth. The returned score is
  * exact and selected_move_depth is the cached depth; node counts and started/completed depths
  * remain zero.
- * Other root cache hits supply move ordering only. Searches depths 1..options.depth,
- * reusing the helper pool and previous root scores for ordering, even without a table. Stops early
+ * Other root cache hits supply move ordering only. After the cache and time-stop checks, the
+ * entry point scans the surviving legal root moves before creating the helper pool. The first
+ * king capture is returned as best_move with an exact +30000 score, selected_move_depth == 1,
+ * and winning_move_found == true. Node counts, started and completed depths, and completed
+ * root move count stay at zero. If a table is available and no root candidates were filtered,
+ * the entry point attempts to store this exact result at depth 1.
+ * Iterative deepening searches depths 1..options.depth, reusing the helper pool and previous root
+ * scores for ordering, even without a table. It stops early
  * for a terminal root, proven winning move or time stop. Exact results describe the selected
  * iteration; a partial first iteration supplies a lower bound. An unsearched legal fallback has
  * score_available == false and selected_move_depth == 0. Table generations advance per iteration
@@ -217,9 +222,10 @@ XqParallelStatus xq_engine_parallel_search(const XqEngineAdapter *engine,
 /* Same search with optional observation of root progress, cooperative logical-path samples
  * and thread-state events (see XqSearchProgressFn concurrency contract).
  * Pass NULL for sampler to receive only root progress. Terminal roots, cached proven root outcomes,
- * fully filtered roots and argument/resource failures emit no iteration events. The sampler is
- * borrowed until return; a controller with capacity smaller than options.thread_count disables
- * sampling for this invocation. The basic entrypoint never emits sampling events. */
+ * immediate root king captures, fully filtered roots and argument/resource failures emit no
+ * iteration events. The sampler is borrowed until return. A controller with capacity smaller than
+ * options.thread_count disables sampling for this invocation. The basic entrypoint never emits
+ * sampling events. */
 XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter *engine,
     const XqPosition *pos, const XqParallelOptions *options, XqParallelResult *result,
     XqSearchProgressFn progress, void *progress_user, XqSearchSampler *sampler);

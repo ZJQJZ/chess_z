@@ -26,7 +26,7 @@ typedef struct PathCheck
     XqSearchThreadState state[16];
     uint32_t registered_threads, working_threads;
     unsigned caller_begin_depth, caller_end_depth;
-    unsigned caller_begins, caller_ends, root_finishes;
+    unsigned caller_begins, caller_ends, root_finishes, root_events;
     uint64_t samples, normal, quiet, quiet_extensions, helpers, waits, idle;
     bool request_each_event;
 #ifndef _WIN32
@@ -149,6 +149,7 @@ static void path_progress(const XqSearchProgress *event, void *user)
     else
     {
         CHECK(event->sample == NULL);
+        ++check->root_events;
         if (event->event == XQ_SEARCH_ITERATION_FINISHED && check->registered_threads)
         {
             /* Parallel root progress precedes final PV/temporary cleanup;
@@ -492,15 +493,19 @@ static void winning_and_no_moves(void)
     CHECK(stats.winning_move_found && stats.max_started_depth == 1);
     check_destroy(&check);
 #ifndef _WIN32
-    check_init(&check, "4k4/9/9/9/4R4/9/9/9/9/3K5 r - -", 1);
+    check_init(&check, "4k4/9/9/9/4R4/9/9/9/9/3K5 r - -", 2);
     XqParallelOptions options = xq_parallel_options_default();
     options.depth = 5;
     options.time_limit_ms = 0;
-    options.thread_count = 1;
+    options.thread_count = 2;
     XqParallelResult result;
     CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
-    CHECK(result.stats.winning_move_found && result.stats.max_started_depth == 1);
+    CHECK(result.stats.winning_move_found && result.stats.selected_move_depth == 1);
+    CHECK(result.stats.max_started_depth == 0 && result.stats.completed_depth == 0);
+    CHECK(result.stats.nodes == 0 && result.stats.iteration_completed_moves == 0);
+    CHECK(check.root_events == 0 && check.samples == 0);
+    CHECK(check.registered_threads == UINT32_C(1));
     check_destroy(&check);
 #endif
     check_init(&check, "4k4/9/9/9/9/9/9/9/3rr4/3K5 r - -", 1);
@@ -509,6 +514,7 @@ static void winning_and_no_moves(void)
           &stats, path_progress, &check, check.sampler));
     CHECK(check.samples == 0);
 #ifndef _WIN32
+    options.thread_count = 1;
     CHECK(xq_engine_parallel_search_with_observer(NULL, &check.root, &options, &result,
           path_progress, &check, check.sampler) == XQ_PARALLEL_OK);
     CHECK(!result.move_available && check.samples == 0);
