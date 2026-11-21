@@ -147,37 +147,53 @@ static void gen_cannon(const XqPosition *pos,
                        MoveWriter       *writer,
                        XqSquare          from)
 {
-    static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-    XqColor          color      = xq_piece_color(pos->board[from]);
-    int              from_file  = xq_square_file(from);
-    int              from_rank  = xq_square_rank(from);
-    int              i;
+    int row_start = from - xq_square_file(from);
+    int row_end   = row_start + XQ_FILES;
+    int to;
 
-    for (i = 0; i < 4; ++i)
+    /* 炮架前生成空格走法，越过炮架后由 add_move 判断第一颗棋子能否被吃。 */
+    /* 向右 */
+    for (to = from + 1; to < row_end && pos->board[to] == XQ_EMPTY_PIECE; ++to)
+        add_move(pos, writer, from, (XqSquare)to);
+    for (++to; to < row_end; ++to)
     {
-        bool screen_seen = false;
-        int  file        = from_file + dirs[i][0];
-        int  rank        = from_rank + dirs[i][1];
+        if (pos->board[to] == XQ_EMPTY_PIECE)
+            continue;
+        add_move(pos, writer, from, (XqSquare)to);
+        break;
+    }
 
-        while (xq_square_is_valid(file, rank))
-        {
-            XqSquare to = xq_square_make(file, rank);
-            if (!screen_seen)
-            {
-                if (pos->board[to] == XQ_EMPTY_PIECE)
-                    add_move(pos, writer, from, to);
-                else
-                    screen_seen = true;
-            }
-            else if (pos->board[to] != XQ_EMPTY_PIECE)
-            {
-                if (is_enemy(pos, to, color))
-                    add_move(pos, writer, from, to);
-                break;
-            }
-            file += dirs[i][0];
-            rank += dirs[i][1];
-        }
+    /* 向左 */
+    for (to = from - 1; to >= row_start && pos->board[to] == XQ_EMPTY_PIECE; --to)
+        add_move(pos, writer, from, (XqSquare)to);
+    for (--to; to >= row_start; --to)
+    {
+        if (pos->board[to] == XQ_EMPTY_PIECE)
+            continue;
+        add_move(pos, writer, from, (XqSquare)to);
+        break;
+    }
+
+    /* 行号递增 */
+    for (to = from + XQ_FILES; to < XQ_SQUARES && pos->board[to] == XQ_EMPTY_PIECE; to += XQ_FILES)
+        add_move(pos, writer, from, (XqSquare)to);
+    for (to += XQ_FILES; to < XQ_SQUARES; to += XQ_FILES)
+    {
+        if (pos->board[to] == XQ_EMPTY_PIECE)
+            continue;
+        add_move(pos, writer, from, (XqSquare)to);
+        break;
+    }
+
+    /* 行号递减 */
+    for (to = from - XQ_FILES; to >= 0 && pos->board[to] == XQ_EMPTY_PIECE; to -= XQ_FILES)
+        add_move(pos, writer, from, (XqSquare)to);
+    for (to -= XQ_FILES; to >= 0; to -= XQ_FILES)
+    {
+        if (pos->board[to] == XQ_EMPTY_PIECE)
+            continue;
+        add_move(pos, writer, from, (XqSquare)to);
+        break;
     }
 }
 
