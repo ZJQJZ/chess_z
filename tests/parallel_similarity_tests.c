@@ -85,6 +85,8 @@ static void fixture_init(Fixture *fixture)
     fixture->search.options.thread_count = 1;
     fixture->search.options.transposition_table = xq_parallel_transposition_table_create();
     CHECK(fixture->search.options.transposition_table != NULL);
+    CHECK((uintptr_t)fixture->search.options.transposition_table->buckets %
+              PARALLEL_CACHE_LINE_ALIGNMENT == 0);
     fixture->search.root_color = XQ_RED;
     fixture->search.evaluate = xq_engine_default_static_evaluate;
     atomic_init(&fixture->search.time_state, TIME_ACTIVE);

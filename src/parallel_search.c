@@ -183,6 +183,7 @@ enum
     PARALLEL_INTERLEAVED_SPLIT_THREADS          = 2,
     PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
     PARALLEL_MAX_PV_MOVES                       = 64,
+    PARALLEL_CACHE_LINE_ALIGNMENT               = 128,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
     PARALLEL_TT_BUCKET_COUNT                    = 1 << 28,
     PARALLEL_MAX_SIMILAR_POSITION_QUERIES       = 8,
@@ -212,9 +213,13 @@ typedef struct ParallelTtEntry
 
 typedef struct ParallelTtBucket
 {
-    atomic_int      occupied;
+    /* Keep independent bucket guards on separate cache lines. */
+    _Alignas(PARALLEL_CACHE_LINE_ALIGNMENT) atomic_int occupied;
     ParallelTtEntry entries[PARALLEL_TT_BUCKET_SIZE];
 } ParallelTtBucket;
+
+_Static_assert(sizeof(ParallelTtBucket) == PARALLEL_CACHE_LINE_ALIGNMENT,
+               "each transposition table bucket must fit in one aligned block");
 
 struct XqParallelTranspositionTable
 {
@@ -230,11 +235,12 @@ struct XqParallelTranspositionTable
 /**
  * @brief Creates an independent, fixed-capacity transposition table for parallel search.
  *
- * Allocates the management structure and `PARALLEL_TT_BUCKET_COUNT` four-way buckets separately.
- * Zero initialization resets the `generation` and statistics, leaves the evaluator context unbound
- * (`has_context == false`), and marks every entry empty through `depth == 0`. Each bucket's atomic
- * `occupied` flag is explicitly initialized to zero before the table can be shared with workers;
- * later cache accesses use this flag to attempt exclusive access to the bucket.
+ * Allocates the management structure and `PARALLEL_TT_BUCKET_COUNT` cache-line-aligned four-way
+ * buckets separately. Zero initialization resets the `generation` and statistics, leaves the
+ * evaluator context unbound (`has_context == false`), and marks every entry empty through `depth ==
+ * 0`. Each bucket's atomic `occupied` flag is explicitly initialized to zero before the table can
+ * be shared with workers; later cache accesses use this flag to attempt exclusive access to the
+ * bucket.
  *
  * If bucket allocation fails, releases the already allocated management structure. On success, the
  * caller owns the table and may lend it to successive searches through `XqParallelOptions`. Only
@@ -248,14 +254,22 @@ XqParallelTranspositionTable *xq_parallel_transposition_table_create(void)
     XqParallelTranspositionTable *table = calloc(1, sizeof(*table));
     if (table == NULL)
         return NULL;
-    table->buckets = calloc(PARALLEL_TT_BUCKET_COUNT, sizeof(*table->buckets));
-    if (table->buckets == NULL)
+    void  *buckets;
+    size_t bucket_count = PARALLEL_TT_BUCKET_COUNT;
+    if (bucket_count > SIZE_MAX / sizeof(*table->buckets) ||
+        posix_memalign(&buckets, _Alignof(ParallelTtBucket),
+                       bucket_count * sizeof(*table->buckets)) != 0)
     {
         free(table);
         return NULL;
     }
-    for (unsigned i = 0; i < PARALLEL_TT_BUCKET_COUNT; ++i)
-        atomic_init(&table->buckets[i].occupied, 0);
+    table->buckets = buckets;
+    for (size_t i = 0; i < bucket_count; ++i)
+    {
+        ParallelTtBucket *bucket = &table->buckets[i];
+        atomic_init(&bucket->occupied, 0);
+        memset(bucket->entries, 0, sizeof(bucket->entries));
+    }
     return table;
 }
 
@@ -1245,7 +1259,7 @@ typedef struct Search
     unsigned           root_total;
     RootIteration      iteration;
     /* Keep the caller's hot writes on separate cache lines from shared search state. */
-    _Alignas(128) SearchThreadStats stats;
+    _Alignas(PARALLEL_CACHE_LINE_ALIGNMENT) SearchThreadStats stats;
 } Search;
 
 /**
