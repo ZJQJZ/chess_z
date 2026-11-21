@@ -12,6 +12,9 @@ typedef struct XqCachedPieceMoves
     XqMove moves[XQ_MAX_PIECE_MOVES];
     uint8_t count;
     int8_t piece;
+    /* One-based indices, with zero meaning no candidate of this kind. */
+    uint8_t first_capture_plus_one;
+    uint8_t king_capture_plus_one;
 } XqCachedPieceMoves;
 
 /* One cache per position traversal. Zero initialization starts a new one. */
@@ -20,6 +23,12 @@ typedef struct XqMoveCache
     XqCachedPieceMoves rows[XQ_SQUARES];
     XqBitboard changed[XQ_COLOR_NB];
 } XqMoveCache;
+
+typedef struct XqMoveCacheSummary
+{
+    int count;
+    bool king_capture;
+} XqMoveCacheSummary;
 
 /* Reuse the storage on an unrelated traversal by marking every square changed. */
 static inline void xq_move_cache_reset(XqMoveCache *cache)
@@ -43,7 +52,11 @@ static inline void xq_move_cache_invalidate(XqMoveCache *cache, XqSquare from, X
     }
 }
 
-/* Refresh affected rows for pos->side_to_move, then emit in the full generator's order. */
-void xq_move_cache_generate(XqMoveCache *cache, const XqPosition *pos, XqMoveList *list);
+/* Refresh affected rows for pos->side_to_move. The summary describes the first XQ_MAX_MOVES. */
+XqMoveCacheSummary xq_move_cache_refresh(XqMoveCache *cache, const XqPosition *pos);
+
+/* Collect from a refreshed cache in generator order, applying the list limit before filtering. */
+void xq_move_cache_collect(const XqMoveCache *cache, const XqPosition *pos, XqMoveList *list,
+                           bool captures_only);
 
 #endif

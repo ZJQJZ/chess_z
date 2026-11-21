@@ -1,6 +1,5 @@
 #include "movegen_internal.h"
 
-#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -54,51 +53,64 @@ static bool on_own_side(XqColor color,
     return color == XQ_RED ? rank <= 4 : rank >= 5;
 }
 
+typedef struct MoveWriter
+{
+    XqMove *next;
+    XqMove *end;
+    XqMove *first_capture;
+    XqMove *king_capture;
+} MoveWriter;
+
 /**
- * 将 *pos 的 from->to 走棋追加到 *list 中
+ * 将 *pos 的 from->to 走棋追加到 *writer 中
  */
 static void add_move(const XqPosition *pos,
-                     XqMoveList       *list,
+                     MoveWriter       *writer,
                      XqSquare          from,
                      XqSquare          to)
 {
     int piece;
     int captured;
 
-    if (list->count >= XQ_MAX_MOVES || to < 0 || to >= XQ_SQUARES)
+    if (writer->next == writer->end || to < 0 || to >= XQ_SQUARES)
         return;
 
     piece    = pos->board[from];
     captured = pos->board[to];
-    if (captured != XQ_EMPTY_PIECE && xq_piece_color(captured) == xq_piece_color(piece))
-        return;
+    if (captured != XQ_EMPTY_PIECE)
+    {
+        if (xq_piece_color(captured) == xq_piece_color(piece))
+            return;
+        if (writer->first_capture == NULL)
+            writer->first_capture = writer->next;
+        if ((captured == xq_make_piece(XQ_RED, XQ_KING) ||
+             captured == xq_make_piece(XQ_BLACK, XQ_KING)) &&
+            writer->king_capture == NULL)
+            writer->king_capture = writer->next;
+    }
 
-    list->moves[list->count].from     = (uint8_t)from;
-    list->moves[list->count].to       = (uint8_t)to;
-    list->moves[list->count].piece    = (int8_t)piece;
-    list->moves[list->count].captured = (int8_t)captured;
-    ++list->count;
+    *writer->next++ = (XqMove){(uint8_t)from, (uint8_t)to, (int8_t)piece, (int8_t)captured};
 }
 
 /**
  * 带有棋盘合法位置检测和友伤判断的 add_move
  */
 static void add_step_if_valid(const XqPosition *pos,
-                              XqMoveList       *list,
+                              MoveWriter       *writer,
                               XqSquare          from,
                               int               file,
                               int               rank)
 {
     XqColor color = xq_piece_color(pos->board[from]);
     if (xq_square_is_valid(file, rank) && !is_friend(pos, xq_square_make(file, rank), color))
-        add_move(pos, list, from, xq_square_make(file, rank));
+        add_move(pos, writer, from, xq_square_make(file, rank));
 }
 
 /**
- * 生成车的走法，放到 *list 中
+ * 生成车的走法，放到 *writer 中
  */
 static void gen_rook(const XqPosition *pos,
-                     XqMoveList       *list,
+                     MoveWriter       *writer,
                      XqSquare          from)
 {
     static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
@@ -115,11 +127,11 @@ static void gen_rook(const XqPosition *pos,
         {
             XqSquare to = xq_square_make(file, rank);
             if (pos->board[to] == XQ_EMPTY_PIECE)
-                add_move(pos, list, from, to);
+                add_move(pos, writer, from, to);
             else
             {
                 if (is_enemy(pos, to, color))
-                    add_move(pos, list, from, to);
+                    add_move(pos, writer, from, to);
                 break;
             }
             file += dirs[i][0];
@@ -129,10 +141,10 @@ static void gen_rook(const XqPosition *pos,
 }
 
 /**
- * 生成炮的走法，放到 *list 中
+ * 生成炮的走法，放到 *writer 中
  */
 static void gen_cannon(const XqPosition *pos,
-                       XqMoveList       *list,
+                       MoveWriter       *writer,
                        XqSquare          from)
 {
     static const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
@@ -153,14 +165,14 @@ static void gen_cannon(const XqPosition *pos,
             if (!screen_seen)
             {
                 if (pos->board[to] == XQ_EMPTY_PIECE)
-                    add_move(pos, list, from, to);
+                    add_move(pos, writer, from, to);
                 else
                     screen_seen = true;
             }
             else if (pos->board[to] != XQ_EMPTY_PIECE)
             {
                 if (is_enemy(pos, to, color))
-                    add_move(pos, list, from, to);
+                    add_move(pos, writer, from, to);
                 break;
             }
             file += dirs[i][0];
@@ -170,10 +182,10 @@ static void gen_cannon(const XqPosition *pos,
 }
 
 /**
- * 生成将/帅走法，放到 *list 中
+ * 生成将/帅走法，放到 *writer 中
  */
 static void gen_king(const XqPosition *pos,
-                     XqMoveList       *list,
+                     MoveWriter       *writer,
                      XqSquare          from)
 {
     XqColor color     = xq_piece_color(pos->board[from]);
@@ -188,7 +200,7 @@ static void gen_king(const XqPosition *pos,
         int to_file = file + orthogonal[i][0];
         int to_rank = rank + orthogonal[i][1];
         if (in_palace(color, to_file, to_rank))
-            add_step_if_valid(pos, list, from, to_file, to_rank);
+            add_step_if_valid(pos, writer, from, to_file, to_rank);
     }
 
     scan_rank = rank + rank_step;
@@ -199,7 +211,7 @@ static void gen_king(const XqPosition *pos,
         if (piece != XQ_EMPTY_PIECE)
         {
             if (xq_piece_type(piece) == XQ_KING && xq_piece_color(piece) != color)
-                add_move(pos, list, from, to);
+                add_move(pos, writer, from, to);
             break;
         }
         scan_rank += rank_step;
@@ -207,10 +219,10 @@ static void gen_king(const XqPosition *pos,
 }
 
 /**
- * 生成士的走法，放到 *list 中
+ * 生成士的走法，放到 *writer 中
  */
 static void gen_advisor(const XqPosition *pos,
-                        XqMoveList       *list,
+                        MoveWriter       *writer,
                         XqSquare          from)
 {
     XqColor color = xq_piece_color(pos->board[from]);
@@ -223,15 +235,15 @@ static void gen_advisor(const XqPosition *pos,
         int to_file = file + advisor_steps[i][0];
         int to_rank = rank + advisor_steps[i][1];
         if (in_palace(color, to_file, to_rank))
-            add_step_if_valid(pos, list, from, to_file, to_rank);
+            add_step_if_valid(pos, writer, from, to_file, to_rank);
     }
 }
 
 /**
- * 生成象的走法，放到 *list 中
+ * 生成象的走法，放到 *writer 中
  */
 static void gen_bishop(const XqPosition *pos,
-                       XqMoveList       *list,
+                       MoveWriter       *writer,
                        XqSquare          from)
 {
     XqColor color = xq_piece_color(pos->board[from]);
@@ -250,15 +262,15 @@ static void gen_bishop(const XqPosition *pos,
             continue;
         if (pos->board[xq_square_make(eye_file, eye_rank)] != XQ_EMPTY_PIECE)
             continue;
-        add_step_if_valid(pos, list, from, to_file, to_rank);
+        add_step_if_valid(pos, writer, from, to_file, to_rank);
     }
 }
 
 /**
- * 生成马的走法，放到 *list 中
+ * 生成马的走法，放到 *writer 中
  */
 static void gen_knight(const XqPosition *pos,
-                       XqMoveList       *list,
+                       MoveWriter       *writer,
                        XqSquare          from)
 {
     int file = xq_square_file(from);
@@ -276,15 +288,15 @@ static void gen_knight(const XqPosition *pos,
             continue;
         if (pos->board[xq_square_make(leg_file, leg_rank)] != XQ_EMPTY_PIECE)
             continue;
-        add_step_if_valid(pos, list, from, to_file, to_rank);
+        add_step_if_valid(pos, writer, from, to_file, to_rank);
     }
 }
 
 /**
- * 生成兵卒的走法，放到 *list 中
+ * 生成兵卒的走法，放到 *writer 中
  */
 static void gen_pawn(const XqPosition *pos,
-                     XqMoveList       *list,
+                     MoveWriter       *writer,
                      XqSquare          from)
 {
     XqColor color   = xq_piece_color(pos->board[from]);
@@ -293,41 +305,41 @@ static void gen_pawn(const XqPosition *pos,
     int     forward = color == XQ_RED ? 1 : -1;
     bool    crossed = !on_own_side(color, rank);
 
-    add_step_if_valid(pos, list, from, file, rank + forward);
+    add_step_if_valid(pos, writer, from, file, rank + forward);
     if (crossed)
     {
-        add_step_if_valid(pos, list, from, file - 1, rank);
-        add_step_if_valid(pos, list, from, file + 1, rank);
+        add_step_if_valid(pos, writer, from, file - 1, rank);
+        add_step_if_valid(pos, writer, from, file + 1, rank);
     }
 }
 
 static inline void gen_piece(const XqPosition *pos,
-                             XqMoveList       *list,
+                             MoveWriter       *writer,
                              XqSquare          sq,
                              int               piece)
 {
     switch (xq_piece_type(piece))
     {
     case XQ_KING:
-        gen_king(pos, list, sq);
+        gen_king(pos, writer, sq);
         break;
     case XQ_ADVISOR:
-        gen_advisor(pos, list, sq);
+        gen_advisor(pos, writer, sq);
         break;
     case XQ_BISHOP:
-        gen_bishop(pos, list, sq);
+        gen_bishop(pos, writer, sq);
         break;
     case XQ_KNIGHT:
-        gen_knight(pos, list, sq);
+        gen_knight(pos, writer, sq);
         break;
     case XQ_ROOK:
-        gen_rook(pos, list, sq);
+        gen_rook(pos, writer, sq);
         break;
     case XQ_CANNON:
-        gen_cannon(pos, list, sq);
+        gen_cannon(pos, writer, sq);
         break;
     case XQ_PAWN:
-        gen_pawn(pos, list, sq);
+        gen_pawn(pos, writer, sq);
         break;
     default:
         break;
@@ -349,14 +361,15 @@ void xq_generate_pseudo_legal(const XqPosition *pos,
                               XqMoveList       *list)
 {
     XqBitboard remaining = pos->occupied[pos->side_to_move];
+    MoveWriter writer    = {.next = list->moves, .end = list->moves + XQ_MAX_MOVES};
 
-    xq_movelist_clear(list);
-    while (!xq_bb_is_empty(remaining))
+    while (!xq_bb_is_empty(remaining) && writer.next != writer.end)
     {
         XqSquare sq = xq_bb_first_square(remaining);
         xq_bb_clear(&remaining, sq);
-        gen_piece(pos, list, sq, pos->board[sq]);
+        gen_piece(pos, &writer, sq, pos->board[sq]);
     }
+    list->count = (int)(writer.next - list->moves);
 }
 
 static void add_dependency(XqBitboard *dependencies,
@@ -471,14 +484,13 @@ static inline void copy_piece_moves(XqMove       *dst,
         dst[0] = src[0];
 }
 
-void xq_move_cache_generate(XqMoveCache      *cache,
-                            const XqPosition *pos,
-                            XqMoveList       *list)
+XqMoveCacheSummary xq_move_cache_refresh(XqMoveCache      *cache,
+                                         const XqPosition *pos)
 {
-    XqColor    color     = pos->side_to_move;
-    XqBitboard remaining = pos->occupied[color];
-    XqBitboard changed   = cache->changed[color];
-    list->count          = 0;
+    XqColor            color     = pos->side_to_move;
+    XqBitboard         remaining = pos->occupied[color];
+    XqBitboard         changed   = cache->changed[color];
+    XqMoveCacheSummary summary   = {0};
     while (!xq_bb_is_empty(remaining))
     {
         XqSquare sq = xq_bb_first_square(remaining);
@@ -494,29 +506,55 @@ void xq_move_cache_generate(XqMoveCache      *cache,
                 row->dependencies = piece_dependencies(sq, piece);
                 row->piece        = (int8_t)piece;
             }
-            if (list->count <= XQ_MAX_MOVES - XQ_MAX_PIECE_MOVES)
-            {
-                int start = list->count;
-                gen_piece(pos, list, sq, piece);
-                row->count = (uint8_t)(list->count - start);
-                assert(row->count <= XQ_MAX_PIECE_MOVES);
-                copy_piece_moves(row->moves, list->moves + start, row->count);
-                continue;
-            }
-            XqMoveList scratch;
-            scratch.count = 0;
-            gen_piece(pos, &scratch, sq, piece);
-            assert(scratch.count <= XQ_MAX_PIECE_MOVES);
-            row->count = (uint8_t)scratch.count;
-            copy_piece_moves(row->moves, scratch.moves, row->count);
+            MoveWriter writer = {.next = row->moves, .end = row->moves + XQ_MAX_PIECE_MOVES};
+            gen_piece(pos, &writer, sq, piece);
+            row->count = (uint8_t)(writer.next - row->moves);
+            row->first_capture_plus_one =
+                writer.first_capture == NULL ? 0 : (uint8_t)(writer.first_capture - row->moves + 1);
+            row->king_capture_plus_one =
+                writer.king_capture == NULL ? 0 : (uint8_t)(writer.king_capture - row->moves + 1);
         }
-        int available = XQ_MAX_MOVES - list->count;
-        int count     = row->count < available ? row->count : available;
-        copy_piece_moves(list->moves + list->count, row->moves, count);
-        list->count += count;
+        if (row->king_capture_plus_one != 0 &&
+            summary.count + row->king_capture_plus_one <= XQ_MAX_MOVES)
+            summary.king_capture = true;
+        summary.count += row->count;
     }
-    /* Even when the output was truncated, all rows for this color have been refreshed. */
     cache->changed[color] = xq_bb_empty();
+    if (summary.count > XQ_MAX_MOVES)
+        summary.count = XQ_MAX_MOVES;
+    return summary;
+}
+
+void xq_move_cache_collect(const XqMoveCache *cache,
+                           const XqPosition  *pos,
+                           XqMoveList        *list,
+                           bool               captures_only)
+{
+    XqBitboard remaining = pos->occupied[pos->side_to_move];
+    int        available = XQ_MAX_MOVES;
+    list->count          = 0;
+    while (available > 0 && !xq_bb_is_empty(remaining))
+    {
+        XqSquare sq = xq_bb_first_square(remaining);
+        xq_bb_clear(&remaining, sq);
+        const XqCachedPieceMoves *row   = &cache->rows[sq];
+        int                       count = row->count < available ? row->count : available;
+        available -= count;
+        if (!captures_only)
+        {
+            copy_piece_moves(list->moves + list->count, row->moves, count);
+            list->count += count;
+        }
+        else if (row->first_capture_plus_one != 0)
+        {
+            for (int i = row->first_capture_plus_one - 1; i < count; ++i)
+            {
+                XqMove move = row->moves[i];
+                if (move.captured != XQ_EMPTY_PIECE)
+                    list->moves[list->count++] = move;
+            }
+        }
+    }
 }
 
 /**
