@@ -40,7 +40,7 @@ static inline XqBitboard xq_bb_empty(void)
  */
 static inline bool xq_bb_is_empty(XqBitboard bb)
 {
-    return bb.lo == 0u && bb.hi == 0u;
+    return (bb.lo | bb.hi) == 0u;
 }
 
 /**
