@@ -1237,7 +1237,6 @@ typedef struct Search
     void              *evaluate_user;
     XqMoveList         root_moves;
     bool               filtered_cycles;
-    SearchThreadStats  stats;
     uint64_t           start_ms, deadline_ms;
     bool               start_available;
     atomic_int         time_state;
@@ -1245,6 +1244,8 @@ typedef struct Search
     atomic_int         root_started;
     unsigned           root_total;
     RootIteration      iteration;
+    /* Keep the caller's hot writes on separate cache lines from shared search state. */
+    _Alignas(128) SearchThreadStats stats;
 } Search;
 
 /**
