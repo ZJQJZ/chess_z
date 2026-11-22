@@ -112,7 +112,7 @@ static void print_usage(const char *program)
     printf("  %-21s  %s\n", "", "batch: builtin has no default time limit; parallel defaults to 5000 ms; clear cache before each FEN");
     printf("  %-21s  %s\n", "-e, --engine COLOR", "choose the engine side: red or black");
     printf("  %-21s  %s\n", "    --depth N", "maximum search depth in plies (builtin default 10; parallel default unlimited)");
-    printf("  %-21s  %s\n", "    --time-ms MS", "default thinking time per engine move (positive integer milliseconds)");
+    printf("  %-21s  %s\n", "    --time-ms MS", "default thinking time per engine move in milliseconds (0 disables the time limit)");
     printf("  %-21s  %s\n", "", "a nearly complete iteration may finish after this budget");
     printf("  %-21s  %s\n", "    --tt-file PATH", "load a saved transposition table before the first search (requires --search builtin)");
     printf("  %-21s  %s\n", "    --progress", "show live per-depth root-move progress on stderr");
@@ -2016,13 +2016,13 @@ int main(int argc, char **argv)
             explicit_time = true;
             if (++i >= argc)
             {
-                fprintf(stderr, "error: --time-ms requires a positive integer millisecond argument\n");
+                fprintf(stderr, "error: --time-ms requires a nonnegative integer millisecond argument\n");
                 print_usage(argv[0]);
                 return EXIT_FAILURE;
             }
-            if (!parse_time_ms(argv[i], &default_limits.time_limit_ms))
+            if (!parse_unsigned_limit(argv[i], &default_limits.time_limit_ms))
             {
-                fprintf(stderr, "error: invalid thinking time: %s (expected positive integer milliseconds)\n", argv[i]);
+                fprintf(stderr, "error: invalid thinking time: %s (expected nonnegative integer milliseconds)\n", argv[i]);
                 return EXIT_FAILURE;
             }
             continue;
