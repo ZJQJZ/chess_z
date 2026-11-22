@@ -62,7 +62,7 @@ typedef struct MoveWriter
 } MoveWriter;
 
 /**
- * 将 *pos 的 from->to 走棋追加到 *writer 中
+ * 将 *pos 的 from->to 走棋追加到 *writer 中调用者须保证 from 和 to 都在棋盘范围内
  */
 static void add_move(const XqPosition *pos,
                      MoveWriter       *writer,
@@ -72,7 +72,7 @@ static void add_move(const XqPosition *pos,
     int piece;
     int captured;
 
-    if (writer->next == writer->end || to < 0 || to >= XQ_SQUARES)
+    if (writer->next == writer->end)
         return;
 
     piece    = pos->board[from];
