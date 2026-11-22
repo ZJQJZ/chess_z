@@ -379,10 +379,11 @@ void xq_generate_pseudo_legal(const XqPosition *pos,
     XqBitboard remaining = pos->occupied[pos->side_to_move];
     MoveWriter writer    = {.next = list->moves, .end = list->moves + XQ_MAX_MOVES};
 
-    while (!xq_bb_is_empty(remaining) && writer.next != writer.end)
+    while (writer.next != writer.end)
     {
-        XqSquare sq = xq_bb_first_square(remaining);
-        xq_bb_clear(&remaining, sq);
+        XqSquare sq = xq_bb_pop_first_square(&remaining);
+        if (sq == XQ_NO_SQUARE)
+            break;
         gen_piece(pos, &writer, sq, pos->board[sq]);
     }
     list->count = (int)(writer.next - list->moves);
@@ -507,10 +508,11 @@ XqMoveCacheSummary xq_move_cache_refresh(XqMoveCache      *cache,
     XqBitboard         remaining = pos->occupied[color];
     XqBitboard         changed   = cache->changed[color];
     XqMoveCacheSummary summary   = {0};
-    while (!xq_bb_is_empty(remaining))
+    for (;;)
     {
-        XqSquare sq = xq_bb_first_square(remaining);
-        xq_bb_clear(&remaining, sq);
+        XqSquare sq = xq_bb_pop_first_square(&remaining);
+        if (sq == XQ_NO_SQUARE)
+            break;
         XqCachedPieceMoves *row           = &cache->rows[sq];
         XqBitboard          dependencies  = row->dependencies;
         bool                uninitialized = xq_bb_is_empty(dependencies);
@@ -549,10 +551,11 @@ void xq_move_cache_collect(const XqMoveCache *cache,
     XqBitboard remaining = pos->occupied[pos->side_to_move];
     int        available = XQ_MAX_MOVES;
     list->count          = 0;
-    while (available > 0 && !xq_bb_is_empty(remaining))
+    while (available > 0)
     {
-        XqSquare sq = xq_bb_first_square(remaining);
-        xq_bb_clear(&remaining, sq);
+        XqSquare sq = xq_bb_pop_first_square(&remaining);
+        if (sq == XQ_NO_SQUARE)
+            break;
         const XqCachedPieceMoves *row   = &cache->rows[sq];
         int                       count = row->count < available ? row->count : available;
         available -= count;

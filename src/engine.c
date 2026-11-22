@@ -1434,13 +1434,14 @@ static int evaluate_side(const XqPosition *pos,
     {
         XqBitboard remaining = pos->pieces[color][type];
 
-        while (!xq_bb_is_empty(remaining))
+        for (;;)
         {
-            XqSquare sq   = xq_bb_first_square(remaining);
-            int      rank = xq_square_rank(sq);
-            int      file = xq_square_file(sq);
+            XqSquare sq = xq_bb_pop_first_square(&remaining);
+            if (sq == XQ_NO_SQUARE)
+                break;
+            int rank = xq_square_rank(sq);
+            int file = xq_square_file(sq);
 
-            xq_bb_clear(&remaining, sq);
             if (color == XQ_BLACK)
                 rank = XQ_RANKS - 1 - rank;
             score += piece_values[type] + piece_square_values[type][rank][file];

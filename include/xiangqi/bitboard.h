@@ -49,7 +49,8 @@ static inline bool xq_bb_is_empty(XqBitboard bb)
  * @param bb 要修改的位棋盘，不能为 NULL
  * @param sq 要设置的棋盘位置，取值范围应为 0..89
  */
-static inline void xq_bb_set(XqBitboard *bb, XqSquare sq)
+static inline void xq_bb_set(XqBitboard *bb,
+                             XqSquare    sq)
 {
     if (sq < 64)
         bb->lo |= UINT64_C(1) << sq;
@@ -63,7 +64,8 @@ static inline void xq_bb_set(XqBitboard *bb, XqSquare sq)
  * @param bb 要修改的位棋盘，不能为 NULL
  * @param sq 要清除的棋盘位置，取值范围应为 0..89
  */
-static inline void xq_bb_clear(XqBitboard *bb, XqSquare sq)
+static inline void xq_bb_clear(XqBitboard *bb,
+                               XqSquare    sq)
 {
     if (sq < 64)
         bb->lo &= ~(UINT64_C(1) << sq);
@@ -78,7 +80,8 @@ static inline void xq_bb_clear(XqBitboard *bb, XqSquare sq)
  * @param sq 要检查的棋盘位置，取值范围应为 0..89
  * @return sq 对应位已被设置时返回 true，否则返回 false
  */
-static inline bool xq_bb_test(XqBitboard bb, XqSquare sq)
+static inline bool xq_bb_test(XqBitboard bb,
+                              XqSquare   sq)
 {
     if (sq < 64)
         return (bb.lo & (UINT64_C(1) << sq)) != 0u;
@@ -86,63 +89,69 @@ static inline bool xq_bb_test(XqBitboard bb, XqSquare sq)
 }
 
 /**
- * @brief 棋盘编号从小到大第一个棋子出现的位置
+ * @brief 返回非零 64 位整数中最低置位的索引
  *
- * 从编号 0 开始查找位棋盘中第一个被设置的位置，优先检查 lo，
- * 再检查 hi；位棋盘为空时返回 XQ_NO_SQUARE
- * 实现会根据编译器预定义宏选择最高效的位扫描方式：MSVC 使用
- * _BitScanForward64，GCC 和 Clang 使用 __builtin_ctzll；其他编译器
- * 则使用逐位右移的可移植实现作为兜底
+ * MSVC、GCC 和 Clang 使用内建位扫描，其他编译器逐位右移
+ *
+ * @param bits 要扫描的非零整数
+ * @return 最低置位的索引，范围为 0..63
+ */
+static inline unsigned xq_bb_first_bit_index(uint64_t bits)
+{
+#if defined(_MSC_VER)
+    unsigned long index;
+    _BitScanForward64(&index, bits);
+    return (unsigned)index;
+#elif defined(__GNUC__) || defined(__clang__)
+    return (unsigned)__builtin_ctzll(bits);
+#else
+    unsigned index = 0;
+    while ((bits & UINT64_C(1)) == 0u)
+    {
+        bits >>= 1;
+        ++index;
+    }
+    return index;
+#endif
+}
+
+/**
+ * @brief 返回位棋盘中编号最小的已置位格子
  *
  * @param bb 要查找的位棋盘
- * @return 第一个被设置的位置编号；bb 为空时返回 XQ_NO_SQUARE
+ * @return 第一个被设置的位置编号，bb 为空时返回 XQ_NO_SQUARE
  */
 static inline XqSquare xq_bb_first_square(XqBitboard bb)
 {
     if (bb.lo != 0u)
-    {
-#if defined(_MSC_VER)
-        /* MSVC：使用编译器内建指令获取最低有效位的索引 */
-        unsigned long index;
-        _BitScanForward64(&index, bb.lo);
-        return (XqSquare)index;
-#elif defined(__GNUC__) || defined(__clang__)
-        /* GCC/Clang：末尾零的数量就是最低有效位的索引 */
-        return (XqSquare)__builtin_ctzll(bb.lo);
-#else
-        /* 其他编译器：逐位右移，直到最低位为 1 */
-        XqSquare sq = 0;
-        while ((bb.lo & UINT64_C(1)) == 0u)
-        {
-            bb.lo >>= 1;
-            ++sq;
-        }
-        return sq;
-#endif
-    }
-
+        return (XqSquare)xq_bb_first_bit_index(bb.lo);
     if (bb.hi != 0u)
-    {
-#if defined(_MSC_VER)
-        /* MSVC：扫描 hi 后加 64，转换为完整棋盘位置编号 */
-        unsigned long index;
-        _BitScanForward64(&index, bb.hi);
-        return (XqSquare)(64 + index);
-#elif defined(__GNUC__) || defined(__clang__)
-        /* GCC/Clang：扫描 hi，并加 64 转换为完整棋盘位置编号 */
-        return (XqSquare)(64 + __builtin_ctzll(bb.hi));
-#else
-        /* 其他编译器：从棋盘位置 64 开始逐位查找 */
-        XqSquare sq = 64;
-        while ((bb.hi & UINT64_C(1)) == 0u)
-        {
-            bb.hi >>= 1;
-            ++sq;
-        }
-        return sq;
-#endif
-    }
+        return (XqSquare)(64 + xq_bb_first_bit_index(bb.hi));
+    return XQ_NO_SQUARE;
+}
 
+/**
+ * @brief 取出并清除位棋盘中编号最小的已置位格子
+ *
+ * 先处理 lo，再处理 hi。对非零的那一段执行 bits & (bits - 1) 可清除最低置位
+ *
+ * @param bb 要修改的位棋盘，不能为 NULL
+ * @return 被清除的位置编号，bb 为空时返回 XQ_NO_SQUARE
+ */
+static inline XqSquare xq_bb_pop_first_square(XqBitboard *bb)
+{
+    uint64_t bits = bb->lo;
+    if (bits != 0u)
+    {
+        bb->lo = bits & (bits - 1u);
+        return (XqSquare)xq_bb_first_bit_index(bits);
+    }
+    bits = bb->hi;
+    if (bits != 0u)
+    {
+        bb->hi = bits & (bits - 1u);
+        return (XqSquare)(64 + xq_bb_first_bit_index(bits));
+    }
     return XQ_NO_SQUARE;
 }
 
