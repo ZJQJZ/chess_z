@@ -2,8 +2,20 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#include "xiangqi/jieqi/movegen_jq.h"
+
+static _Thread_local unsigned pseudo_legal_generations;
+
+static void count_pseudo_legal_generation(const XqJqPosition *position, XqJqMoveList *moves)
+{
+    ++pseudo_legal_generations;
+    xq_jq_generate_pseudo_legal(position, moves);
+}
+
 /* CMake copies the implementation with small, independent test-only enum values. */
+#define xq_jq_generate_pseudo_legal count_pseudo_legal_generation
 #include "parallel_search_under_test.c"
+#undef xq_jq_generate_pseudo_legal
 
 _Static_assert(PARALLEL_MAX_SIMILAR_POSITION_QUERIES == XQ_TEST_SIMILARITY_QUERY_LIMIT,
                "the test driver and generated implementation must use the same query limit");
@@ -284,6 +296,120 @@ static void cancellation_after_collection(void)
     }
 }
 
+static unsigned count_reveal_samples(unsigned depth, unsigned order, void *user)
+{
+    (void)depth;
+    (void)order;
+    unsigned *calls = user;
+    ++*calls;
+    return 2;
+}
+
+static void root_king_capture_terminals(void)
+{
+    unsigned reveal_calls = 0;
+    XqJqParallelOptions options = xq_jq_parallel_options_default();
+    options.depth = 1;
+    options.thread_count = 1;
+    options.time_limit_ms = 0;
+    options.sample_count = count_reveal_samples;
+    options.sample_user = &reveal_calls;
+
+    const char *const fens[] = {
+        "4k4/9/9/9/4R4/9/9/9/9/3K5 r - - 0 1",
+        "4k4/9/9/9/4R*4/9/9/9/9/3K5 r - - 0 1",
+    };
+    XqJqPosition position;
+    XqJqParallelResult result;
+    for (unsigned i = 0; i < sizeof(fens) / sizeof(fens[0]); ++i)
+    {
+        CHECK(xq_jq_position_from_fen(&position, fens[i]));
+        unsigned char original[sizeof(position)];
+        memcpy(original, &position, sizeof(original));
+        CHECK(xq_jq_engine_parallel_search(NULL, &position, &options, &result) == XQ_JQ_PARALLEL_OK);
+        CHECK(result.move_available && result.best_move.from == xq_square_make(4, 5));
+        CHECK(result.best_move.captured == xq_make_piece(XQ_BLACK, XQ_KING));
+        CHECK(result.score_available && result.score_kind == XQ_JQ_SEARCH_SCORE_EXACT);
+        CHECK(result.score == WIN && !result.score_estimated && result.stats.winning_move_found);
+        CHECK(reveal_calls == 0 && memcmp(original, &position, sizeof(original)) == 0);
+    }
+
+    for (int color = XQ_RED; color < XQ_COLOR_NB; ++color)
+    {
+        XqJqPosition terminal = position;
+        XqSquare king = xq_jq_position_king_square(&terminal, (XqColor)color);
+        CHECK(xq_jq_position_remove_piece(&terminal, king));
+        CHECK(xq_jq_engine_parallel_search(NULL, &terminal, &options, &result) == XQ_JQ_PARALLEL_OK);
+        CHECK(!result.move_available && result.score_available && !result.score_estimated);
+        CHECK(result.score == (color == XQ_RED ? -WIN : WIN) && result.stats.nodes == 0);
+    }
+}
+
+static void internal_king_capture_terminals(void)
+{
+    Fixture fixture;
+    fixture_init(&fixture);
+    XqJqPosition position;
+    CHECK(xq_jq_position_from_fen(&position, "4k4/9/9/9/4R4/9/9/9/9/3K5 r - - 0 1"));
+    Node ancestor;
+    node_init(&ancestor, &position, NULL, -1);
+    fixture.parent.parent = &ancestor;
+    fixture.parent.in_check = true;
+    SearchThreadStats stats = {0};
+    ParallelPv pv = {0};
+    Interval value = search_node(&fixture.search, &position, &fixture.parent,
+                                 0, 0, false, NULL, NULL, 0, &pv, &stats);
+    CHECK(!value.cancelled && !value.estimated && value.lower == WIN && value.upper == WIN);
+    CHECK(stats.nodes == 1 && stats.cache.probes == 0 && pv.count == 0);
+    CHECK(!atomic_load(&fixture.parent.repetition_seen));
+
+    /* Facing generals allow a capture even while the side to move is also in check. */
+    CHECK(xq_jq_position_from_fen(&position, "4k4/9/9/9/9/9/9/9/9/4K4 r - - 0 1"));
+    CHECK(xq_jq_position_in_check(&position, XQ_RED) && xq_jq_position_in_check(&position, XQ_BLACK));
+    XqMove capture = board_move(&position, 4, 0, 4, 9);
+    XqJqTranspositionStats ignored = {0};
+    parallel_tt_store(fixture.search.options.transposition_table, xq_jq_position_hash(&position),
+                      1, 12345, XQ_JQ_SEARCH_SCORE_EXACT, capture, false, &ignored);
+    fixture.parent.parent = NULL;
+    fixture.search.root_color = XQ_BLACK;
+    stats = (SearchThreadStats){0};
+    value = search_node(&fixture.search, &position, &fixture.parent,
+                        0, 1, false, NULL, NULL, 0, &pv, &stats);
+    CHECK(!value.cancelled && !value.estimated && value.lower == -WIN && value.upper == -WIN);
+    CHECK(stats.nodes == 1 && stats.cache.probes == 0 && pv.count == 0);
+
+    /* The parser accepts reversed generals. Facing alone generates no capture here. */
+    CHECK(xq_jq_position_from_fen(&position, "4K4/9/9/9/9/9/9/9/9/4k4 r - - 0 1"));
+    CHECK(xq_jq_position_in_check(&position, XQ_RED) && xq_jq_position_in_check(&position, XQ_BLACK));
+    XqJqMoveList moves;
+    xq_jq_generate_pseudo_legal(&position, &moves);
+    CHECK(moves.count == 0);
+    stats = (SearchThreadStats){0};
+    value = search_node(&fixture.search, &position, &fixture.parent,
+                        0, 1, false, NULL, NULL, 0, &pv, &stats);
+    CHECK(!value.cancelled && !value.estimated && value.lower == WIN && value.upper == WIN);
+    CHECK(stats.nodes == 1 && pv.count == 0);
+    fixture_destroy(&fixture);
+}
+
+static void quiescence_reuses_leaf_moves(void)
+{
+    Fixture fixture;
+    fixture_init(&fixture);
+    fixture.search.evaluate = xq_jq_engine_default_static_evaluate;
+    XqJqPosition position;
+    CHECK(xq_jq_position_from_fen(&position, "4k4/9/9/9/9/9/9/9/9/3K5 r - - 0 1"));
+    int score = fixture.search.evaluate(&position, XQ_RED, NULL);
+    SearchThreadStats stats = {0};
+    ParallelPv pv = {0};
+    pseudo_legal_generations = 0;
+    Interval value = search_node(&fixture.search, &position, &fixture.parent,
+                                 0, 0, false, NULL, NULL, 0, &pv, &stats);
+    CHECK(!value.cancelled && !value.estimated && value.lower == score && value.upper == score);
+    CHECK(stats.nodes == 2 && pv.count == 0 && pseudo_legal_generations == 1);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     incremental_hashes();
@@ -291,6 +417,9 @@ int main(void)
     query_budget_and_deduplication();
     pseudo_legal_keys();
     cancellation_after_collection();
+    root_king_capture_terminals();
+    internal_king_capture_terminals();
+    quiescence_reuses_leaf_moves();
     puts("Jieqi parallel similarity checks passed");
     return 0;
 }

@@ -138,7 +138,7 @@ const char *xq_jq_parallel_status_text(XqJqParallelStatus status);
  * opposite evaluation scores. Keep the adapter, history, callbacks, user data and table alive and
  * unchanged until return.
  *
- * Dark movers are sampled from the current side's public identity pool. Every sample starts from
+ * Dark-move samples draw from the current side's public identity pool. Every sample starts from
  * the same parent position, and the resulting scores are averaged without clipping a sampled
  * +/-30000 into the non-winning score range. score_estimated distinguishes that finite-sample
  * estimate from a proof. EXACT denotes a resolved value for the current sampled search tree;
@@ -147,11 +147,16 @@ const char *xq_jq_parallel_status_text(XqJqParallelStatus status);
  * to 2 and is the total depth cost. Quiescence dark moves use sample_count with
  * remaining_depth == 0.
  *
- * Ordinary search checks for both kings before entering quiescence. Quiescence scans its
- * pseudo-legal candidates and returns +30000 for a capture of the opposing king, even when both
- * kings are attacked. This happens before repetition, the extension cap, stand pat or evasion
- * filtering. The winning candidate is scored without playing it or sampling a reveal, so both kings
- * remain present throughout quiescence recursion.
+ * The public search entry scores a root missing a king as terminal. In a root batch, a legal
+ * capture of the opposing king proves an exact win for that move. Ordinary non-root nodes scan
+ * pseudo-legal candidates and score a win for the side to move if any candidate captures the
+ * opposing king, even when both kings are attacked. This check precedes path repetition,
+ * quiescence and table lookup. Scoring a king capture skips the move and reveal sampling, so both
+ * kings remain on the board throughout recursion.
+ *
+ * Quiescence starts with the ordinary leaf's candidate list and check state. Deeper quiescence
+ * nodes generate pseudo-legal candidates and score a king capture as +30000 before repetition,
+ * the extension cap, stand pat or evasion filtering.
  *
  * Ordinary search and quiescence classify cycles at the first repetition of a public position.
  * The cycle uses the closest ancestor with the same side to move, board, dark markers and public
