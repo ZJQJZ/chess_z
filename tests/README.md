@@ -32,14 +32,19 @@ The CMake build registers the following CTest cases when `BUILD_TESTING` is on:
   winning/quiet-move ordering and read-only TT
   snapshots, plus serial and parallel search, sampling and cancellation checks.
 - `parallel_similarity_disabled`: the same driver with a query limit of `0` to check
-  disabled behavior. The enabled driver uses a limit of `2`; both drivers use a
-  test-only TT with 64 buckets. CMake generates separate implementation copies in
-  the build directory, changing only the two enum initializers; production sources
-  and constants are unaffected. Editing the source regenerates these copies.
+  disabled behavior.
+- `parallel_similarity_jq` and `parallel_similarity_jq_disabled`: Jieqi coverage
+  of move hashes with reveals and dark captures, bright sibling-key enumeration,
+  query deduplication and budgets, pseudo-legal candidates, and cancellation after
+  hint collection. The enabled drivers use a limit of `2` and the disabled drivers
+  use `0`. All similarity drivers use a test-only TT with 64 buckets. CMake generates
+  separate implementation copies in the build directory and changes only those two
+  enum initializers. Editing either search source regenerates its copies.
 
 To configure production similarity lookups, edit the
-`PARALLEL_MAX_SIMILAR_POSITION_QUERIES` enum value in `src/parallel_search.c`;
-`0` disables them. These constants have no `-D` overrides.
+`PARALLEL_MAX_SIMILAR_POSITION_QUERIES` enum value in `src/parallel_search.c` or
+`src/jieqi/parallel_search_jq.c` for the respective mode. `0` disables the lookups.
+These constants have no `-D` overrides.
 
 For example:
 
@@ -72,7 +77,9 @@ after wins, post-win misses, busy buckets and unusable hits against the budget,
 duplicate hints, source exhaustion, exact `from`/`to`/`piece` matching, and
 current-move metadata. Sibling keys are computed without copying positions or filtering missing
 kings and self-check; tests compare them with hashes after applying the same moves to position
-copies. They also check PV suffix propagation for valid matching or
+copies. The Jieqi iterator uses bright moves only, so each move has a single resulting key.
+The Jieqi hash also reflects the side to move, dark markers and public identity counts.
+The ordinary tests also check PV suffix propagation for valid matching or
 conflicting PV first moves and suffix clearing for absent, empty or invalid PV hints.
 Similar scores determine ordering priority only and cannot directly cause a search cutoff.
 

@@ -607,6 +607,39 @@ uint64_t xq_jq_position_hash(const XqJqPosition *pos)
 }
 
 /**
+ * 增量计算走子后的公开局面哈希，包含暗子标记、身份库和行棋方的变化。
+ */
+bool xq_jq_position_hash_after_move(const XqJqPosition *pos, XqMove move,
+                                    int revealed_type, uint64_t *key)
+{
+    if (key == NULL || !valid_move(pos, move, revealed_type))
+        return false;
+
+    XqSquare from = (XqSquare)move.from;
+    XqSquare to = (XqSquare)move.to;
+    XqColor color = pos->side_to_move;
+    int landed_piece = move.piece;
+    uint64_t hash = pos->piece_hash ^ pos->knowledge_hash;
+    if (revealed_type != XQ_JQ_NO_REVEAL)
+    {
+        XqPieceType type = (XqPieceType)revealed_type;
+        uint16_t count = pos->pool[color][type];
+        landed_piece = xq_make_piece(color, type);
+        hash ^= zobrist_dark_key(from) ^ zobrist_pool_key(color, type, count) ^
+                zobrist_pool_key(color, type, (uint16_t)(count - 1));
+    }
+    if (move.captured != XQ_EMPTY_PIECE)
+    {
+        hash ^= zobrist_piece_key(move.captured, to);
+        if (xq_bb_test(pos->dark, to))
+            hash ^= zobrist_dark_key(to);
+    }
+    *key = hash ^ zobrist_piece_key(move.piece, from) ^ zobrist_piece_key(landed_piece, to) ^
+           (xq_color_opponent(color) == XQ_BLACK ? zobrist_side_key() : UINT64_C(0));
+    return true;
+}
+
+/**
  * 用于检查某个 *pos 是否数据一致且双方存在将帅
  * 根据 *pos 的 board 信息复制一份相匹配的 XqJqPosition 中的 pieces、occupied、all 信息
  * 然后和 *pos 中的进行比较查看是否一致，最后看是否存在双方将帅

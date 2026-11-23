@@ -1204,7 +1204,7 @@ typedef struct Node
     atomic_int     estimated;
 } Node;
 
-/* Sources enumerate positions only; lookup budgets and move acceptance are source-independent. */
+/* Sources enumerate position keys; lookup budgets and move acceptance are source-independent. */
 typedef enum SimilarPositionSource
 {
     SIMILAR_POSITION_SIBLING,
@@ -1748,7 +1748,7 @@ static PathRepetition parallel_path_repetition(Node *node)
 }
 
 /**
- * @brief Initializes a lazy iterator over positions related to the current search node.
+ * @brief Initializes a lazy iterator over position keys related to the current search node.
  *
  * A non-root node starts with `SIMILAR_POSITION_SIBLING`. Reads its parent's `best_index` once with
  * `memory_order_acquire` and retains that index as `preferred_sibling`; subsequent best-index
@@ -1765,7 +1765,7 @@ static PathRepetition parallel_path_repetition(Node *node)
  * Keep `node` and its parent chain alive throughout enumeration. Their positions, ordered move
  * lists and `parent_move_index` fields must remain unchanged while the iterator uses them.
  *
- * @param node Non-null current search node whose neighboring positions will be enumerated.
+ * @param node Non-null current search node whose neighboring position keys will be enumerated.
  * @return     Initialized iterator by value; a root produces an already exhausted source range.
  */
 static SimilarPositionIterator parallel_similar_positions(const Node *node)
@@ -1782,32 +1782,29 @@ static SimilarPositionIterator parallel_similar_positions(const Node *node)
 }
 
 /**
- * @brief Reconstructs the next sibling position from the parent's immutable position and moves.
+ * @brief Computes the next sibling's key from the parent's immutable position and moves.
  *
  * On the first call, consumes `preferred_pending` and attempts `preferred_sibling`. Then scans the
  * parent's final move list using `next_sibling`, skipping the already attempted preferred index.
  * Both paths skip out-of-range indices and `node->parent_move_index`, which identifies the current
- * node's own branch. Copies the parent position into `position` before applying a move; a failed
- * `xq_jq_position_make_move()` advances to the next candidate rather than ending the scan.
+ * node's own branch. Uses `xq_jq_position_hash_after_move()` with `XQ_JQ_NO_REVEAL` to compute
+ * each key without copying or changing the parent position. Dark moves require a reveal, so they
+ * are skipped along with invalid moves.
  *
- * Success means only that a candidate was constructed. Parent move lists may be pseudo-legal, so
- * the result can still expose the mover's king or lack a king. This function does not validate
- * those conditions, compare position hashes, query the table, charge query budget or check time.
- * Different indices can still yield duplicate position keys; the shared consumer filters them. It
- * never reads a sibling's live `Node` or changes the borrowed parent position or move list.
+ * Parent move lists may be pseudo-legal. Keys are also computed for positions missing a king or
+ * leaving the mover in check. The iterator leaves deduplication and table queries to its caller.
+ * It uses only the parent's stable position and move list.
  *
- * The iterator must belong to a non-root node with a live parent. All borrowed node data must
- * remain stable, and `position` must be private output that does not alias that data. Each call
- * advances the iterator; only a `true` return makes the output a usable candidate.
+ * The iterator must belong to a non-root node reached by one move from its live parent. All
+ * borrowed node data must remain stable, and `key` must be private output.
  *
  * @param iterator Non-null iterator initialized by `parallel_similar_positions()` for a non-root
  *                 node; its sibling traversal state is updated in place.
- * @param position Non-null caller-owned output; contents are unspecified when returning `false`.
- * @return         `true` after constructing a sibling candidate; `false` after all sibling indices
- *                 have been exhausted, including indices skipped or failing move construction.
+ * @param key      Non-null caller-owned output, left unchanged when returning `false`.
+ * @return         `true` after computing a sibling key, or `false` when the source is exhausted.
  */
 static bool parallel_similar_sibling_next(SimilarPositionIterator *iterator,
-                                          XqJqPosition              *position)
+                                          uint64_t                *key)
 {
     const Node *parent = iterator->node->parent;
     for (;;)
@@ -1828,47 +1825,41 @@ static bool parallel_similar_sibling_next(SimilarPositionIterator *iterator,
         }
         if (index < 0 || index >= parent->moves.count || index == iterator->node->parent_move_index)
             continue;
-        *position = parent->position;
-        if (xq_jq_position_is_dark(position, parent->moves.moves[index].from))
-            continue;
-        if (xq_jq_position_make_move(position, parent->moves.moves[index], XQ_JQ_NO_REVEAL))
+        if (xq_jq_position_hash_after_move(&parent->position, parent->moves.moves[index],
+                                            XQ_JQ_NO_REVEAL, key))
             return true;
     }
 }
 
 /**
- * @brief Enumerates neighboring-position candidates lazily across the available source types.
+ * @brief Enumerates neighboring-position keys lazily across the available source types.
  *
  * Dispatches according to `iterator->source`, currently only `SIMILAR_POSITION_SIBLING`. A source
- * yielding a candidate returns immediately and remains selected for the next call. When that source
+ * yielding a key returns immediately and remains selected for the next call. When that source
  * is exhausted, advances `source` and tries the next one within the same call. Reaching
  * `SIMILAR_POSITION_SOURCE_COUNT` ends enumeration; an iterator initialized for a root is already
- * at this sentinel and produces no candidates.
+ * at this sentinel and produces no keys.
  *
- * This is the extension point for additional neighboring-position sources. Sources only construct
- * candidates: the consumer `parallel_collect_similar_hints()` performs shared position filtering,
- * key deduplication, bounded table queries and move-hint acceptance. Enumeration itself performs no
- * table access, query accounting or time checks, and a returned candidate need not be legal. New
- * sources must keep each enumeration step bounded so the consumer can check cancellation between
- * calls.
+ * Sources compute keys for the same side to move. The consumer handles key deduplication, bounded
+ * table queries and move-hint acceptance. New sources must keep enumeration bounded so collection
+ * can finish before the caller checks for cancellation.
  *
  * Keep the iterator's borrowed node and parent chain alive with their shared metadata unchanged.
- * Output must be private to the caller and must not alias borrowed positions. No candidate is
- * retained by the iterator; the caller may reuse `position` on the next call.
+ * Output must be private to the caller, who may reuse `key` on the next call.
  *
  * @param iterator Non-null initialized iterator; source and source-specific state advance in place.
- * @param position Non-null caller-owned output; contents are unspecified when returning `false`.
- * @return         `true` when a source yields a candidate; `false` when all sources are exhausted.
+ * @param key      Non-null caller-owned output, left unchanged when returning `false`.
+ * @return         `true` when a source yields a key, or `false` when all sources are exhausted.
  */
 static bool parallel_similar_position_next(SimilarPositionIterator *iterator,
-                                           XqJqPosition              *position)
+                                           uint64_t                *key)
 {
     while (iterator->source < SIMILAR_POSITION_SOURCE_COUNT)
     {
         switch (iterator->source)
         {
         case SIMILAR_POSITION_SIBLING:
-            if (parallel_similar_sibling_next(iterator, position))
+            if (parallel_similar_sibling_next(iterator, key))
                 return true;
             break;
         case SIMILAR_POSITION_SOURCE_COUNT:
@@ -1889,44 +1880,38 @@ static bool parallel_similar_position_next(SimilarPositionIterator *iterator,
  * budget, including nodes that already have a matching-position cache or previous-iteration PV
  * hint.
  *
- * Enumerates candidates through `parallel_similar_position_next()`. Before charging a query,
- * rejects a different `side_to_move`, a missing king, a position leaving the previous mover in
- * check, `current_key` and keys already recorded in `queried_keys`. Each remaining candidate is
- * recorded and consumes one query before `parallel_tt_peek()` is attempted. Misses, busy buckets
- * and unusable hits therefore consume budget too. Neighboring reads neither refresh entry
- * generations nor contribute to ordinary TT counters.
+ * Enumerates keys for the same side to move, including keys for positions missing a king or
+ * leaving the mover in check. Skips the current key and keys already queried. Each remaining key
+ * consumes one query before `parallel_tt_peek()` is attempted. Misses, busy buckets and unusable
+ * hits therefore consume budget too. Neighboring reads leave entry generations and ordinary TT
+ * counters unchanged.
  *
  * Only `XQ_JQ_SEARCH_SCORE_EXACT` and `XQ_JQ_SEARCH_SCORE_LOWER_BOUND` entries may supply hints; their
  * depths need not cover `node->depth`. Matches `cached.best_move` against the current list by
- * `from`, `to` and `piece`. An accepted entry with `cached.score == WIN` proves a win for the
- * neighbor's side to move: retains the matching move, whether a capture or quiet move, and keeps
- * querying the remaining candidates within the budget. Winning hints are deduplicated by
- * `from`/`to` and retain discovery order. They are only ordering signals, not proof of a win in the
- * current position. Non-winning hints still require `captured == XQ_EMPTY_PIECE` and are
- * deduplicated by `from`/`to`, separately from candidate-key deduplication. All hints use the
- * current list's complete move records, never stale entry metadata. Neighbor scores, bounds and PVs
- * are not reused to evaluate the current position or justify a cutoff.
+ * `from`, `to` and `piece`. A non-estimated `WIN` retains the matching move as a winning hint,
+ * whether it is a capture or a quiet move. Collection continues within the query budget.
+ * Winning hints are deduplicated by `from`/`to` and retain discovery order. They are only ordering
+ * signals, not proof of a win in the current position. Non-winning hints require
+ * `captured == XQ_EMPTY_PIECE` and are deduplicated by `from`/`to`, separately from candidate-key
+ * deduplication. All hints use the current list's complete move records. Neighbor scores, bounds
+ * and PVs are not reused to evaluate the current position or justify a cutoff.
  *
  * Stores accepted hints in `hints->quiet_moves` or `hints->winning_moves`, each in discovery order.
  * Does not change `node->position` or `node->moves`; `parallel_apply_move_hints()` performs the
  * complete ordering stage afterward. A generated move is an ordering candidate, not proof of
  * legality; ordinary search still applies its existing terminal and self-check rules.
  *
- * Before requesting each candidate, calls `check_node()` to observe the published stop state,
- * tighten `node`'s `alpha`/`beta` window or publish completion or cancellation, without reading the
- * clock. If a checkpoint reports that the node has stopped, no further candidates are requested.
- * The caller must inspect node state before applying hints or dispatching tasks. The node and its
- * parent chain must remain alive, and the table must remain valid under the search's existing
- * concurrency contract.
+ * The caller calls `check_node()` after collection and before applying hints or dispatching
+ * tasks. The node and its parent chain must remain alive, and the table must remain valid under
+ * the search's existing concurrency contract.
  *
- * @param search Non-null shared search state supplying the borrowed table and time controls.
- * @param node   Non-null, exclusively owned node with its current moves stably capture-ordered;
- *               checkpoint-related atomic state may be updated in place.
+ * @param search Non-null shared search state supplying the borrowed table.
+ * @param node   Non-null, exclusively owned node with its current moves stably capture-ordered.
  * @param hints  Non-null caller-owned output; both counts are reset on entry, including when
  *               neighboring queries are disabled or inapplicable.
  * @return       Number of neighboring TT lookup attempts, at most
- *               `PARALLEL_MAX_SIMILAR_POSITION_QUERIES`; `0` when disabled, inapplicable, stopped
- *               before the first lookup or no candidate survives filtering. Not the hint count.
+ *               `PARALLEL_MAX_SIMILAR_POSITION_QUERIES`, or `0` when disabled, inapplicable or no
+ *               distinct candidate key is available.
  */
 static unsigned parallel_collect_similar_hints(Search           *search,
                                                Node             *node,
@@ -1946,18 +1931,12 @@ static unsigned parallel_collect_similar_hints(Search           *search,
     unsigned                queries     = 0;
     uint64_t                current_key = xq_jq_position_hash(&node->position);
     SimilarPositionIterator iterator    = parallel_similar_positions(node);
-    XqJqPosition              candidate;
     while (queries < limit)
     {
-        if (check_node(search, node) || !parallel_similar_position_next(&iterator, &candidate))
+        uint64_t key;
+        if (!parallel_similar_position_next(&iterator, &key))
             break;
-        if (candidate.side_to_move != node->position.side_to_move ||
-            xq_jq_position_king_square(&candidate, XQ_RED) == XQ_NO_SQUARE ||
-            xq_jq_position_king_square(&candidate, XQ_BLACK) == XQ_NO_SQUARE ||
-            xq_jq_position_in_check(&candidate, xq_color_opponent(candidate.side_to_move)))
-            continue;
-        uint64_t key       = xq_jq_position_hash(&candidate);
-        bool     duplicate = key == current_key;
+        bool duplicate = key == current_key;
         for (unsigned i = 0; i < queries && !duplicate; ++i)
             duplicate = queried_keys[i] == key;
         if (duplicate)

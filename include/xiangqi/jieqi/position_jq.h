@@ -89,6 +89,10 @@ bool xq_jq_position_unmake_move(XqJqPosition *pos, const XqJqUndo *undo);
 XqSquare xq_jq_position_king_square(const XqJqPosition *pos, XqColor color);
 int xq_jq_position_piece_count(const XqJqPosition *pos, XqColor color, XqPieceType type);
 uint64_t xq_jq_position_hash(const XqJqPosition *pos);
+/* Computes the public hash after a move using the same validation as make_move.
+ * Leaves pos unchanged and writes key only on success. key must not alias pos. */
+bool xq_jq_position_hash_after_move(const XqJqPosition *pos, XqMove move,
+                                    int revealed_type, uint64_t *key);
 bool xq_jq_position_validate(const XqJqPosition *pos);
 
 /* SplitMix64 state is owned by the caller. */
