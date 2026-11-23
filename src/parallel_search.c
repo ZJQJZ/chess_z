@@ -2420,6 +2420,9 @@ static void search_range(Search            *search,
                          SearchThreadStats *stats)
 {
     assert(node->in_check || node->depth > 0);
+    if (range.begin == range.end || check_node(search, node))
+        return;
+
     const unsigned child_depth = node->in_check ? node->depth : node->depth - 1;
     for (int i = range.begin; i < range.end; i += range.step)
     {

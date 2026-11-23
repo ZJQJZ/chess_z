@@ -2491,14 +2491,14 @@ static Interval search_node(Search *,
  * their depth budget; other bright moves consume one ply. Dark moves consume their configured
  * total depth cost, and all required full-window samples complete before a single averaged child
  * result is submitted. Each sample starts with a fresh copy of the public parent position.
- * Valid child intervals are submitted once
- * through lock-free `aggregate()`; cancelled results are excluded. A completed node can still
- * accept valid in-flight submissions. `check_node()` then refreshes its window and atomically
- * publishes any completion or cancellation. Only the matched PV move at index zero inherits the
- * hint suffix. The batch retains its best child's variation using the same bound comparison and
- * strict tie rule as `aggregate()`. Within a batch submissions are sequential, so a final global
- * `best_index` must also be its batch's retained `best_index`. Other batches never read or write
- * this batch's PV while it runs.
+ * Valid child intervals are submitted once through lock-free `aggregate()`; cancelled results are
+ * excluded. A completed node can still accept valid in-flight submissions. A nonempty batch
+ * checks the node once before starting. It also checks before each sample and at the end of each
+ * move, when it refreshes the window and exits the batch if the node has stopped. Only the matched
+ * PV move at index zero inherits the hint suffix. The batch retains its best child's variation
+ * using the same bound comparison and strict tie rule as `aggregate()`. Within a batch
+ * submissions are sequential, so a final global `best_index` must also be its batch's retained
+ * `best_index`. Other batches never read or write this batch's PV while it runs.
  *
  * @param search Shared search state; must not be null.
  * @param node   Parent with generated moves and either positive depth or check; keep it and its
@@ -2515,10 +2515,11 @@ static void search_range(Search            *search,
                          SearchThreadStats *stats)
 {
     assert(node->in_check || node->depth > 0);
+    if (range.begin == range.end || check_node(search, node))
+        return;
+
     for (int i = range.begin; i < range.end; i += range.step)
     {
-        if (check_node(search, node))
-            break;
         if (node->parent == NULL)
             atomic_store_explicit(&search->root_started, 1, memory_order_relaxed);
 
@@ -2607,7 +2608,8 @@ static void search_range(Search            *search,
                 search->progress(&update, search->progress_user);
             }
         }
-        (void)check_node(search, node);
+        if (check_node(search, node))
+            break;
     }
 }
 
