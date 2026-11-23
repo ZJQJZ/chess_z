@@ -12,12 +12,12 @@ typedef struct XqCachedPieceMoves
     XqMove moves[XQ_MAX_PIECE_MOVES];
     uint8_t count;
     int8_t piece;
-    /* One-based indices, with zero meaning no candidate of this kind. */
-    uint8_t first_capture_plus_one;
-    uint8_t king_capture_plus_one;
+    /* Pointers into moves, or NULL when there is no candidate of this kind. */
+    XqMove *first_capture;
+    XqMove *king_capture;
 } XqCachedPieceMoves;
 
-/* One cache per position traversal. Zero initialization starts a new one. */
+/* One cache per position traversal. Zero initialize and keep populated rows at a fixed address. */
 typedef struct XqMoveCache
 {
     XqCachedPieceMoves rows[XQ_SQUARES];

@@ -526,14 +526,11 @@ XqMoveCacheSummary xq_move_cache_refresh(XqMoveCache      *cache,
             }
             MoveWriter writer = {.next = row->moves, .end = row->moves + XQ_MAX_PIECE_MOVES};
             gen_piece(pos, &writer, sq, piece);
-            row->count = (uint8_t)(writer.next - row->moves);
-            row->first_capture_plus_one =
-                writer.first_capture == NULL ? 0 : (uint8_t)(writer.first_capture - row->moves + 1);
-            row->king_capture_plus_one =
-                writer.king_capture == NULL ? 0 : (uint8_t)(writer.king_capture - row->moves + 1);
+            row->count         = (uint8_t)(writer.next - row->moves);
+            row->first_capture = writer.first_capture;
+            row->king_capture  = writer.king_capture;
         }
-        if (row->king_capture_plus_one != 0 &&
-            summary.count + row->king_capture_plus_one <= XQ_MAX_MOVES)
+        if (row->king_capture != NULL)
             summary.king_capture = true;
         summary.count += row->count;
     }
@@ -564,13 +561,13 @@ void xq_move_cache_collect(const XqMoveCache *cache,
             copy_piece_moves(list->moves + list->count, row->moves, count);
             list->count += count;
         }
-        else if (row->first_capture_plus_one != 0)
+        else if (row->first_capture != NULL)
         {
-            for (int i = row->first_capture_plus_one - 1; i < count; ++i)
+            const XqMove *end = row->moves + count;
+            for (const XqMove *move = row->first_capture; move < end; ++move)
             {
-                XqMove move = row->moves[i];
-                if (move.captured != XQ_EMPTY_PIECE)
-                    list->moves[list->count++] = move;
+                if (move->captured != XQ_EMPTY_PIECE)
+                    list->moves[list->count++] = *move;
             }
         }
     }
