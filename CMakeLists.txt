@@ -74,6 +74,12 @@ if(BUILD_TESTING)
     xq_enable_warnings(xiangqi_move_cache_tests)
     add_test(NAME move_cache COMMAND xiangqi_move_cache_tests)
 
+    add_executable(xiangqi_move_cache_jq_tests tests/move_cache_jq_tests.c)
+    target_include_directories(xiangqi_move_cache_jq_tests PRIVATE src/jieqi)
+    target_link_libraries(xiangqi_move_cache_jq_tests PRIVATE xiangqi)
+    xq_enable_warnings(xiangqi_move_cache_jq_tests)
+    add_test(NAME move_cache_jq COMMAND xiangqi_move_cache_jq_tests)
+
     find_program(XQ_VIEWER_NODE NAMES node nodejs)
     if(XQ_VIEWER_NODE)
         add_test(NAME search_sample_viewer_model COMMAND ${XQ_VIEWER_NODE}

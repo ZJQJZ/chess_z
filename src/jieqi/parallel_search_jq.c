@@ -3,6 +3,7 @@
 #endif
 #include "xiangqi/jieqi/parallel_search_jq.h"
 #include "history_internal_jq.h"
+#include "movegen_internal_jq.h"
 #include "xiangqi/jieqi/movegen_jq.h"
 
 #include <assert.h>
@@ -1248,6 +1249,7 @@ typedef struct SearchRange
 /* One writer per physical thread; statistics are merged only after joining the pool. */
 typedef struct SearchThreadStats
 {
+    XqJqMoveCache move_cache;
     XqJqTranspositionStats cache;
     uint64_t             nodes;
     uint64_t             random_state; /* One writer: the physical search thread. */
@@ -2226,7 +2228,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
     if (ply > 0)
     {
         moves = &generated_moves;
-        xq_jq_generate_pseudo_legal(position, moves);
+        xq_jq_move_cache_generate(&stats->move_cache, position, moves);
         if (parallel_find_king_capture(moves, mover) != NULL)
             return (QuiescenceResult){WIN, false, false};
         in_check = xq_jq_position_in_check(position, mover);
@@ -2310,6 +2312,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
                 legal = false;
                 break;
             }
+            xq_jq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
             /* A sample must be exact before averaging: the caller's window cannot
              * prune one outcome independently of the other sampled outcomes. */
             QuiescenceResult child = parallel_quiescence(
@@ -2321,6 +2324,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
                 search_move_failed(search);
                 return (QuiescenceResult){0, true, false};
             }
+            xq_jq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
             if (child.stopped)
                 return (QuiescenceResult){0, true, false};
             sum -= child.score;
@@ -2583,9 +2587,11 @@ static void search_range(Search            *search,
                 child.cancelled = true;
                 break;
             }
+            xq_jq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
             Interval sample_value = search_node(
                 search, &child_position, node, i, child_depth, dark, NULL,
                 child_hint, child_hint_count, &child_pv, stats);
+            xq_jq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
             if (sample_value.cancelled)
             {
                 child.cancelled = true;
@@ -2665,6 +2671,8 @@ static void *worker_main(void *argument)
         if (atomic_load_explicit(&worker->state, memory_order_acquire) != WORKER_READY)
             abort();
         TaskCompletion *completion = worker->completion;
+        /* A newly dispatched task can belong to a different traversal. */
+        xq_jq_move_cache_reset(&worker->stats.move_cache);
         search_range(search, worker->node, worker->range, &completion->pv, &worker->stats);
         worker->node       = NULL;
         worker->range      = (SearchRange){0, 0, 1};
@@ -2954,7 +2962,7 @@ static Interval search_node(Search            *search,
         node.moves = search->root_moves;
     else
     {
-        xq_jq_generate_pseudo_legal(position, &node.moves);
+        xq_jq_move_cache_generate(&stats->move_cache, position, &node.moves);
         if (parallel_find_king_capture(&node.moves, position->side_to_move) != NULL)
         {
             score = node.maximizing ? WIN : -WIN;

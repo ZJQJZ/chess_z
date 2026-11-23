@@ -3,6 +3,7 @@
 #endif
 
 #include "xiangqi/jieqi/movegen_jq.h"
+#include "movegen_internal_jq.h"
 
 static _Thread_local unsigned pseudo_legal_generations;
 
@@ -12,9 +13,18 @@ static void count_pseudo_legal_generation(const XqJqPosition *position, XqJqMove
     xq_jq_generate_pseudo_legal(position, moves);
 }
 
+static void count_cached_generation(XqJqMoveCache *cache, const XqJqPosition *position,
+                                    XqJqMoveList *moves)
+{
+    ++pseudo_legal_generations;
+    xq_jq_move_cache_generate(cache, position, moves);
+}
+
 /* CMake copies the implementation with small, independent test-only enum values. */
 #define xq_jq_generate_pseudo_legal count_pseudo_legal_generation
+#define xq_jq_move_cache_generate count_cached_generation
 #include "parallel_search_under_test.c"
+#undef xq_jq_move_cache_generate
 #undef xq_jq_generate_pseudo_legal
 
 _Static_assert(PARALLEL_MAX_SIMILAR_POSITION_QUERIES == XQ_TEST_SIMILARITY_QUERY_LIMIT,
