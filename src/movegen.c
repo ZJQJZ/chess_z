@@ -528,10 +528,9 @@ XqMoveCacheSummary xq_move_cache_refresh(XqMoveCache      *cache,
             gen_piece(pos, &writer, sq, piece);
             row->count         = (uint8_t)(writer.next - row->moves);
             row->first_capture = writer.first_capture;
-            row->king_capture  = writer.king_capture;
+            row->king_capture  = writer.king_capture != NULL;
         }
-        if (row->king_capture != NULL)
-            summary.king_capture = true;
+        summary.king_capture |= row->king_capture;
         summary.count += row->count;
     }
     cache->changed[color] = xq_bb_empty();

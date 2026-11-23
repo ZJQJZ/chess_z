@@ -8,13 +8,14 @@ enum { XQ_MAX_PIECE_MOVES = XQ_FILES + XQ_RANKS - 2 };
 
 typedef struct XqCachedPieceMoves
 {
+    /* Keep the refresh metadata together, ahead of the move storage. */
     XqBitboard dependencies;
-    XqMove moves[XQ_MAX_PIECE_MOVES];
     uint8_t count;
     int8_t piece;
-    /* Pointers into moves, or NULL when there is no candidate of this kind. */
+    bool king_capture;
+    _Alignas(uint32_t) XqMove moves[XQ_MAX_PIECE_MOVES];
+    /* Points into moves, or is NULL when there is no capture. */
     XqMove *first_capture;
-    XqMove *king_capture;
 } XqCachedPieceMoves;
 
 /* One cache per position traversal. Zero initialize and keep populated rows at a fixed address. */
