@@ -1680,11 +1680,10 @@ typedef enum PathRepetition
  * match. The root participates as an ancestor; a root passed as `node` has no ancestors and returns
  * `PATH_REPETITION_NONE`. Real-game history, siblings and previous iterations are not consulted.
  *
- * Compares same-side ancestors' board squares byte for byte, including empty squares and each
- * piece's color and type, plus dark markers and public identity pools. No hash is used,
- * so a hash collision cannot trigger repetition.
- * Halfmove/fullmove counters and derived fields such as bitboards and the cached piece hash are
- * ignored; comparing the entire `XqJqPosition` would include unrelated data.
+ * Rejects unequal cached piece hashes before comparing same-side ancestors' board squares,
+ * dark markers and public identity pools exactly. Equal hashes still require all these fields to
+ * match, so a hash collision cannot trigger repetition. Cached piece hashes must match their boards.
+ * Halfmove/fullmove counters and derived piece and occupancy bitboards are ignored.
  *
  * The cycle contains the moves represented by nodes in `(ancestor, node]`. Each node's `in_check`
  * records whether the previous mover gave check, so it belongs to the opponent of that node's side
@@ -1726,7 +1725,9 @@ static PathRepetition parallel_path_repetition(Node *node)
 
         own_all_checks &= own_move->in_check;
         opponent_all_checks &= cursor->in_check;
-        if (memcmp(node->position.board, ancestor->position.board, sizeof(node->position.board)) == 0 &&
+        if (node->position.piece_hash == ancestor->position.piece_hash &&
+            memcmp(node->position.board, ancestor->position.board, sizeof(node->position.board)) ==
+                0 &&
             node->position.dark.lo == ancestor->position.dark.lo &&
             node->position.dark.hi == ancestor->position.dark.hi &&
             memcmp(node->position.pool, ancestor->position.pool, sizeof(node->position.pool)) == 0 &&
