@@ -121,36 +121,53 @@ static void gen_rook(const XqJqPosition *pos, MoveWriter *writer, XqSquare from)
  */
 static void gen_cannon(const XqJqPosition *pos, MoveWriter *writer, XqSquare from)
 {
-    XqColor color = xq_piece_color(pos->board[from]);
-    int from_file = xq_square_file(from);
-    int from_rank = xq_square_rank(from);
-    int i;
+    int row_start = from - xq_square_file(from);
+    int row_end   = row_start + XQ_FILES;
+    int to;
 
-    for (i = 0; i < 4; ++i)
+    /* 炮架前生成空格走法，越过炮架后由 add_move 判断第一颗棋子能否被吃。 */
+    /* 向右 */
+    for (to = from + 1; to < row_end && pos->board[to] == XQ_EMPTY_PIECE; ++to)
+        add_move(pos, writer, from, (XqSquare)to);
+    for (++to; to < row_end; ++to)
     {
-        bool screen_seen = false;
-        int file = from_file + orthogonal[i][0];
-        int rank = from_rank + orthogonal[i][1];
+        if (pos->board[to] == XQ_EMPTY_PIECE)
+            continue;
+        add_move(pos, writer, from, (XqSquare)to);
+        break;
+    }
 
-        while (xq_square_is_valid(file, rank))
-        {
-            XqSquare to = xq_square_make(file, rank);
-            if (!screen_seen)
-            {
-                if (pos->board[to] == XQ_EMPTY_PIECE)
-                    add_move(pos, writer, from, to);
-                else
-                    screen_seen = true;
-            }
-            else if (pos->board[to] != XQ_EMPTY_PIECE)
-            {
-                if (is_enemy(pos, to, color))
-                    add_move(pos, writer, from, to);
-                break;
-            }
-            file += orthogonal[i][0];
-            rank += orthogonal[i][1];
-        }
+    /* 向左 */
+    for (to = from - 1; to >= row_start && pos->board[to] == XQ_EMPTY_PIECE; --to)
+        add_move(pos, writer, from, (XqSquare)to);
+    for (--to; to >= row_start; --to)
+    {
+        if (pos->board[to] == XQ_EMPTY_PIECE)
+            continue;
+        add_move(pos, writer, from, (XqSquare)to);
+        break;
+    }
+
+    /* 行号递增 */
+    for (to = from + XQ_FILES; to < XQ_SQUARES && pos->board[to] == XQ_EMPTY_PIECE; to += XQ_FILES)
+        add_move(pos, writer, from, (XqSquare)to);
+    for (to += XQ_FILES; to < XQ_SQUARES; to += XQ_FILES)
+    {
+        if (pos->board[to] == XQ_EMPTY_PIECE)
+            continue;
+        add_move(pos, writer, from, (XqSquare)to);
+        break;
+    }
+
+    /* 行号递减 */
+    for (to = from - XQ_FILES; to >= 0 && pos->board[to] == XQ_EMPTY_PIECE; to -= XQ_FILES)
+        add_move(pos, writer, from, (XqSquare)to);
+    for (to -= XQ_FILES; to >= 0; to -= XQ_FILES)
+    {
+        if (pos->board[to] == XQ_EMPTY_PIECE)
+            continue;
+        add_move(pos, writer, from, (XqSquare)to);
+        break;
     }
 }
 
@@ -325,9 +342,11 @@ void xq_jq_generate_pseudo_legal(const XqJqPosition *pos, XqJqMoveList *list)
 {
     XqBitboard remaining = pos->occupied[pos->side_to_move];
     MoveWriter writer = {.next = list->moves, .end = list->moves + XQ_JQ_MAX_MOVES};
-    while (!xq_bb_is_empty(remaining))
+    while (writer.next != writer.end)
     {
         XqSquare sq = xq_bb_pop_first_square(&remaining);
+        if (sq == XQ_NO_SQUARE)
+            break;
         gen_piece(pos, &writer, sq, pos->board[sq]);
     }
     list->count = (int)(writer.next - list->moves);
@@ -444,9 +463,11 @@ XqJqMoveCacheSummary xq_jq_move_cache_refresh(XqJqMoveCache *cache, const XqJqPo
     XqBitboard remaining = pos->occupied[color];
     XqBitboard changed = cache->changed[color];
     XqJqMoveCacheSummary summary = {0};
-    while (!xq_bb_is_empty(remaining))
+    for (;;)
     {
         XqSquare sq = xq_bb_pop_first_square(&remaining);
+        if (sq == XQ_NO_SQUARE)
+            break;
         XqJqCachedPieceMoves *row = &cache->rows[sq];
         XqBitboard dependencies = row->dependencies;
         bool uninitialized = xq_bb_is_empty(dependencies);
@@ -481,9 +502,11 @@ void xq_jq_move_cache_collect(const XqJqMoveCache *cache, const XqJqPosition *po
                    "the move list must hold all cached rows");
     XqBitboard remaining = pos->occupied[pos->side_to_move];
     list->count = 0;
-    while (!xq_bb_is_empty(remaining))
+    for (;;)
     {
         XqSquare sq = xq_bb_pop_first_square(&remaining);
+        if (sq == XQ_NO_SQUARE)
+            break;
         const XqJqCachedPieceMoves *row = &cache->rows[sq];
         if (!captures_only)
         {

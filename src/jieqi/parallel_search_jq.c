@@ -202,6 +202,7 @@ enum
     PARALLEL_INTERLEAVED_SPLIT_THREADS          = 2,
     PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
     PARALLEL_MAX_PV_MOVES                       = 64,
+    PARALLEL_CACHE_LINE_ALIGNMENT               = 128,
     PARALLEL_TT_BUCKET_SIZE                     = 4,
     PARALLEL_TT_BUCKET_COUNT                    = 1 << 28,
     PARALLEL_MAX_SIMILAR_POSITION_QUERIES       = 8,
@@ -232,9 +233,13 @@ typedef struct ParallelTtEntry
 
 typedef struct ParallelTtBucket
 {
-    atomic_int      occupied;
+    /* Keep independent bucket guards on separate cache lines. */
+    _Alignas(PARALLEL_CACHE_LINE_ALIGNMENT) atomic_int occupied;
     ParallelTtEntry entries[PARALLEL_TT_BUCKET_SIZE];
 } ParallelTtBucket;
+
+_Static_assert(sizeof(ParallelTtBucket) == PARALLEL_CACHE_LINE_ALIGNMENT,
+               "each transposition table bucket must fit in one aligned block");
 
 struct XqJqParallelTranspositionTable
 {
@@ -254,11 +259,12 @@ struct XqJqParallelTranspositionTable
 /**
  * @brief Creates an independent, fixed-capacity transposition table for parallel search.
  *
- * Allocates the management structure and `PARALLEL_TT_BUCKET_COUNT` four-way buckets separately.
- * Zero initialization resets the `generation` and statistics, leaves the evaluator context unbound
- * (`has_context == false`), and marks every entry empty through `depth == 0`. Each bucket's atomic
- * `occupied` flag is explicitly initialized to zero before the table can be shared with workers;
- * later cache accesses use this flag to attempt exclusive access to the bucket.
+ * Allocates the management structure and `PARALLEL_TT_BUCKET_COUNT` cache-line-aligned four-way
+ * buckets separately. Zero initialization resets the `generation` and statistics, leaves the
+ * evaluator context unbound (`has_context == false`), and marks every entry empty through `depth ==
+ * 0`. Each bucket's atomic `occupied` flag is explicitly initialized to zero before the table can
+ * be shared with workers; later cache accesses use this flag to attempt exclusive access to the
+ * bucket.
  *
  * If bucket allocation fails, releases the already allocated management structure. On success, the
  * caller owns the table and may lend it to successive searches through `XqJqParallelOptions`. Only
@@ -272,14 +278,22 @@ XqJqParallelTranspositionTable *xq_jq_parallel_transposition_table_create(void)
     XqJqParallelTranspositionTable *table = calloc(1, sizeof(*table));
     if (table == NULL)
         return NULL;
-    table->buckets = calloc(PARALLEL_TT_BUCKET_COUNT, sizeof(*table->buckets));
-    if (table->buckets == NULL)
+    void  *buckets;
+    size_t bucket_count = PARALLEL_TT_BUCKET_COUNT;
+    if (bucket_count > SIZE_MAX / sizeof(*table->buckets) ||
+        posix_memalign(&buckets, _Alignof(ParallelTtBucket),
+                       bucket_count * sizeof(*table->buckets)) != 0)
     {
         free(table);
         return NULL;
     }
-    for (unsigned i = 0; i < PARALLEL_TT_BUCKET_COUNT; ++i)
-        atomic_init(&table->buckets[i].occupied, 0);
+    table->buckets = buckets;
+    for (size_t i = 0; i < bucket_count; ++i)
+    {
+        ParallelTtBucket *bucket = &table->buckets[i];
+        atomic_init(&bucket->occupied, 0);
+        memset(bucket->entries, 0, sizeof(bucket->entries));
+    }
     return table;
 }
 
@@ -1048,9 +1062,7 @@ static void parallel_build_pv(ParallelPv       *pv,
  * generations but do not change cache counters. The table must remain alive with a stable
  * generation; its per-bucket guards protect concurrent entry access, not external clear/destroy.
  *
- * Does not inspect node cancellation. The caller must check its node afterward and clear the PV if
- * the result was cancelled. Output storage must be exclusively owned and must not overlap the
- * inputs or shared table storage.
+ * Output storage must be exclusively owned and must not overlap the inputs or shared table storage.
  *
  * @param table    Search's borrowed cache for subsequent positions; `NULL` stops further lookups
  *                 but does not prevent using the supplied `first` entry.
@@ -1300,7 +1312,6 @@ typedef struct Search
     void              *evaluate_user;
     XqJqMoveList         root_moves;
     bool               filtered_cycles;
-    SearchThreadStats  stats;
     uint64_t           start_ms, deadline_ms;
     bool               start_available;
     atomic_int         time_state;
@@ -1309,6 +1320,8 @@ typedef struct Search
     atomic_int         error_status;
     unsigned           root_total;
     RootIteration      iteration;
+    /* Keep the caller's hot writes on separate cache lines from shared search state. */
+    _Alignas(PARALLEL_CACHE_LINE_ALIGNMENT) SearchThreadStats stats;
 } Search;
 
 /* A generated move or sample failure is not an evaluation of zero. Stop the
@@ -1459,8 +1472,8 @@ static Interval node_value(const Node *node)
  * represented by `[-WIN, -100]`.
  *
  * This function only converts the supplied data; it does not check the key, depth, cutoff
- * eligibility or ancestor cancellation. The caller checks reuse eligibility before calling and
- * checks node cancellation separately afterward. No shared state is modified.
+ * eligibility or ancestor cancellation. The caller checks reuse eligibility before calling. No
+ * shared state is modified.
  *
  * @param entry      Non-null, stable entry snapshot with a valid bound kind and score in `[-WIN,
  *                   WIN]`, normally copied by `parallel_tt_probe()`.
@@ -1916,9 +1929,8 @@ static bool parallel_similar_position_next(SimilarPositionIterator *iterator,
  * complete ordering stage afterward. A generated move is an ordering candidate, not proof of
  * legality; ordinary search still applies its existing terminal and self-check rules.
  *
- * The caller calls `check_node()` after collection and before applying hints or dispatching
- * tasks. The node and its parent chain must remain alive, and the table must remain valid under
- * the search's existing concurrency contract.
+ * The next stop check occurs when a search batch begins. The node and its parent chain must
+ * remain alive, and the table must remain valid under the search's existing concurrency contract.
  *
  * @param search Non-null shared search state supplying the borrowed table.
  * @param node   Non-null, exclusively owned node with its current moves stably capture-ordered.
@@ -2085,41 +2097,6 @@ static const XqMove *parallel_find_king_capture(const XqJqMoveList *moves,
 }
 
 /**
- * @brief Checks the published stop state and ordinary leaf's ancestors during quiescence.
- *
- * Calls `check_node()` without reading the clock or updating the shared time state.
- * `TIME_FINISH_ITERATION` allows the current iteration to continue, whereas a published `TIME_STOP`
- * requests cancellation. Ancestor completion or cancellation can also stop this subtree. Deadline
- * expiry is detected at an ordinary-node entry or an outer search checkpoint.
- *
- * The leaf and its parent chain stay alive until quiescence returns. Its window may tighten here,
- * but quiescence keeps its original window snapshot and local recursive windows. No quiescence
- * result has been published yet; a stopped leaf supplies either cancellation or an already valid
- * interval cutoff through `node_value()`. An existing terminal state is preserved, so a later time
- * stop cannot turn an already finished leaf into a cancelled one.
- *
- * This is a cooperative checkpoint, not an asynchronous interrupt or a wait for other threads. It
- * does not modify the position, publish a quiescence score, update counters or invoke progress
- * callbacks. A false result only means no stop was observed at this checkpoint. Quiescence checks
- * at each recursive entry and between reveal samples; the ordinary caller checks again before
- * publishing its result.
- *
- * @param search Initialized, non-null shared search state whose published time state is observed.
- * @param leaf   Non-null ordinary node owning the entire quiescence subtree, passed unchanged
- *               through its recursion. Its atomic fields must be initialized, and its parent chain
- *               must remain valid. This function may update its window and state.
- * @return       True when the leaf is finished or cancelled; false while it remains running. On
- *               true, quiescence must restore all made moves and propagate a stopped result without
- *               using its partial score. The ordinary caller reads `node_value(leaf)` to
- *               distinguish a valid cutoff interval from cancellation.
- */
-static bool quiescence_should_stop(Search *search,
-                                   Node   *leaf)
-{
-    return check_node(search, leaf);
-}
-
-/**
  * @brief Classifies the nearest repeated public position on the private quiescence path.
  *
  * Each descent makes one move, so ancestors two plies apart have the same side to move. The scan
@@ -2172,12 +2149,13 @@ static PathRepetition parallel_quiescence_repetition(const QuiescencePathEntry *
  *
  * `position` is a private mutable copy owned by the ordinary leaf. Every made move is unmade before
  * inspecting cancellation or returning. Recursion uses only local windows and move lists, not the
- * larger shared `Node` structure. The ordinary leaf is used solely to check the published stop
- * state and its ancestors. No table, PV or progress updates occur here; each entry contributes to
- * the executing thread's node count. Published stop state and ancestor cancellation are checked
- * without reading the clock. A child's stopped result propagates after restoring the move. The
- * ordinary caller performs the final stop check. Snapshots start at this quiescence subtree's
- * entry. Each call writes its ply, and deeper slots are reused by sibling moves and reveal samples.
+ * larger shared `Node` structure. At recursive entry and across reveal samples, `check_node()`
+ * checks the ordinary leaf for a published time stop or a stopped ancestor without reading the
+ * clock. It may tighten the leaf's window, while quiescence uses the window passed by its caller.
+ * A child's stopped result propagates after restoring the move. No table, PV or progress updates
+ * occur here; each entry contributes to the executing thread's node count. Snapshots start at this
+ * subtree's entry. Each call writes its ply, and deeper slots are reused by sibling moves and
+ * reveal samples.
  *
  * A stopped result has no usable score. Otherwise the score is fail-soft and must be classified
  * against the caller's original window before being published as a proven interval. A score <= the
@@ -2220,7 +2198,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
                                             SearchThreadStats   *stats)
 {
     ++stats->nodes;
-    if (quiescence_should_stop(search, leaf))
+    if (check_node(search, leaf))
         return (QuiescenceResult){0, true, false};
 
     XqColor mover = position->side_to_move;
@@ -2291,7 +2269,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
         bool legal = true;
         for (unsigned sample = 0; sample < count; ++sample)
         {
-            if (quiescence_should_stop(search, leaf))
+            if (check_node(search, leaf))
                 return (QuiescenceResult){0, true, false};
             int revealed_type = XQ_JQ_NO_REVEAL;
             if (dark && !sample_reveal(search, position, stats, &revealed_type))
@@ -2333,7 +2311,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
         }
         if (!legal)
             continue;
-        if (quiescence_should_stop(search, leaf))
+        if (check_node(search, leaf))
             return (QuiescenceResult){0, true, false};
         int score = (int)(sum / (int64_t)count);
         estimated = estimated || move_estimated;
@@ -2863,10 +2841,11 @@ static SearchRange split_node(Search           *search,
  * to assign helper batches using the configured strategy if the remaining normal-search depth meets
  * `PARALLEL_MIN_SPLIT_DEPTH` and the other splitting conditions, including an available helper,
  * hold. Searches its retained range using `search_range()`, which submits results and checks
- * bounds. After its own batch ends, consumes every task's completion notification, acquires each
- * `finished` flag, and checks the node again. Helpers may already have other tasks. Even a finished
- * or cancelled node must wait for all these handshakes to protect its stack lifetime. Completion
- * records remain alive until PV selection finishes, then the owner releases all its references.
+ * bounds. After its own batch ends, consumes every task's completion notification and acquires each
+ * `finished` flag before reading the terminal state and result. Helpers may already have other
+ * tasks. Even a finished or cancelled node must wait for all these handshakes to protect its stack
+ * lifetime. Completion records remain alive until PV selection finishes, then the owner releases
+ * all its references.
  *
  * A valid cutoff result retains the node's proven interval rather than substituting an ancestor
  * threshold. If ancestor completion causes cancellation before a normal completion is published,
@@ -3002,8 +2981,13 @@ static Interval search_node(Search            *search,
             QuiescenceResult quiet = parallel_quiescence_start(
                 search, &node, &node.position, move_count, node.maximizing ? alpha : -beta,
                 node.maximizing ? beta : -alpha, stats);
-            if (quiet.stopped || quiescence_should_stop(search, &node))
+            if (quiet.stopped)
+            {
+                /* Move or reveal failures publish TIME_STOP before cancelling this private leaf. */
+                if (atomic_load_explicit(&node.state, memory_order_relaxed) == NODE_RUNNING)
+                    (void)check_node(search, &node);
                 return node_value(&node);
+            }
 
             int      root_score = node.maximizing ? quiet.score : -quiet.score;
             Interval value      = {root_score, root_score, false, quiet.estimated};
@@ -3015,7 +2999,8 @@ static Interval search_node(Search            *search,
                 value.upper = WIN;
             atomic_store_explicit(&node.value.lower, value.lower, memory_order_relaxed);
             atomic_store_explicit(&node.value.upper, value.upper, memory_order_relaxed);
-            (void)check_node(search, &node);
+            /* The node is still private, and the interval proves an exact score or a cutoff. */
+            atomic_store_explicit(&node.state, NODE_FINISHED, memory_order_relaxed);
             return node_value(&node);
         }
         else if (move_count == 0)
@@ -3025,14 +3010,12 @@ static Interval search_node(Search            *search,
         }
     }
 
-    if (check_node(search, &node))
-        return node_value(&node);
     if (leaf)
     {
         /* The node has not been shared; no helper can access it yet. */
         atomic_store_explicit(&node.value.lower, score, memory_order_relaxed);
         atomic_store_explicit(&node.value.upper, score, memory_order_relaxed);
-        (void)check_node(search, &node);
+        atomic_store_explicit(&node.state, NODE_FINISHED, memory_order_relaxed);
         return node_value(&node);
     }
     XqMove   hash_move     = {0};
@@ -3053,20 +3036,14 @@ static Interval search_node(Search            *search,
             Interval value = parallel_tt_interval(&cached, node.maximizing);
             if (value.estimated)
                 atomic_store_explicit(&node.estimated, 1, memory_order_relaxed);
-            /*
-             * This node has not been shared. `check_node` still gives ancestor cancellation
-             * priority.
-             */
+            /* The node is still private, and the probe has already established the cutoff. */
             atomic_store_explicit(&node.value.lower, value.lower, memory_order_relaxed);
             atomic_store_explicit(&node.value.upper, value.upper, memory_order_relaxed);
             if (cached.score_kind == XQ_JQ_SEARCH_SCORE_EXACT)
                 parallel_pv_from_tt(search->options.transposition_table, position, depth, &cached,
                                     pv_out);
-            (void)check_node(search, &node);
-            value = node_value(&node);
-            if (value.cancelled)
-                pv_out->count = 0;
-            return value;
+            atomic_store_explicit(&node.state, NODE_FINISHED, memory_order_relaxed);
+            return node_value(&node);
         }
         if (hit)
         {
@@ -3080,8 +3057,6 @@ static Interval search_node(Search            *search,
         xq_jq_move_cache_collect(&stats->move_cache, position, &node.moves, false);
         parallel_order_moves(position, &node.moves);
         (void)parallel_collect_similar_hints(search, &node, &hints);
-        if (check_node(search, &node))
-            return node_value(&node);
     }
     parallel_apply_move_hints(&node, &hints, has_hash_move ? &hash_move : NULL, pv_hint,
                               pv_hint_count);
@@ -3110,9 +3085,9 @@ static Interval search_node(Search            *search,
     }
 
     /*
-     * This node is now quiescent; acquiring `finished` makes all helper result submissions visible.
+     * The checks in search_range() establish the terminal state by the time all ranges return.
+     * Acquiring each helper's `finished` flag makes that state and the submitted bounds visible.
      */
-    (void)check_node(search, &node);
     assert(atomic_load_explicit(&node.state, memory_order_relaxed) != NODE_RUNNING);
     Interval value = node_value(&node);
     if (parent == NULL)

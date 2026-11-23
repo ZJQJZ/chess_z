@@ -162,6 +162,8 @@ static void fixture_init(Fixture *fixture)
     fixture->search.options.thread_count = 1;
     fixture->search.options.transposition_table = xq_jq_parallel_transposition_table_create();
     CHECK(fixture->search.options.transposition_table != NULL);
+    CHECK((uintptr_t)fixture->search.options.transposition_table->buckets %
+              PARALLEL_CACHE_LINE_ALIGNMENT == 0);
     fixture->search.root_color = XQ_RED;
     atomic_init(&fixture->search.time_state, TIME_ACTIVE);
 
@@ -502,6 +504,28 @@ static void move_collection_after_cutoffs(void)
     fixture_destroy(&fixture);
 }
 
+static void quiescence_reveal_failure(void)
+{
+    Fixture fixture;
+    fixture_init(&fixture);
+    fixture.search.evaluate = xq_jq_engine_default_static_evaluate;
+    atomic_init(&fixture.search.error_status, XQ_JQ_PARALLEL_OK);
+
+    XqJqPosition position;
+    CHECK(xq_jq_position_from_fen(&position, "4k4/9/9/9/9/p8/9/R*8/9/3K5 r - - 0 1"));
+    /* An empty reveal pool forces the dark rook's capture to fail during sampling. */
+    CHECK(position.pool_total[XQ_RED] > 0);
+    position.pool_total[XQ_RED] = 0;
+
+    SearchThreadStats stats = {0};
+    ParallelPv pv = {0};
+    Interval value = search_node(&fixture.search, &position, &fixture.parent,
+                                 0, 0, false, NULL, NULL, 0, &pv, &stats);
+    CHECK(value.cancelled && stats.nodes == 2 && pv.count == 0);
+    CHECK(atomic_load(&fixture.search.error_status) == XQ_JQ_PARALLEL_INVALID_ARGUMENT);
+    fixture_destroy(&fixture);
+}
+
 int main(void)
 {
     incremental_hashes();
@@ -512,6 +536,7 @@ int main(void)
     root_king_capture_terminals();
     internal_king_capture_terminals();
     move_collection_after_cutoffs();
+    quiescence_reveal_failure();
     puts("Jieqi parallel similarity checks passed");
     return 0;
 }
