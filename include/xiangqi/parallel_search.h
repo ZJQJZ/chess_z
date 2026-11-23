@@ -188,16 +188,19 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * Shallower nodes search serially. Pruning, terminal positions and cancellation may still end a
  * task early. Helper tasks may first be dispatched in the depth-5 iteration, if reached.
  * CONTIGUOUS assigns a tail batch to at most one helper according to split_percent.
- * INTERLEAVED uses at most PARALLEL_INTERLEAVED_SPLIT_THREADS participants (3, defined in
- * parallel_search.c), including the owner, and ignores split_percent even when zero. It prepares
- * idle helpers before fixing the actual participant count N, capped by the number of moves; the
- * owner takes indices 0,N,2N,... and helper k takes k,k+N,k+2N,... for k in 1..N-1. Insufficient
- * idle workers reduce N without waiting. A limit of 1 disables interleaved splitting; 2 gives
- * even/odd batches. Completion allocation failure stops further reservations but keeps already
- * prepared helpers. With no prepared helper or fewer than two moves, the owner searches all moves
- * serially. thread_count == 1 disables splitting for either strategy. The global thread pool size
- * and its default of 2 are unchanged; three-way splitting requires thread_count >= 3 and two idle
- * helpers. Every dispatched helper completes before the node returns, including on cancellation.
+ * After the shared depth check, INTERLEAVED calls interleaved_split_threads() in parallel_search.c
+ * with the remaining depth and the normal-search depth consumed from the root this iteration.
+ * Consumed depth is zero at the root and excludes check-evasion extensions. The function
+ * currently returns 3, including the owner.
+ * INTERLEAVED ignores split_percent even when zero. It prepares idle helpers before fixing the
+ * actual participant count N, capped by the number of moves. The owner takes indices 0,N,2N,...
+ * and helper k takes k,k+N,k+2N,... for k in 1..N-1. Insufficient idle workers reduce N without
+ * waiting. The default thread_count of 2 allows even/odd batches when a helper is available.
+ * Three-way splitting requires thread_count >= 3, at least three moves, and two idle helpers.
+ * Completion allocation failure stops further reservations but keeps already prepared helpers.
+ * With no prepared helper or fewer than two moves, the owner searches all moves serially.
+ * thread_count == 1 disables splitting for either strategy. Every dispatched helper completes
+ * before the node returns, including on cancellation.
  * The budget covers preparation, pool creation and all iterations. Each physical thread checks
  * the deadline at its first ordinary-node entry and then every PARALLEL_TIME_CHECK_INTERVAL
  * ordinary entries (256, defined in parallel_search.c). The countdown persists across tasks and

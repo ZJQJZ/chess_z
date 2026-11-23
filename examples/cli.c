@@ -104,7 +104,7 @@ static void print_usage(const char *program)
     printf("  --split-strategy contiguous|interleaved  parallel split strategy (default interleaved)\n");
     printf("  --split-percent P          contiguous batch percentage, 0..100 (default 50; 0 disables splitting)\n");
     printf("  interleaved: sorted moves are shared round-robin among caller and available helpers; split-percent is ignored\n");
-    printf("  interleaved: per-node thread limit is set by PARALLEL_INTERLEAVED_SPLIT_THREADS in src/parallel_search.c (includes caller)\n");
+    printf("  xiangqi interleaved: up to three participants per eligible node, including the current thread\n");
     printf("  parallel: iterative deepening (default unlimited depth), in-memory cache, 5000 ms time limit by default; no TT files\n");
     printf("  %-21s  %s\n", "-f, --fen FEN", "initialize the position from FEN");
     printf("  %-21s  %s\n", "    --fen-file PATH", "search once per FEN line, then exit (no interaction)");
