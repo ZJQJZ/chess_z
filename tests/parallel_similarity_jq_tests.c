@@ -300,20 +300,43 @@ static unsigned count_reveal_samples(unsigned depth, unsigned order, void *user)
 {
     (void)depth;
     (void)order;
-    unsigned *calls = user;
-    ++*calls;
+    atomic_uint *calls = user;
+    atomic_fetch_add_explicit(calls, 1, memory_order_relaxed);
     return 2;
+}
+
+static void count_root_events(const XqJqSearchProgress *progress, void *user)
+{
+    (void)progress;
+    atomic_uint *calls = user;
+    atomic_fetch_add_explicit(calls, 1, memory_order_relaxed);
+}
+
+static void check_immediate_king_capture(const XqJqParallelResult *result, unsigned legal_moves)
+{
+    CHECK(result->move_available && result->best_move.from == xq_square_make(4, 5));
+    CHECK(result->best_move.to == xq_square_make(4, 9));
+    CHECK(result->best_move.captured == xq_make_piece(XQ_BLACK, XQ_KING));
+    CHECK(result->score_available && result->score_kind == XQ_JQ_SEARCH_SCORE_EXACT);
+    CHECK(result->score == WIN && !result->score_estimated && result->stats.winning_move_found);
+    CHECK(result->stats.selected_move_depth == 1 && result->stats.nodes == 0);
+    CHECK(result->stats.max_started_depth == 0 && result->stats.completed_depth == 0);
+    CHECK(result->stats.iteration_completed_moves == 0 && !result->stats.stopped);
+    CHECK(result->stats.iteration_total_moves == legal_moves);
 }
 
 static void root_king_capture_terminals(void)
 {
-    unsigned reveal_calls = 0;
+    atomic_uint reveal_calls = 0;
+    atomic_uint root_events = 0;
     XqJqParallelOptions options = xq_jq_parallel_options_default();
-    options.depth = 1;
-    options.thread_count = 1;
+    options.depth = 5;
+    options.thread_count = 4;
     options.time_limit_ms = 0;
     options.sample_count = count_reveal_samples;
     options.sample_user = &reveal_calls;
+    options.transposition_table = xq_jq_parallel_transposition_table_create();
+    CHECK(options.transposition_table != NULL);
 
     const char *const fens[] = {
         "4k4/9/9/9/4R4/9/9/9/9/3K5 r - - 0 1",
@@ -326,12 +349,35 @@ static void root_king_capture_terminals(void)
         CHECK(xq_jq_position_from_fen(&position, fens[i]));
         unsigned char original[sizeof(position)];
         memcpy(original, &position, sizeof(original));
-        CHECK(xq_jq_engine_parallel_search(NULL, &position, &options, &result) == XQ_JQ_PARALLEL_OK);
-        CHECK(result.move_available && result.best_move.from == xq_square_make(4, 5));
-        CHECK(result.best_move.captured == xq_make_piece(XQ_BLACK, XQ_KING));
-        CHECK(result.score_available && result.score_kind == XQ_JQ_SEARCH_SCORE_EXACT);
-        CHECK(result.score == WIN && !result.score_estimated && result.stats.winning_move_found);
-        CHECK(reveal_calls == 0 && memcmp(original, &position, sizeof(original)) == 0);
+
+        /* A quiet cache hint can precede the capture in the legal list. */
+        XqMove quiet = board_move(&position, 4, 5, 0, 5);
+        XqJqMoveList legal;
+        xq_jq_generate_legal(&position, &legal);
+        CHECK(quiet.captured == XQ_EMPTY_PIECE && parallel_prioritize_move(&legal, quiet));
+        uint64_t root_key = xq_jq_position_hash(&position);
+        XqJqTranspositionStats ignored = {0};
+        parallel_tt_store(options.transposition_table, root_key, 1, 12345,
+                          XQ_JQ_SEARCH_SCORE_EXACT, quiet, false, &ignored);
+
+        CHECK(xq_jq_engine_parallel_search_with_observer(NULL, &position, &options, &result,
+              count_root_events, &root_events) == XQ_JQ_PARALLEL_OK);
+        check_immediate_king_capture(&result, (unsigned)legal.count);
+        CHECK(result.stats.cache.hits == 1 && result.stats.cache.cutoffs == 0);
+        CHECK(result.stats.cache.stores == 1);
+        ParallelTtEntry cached;
+        CHECK(parallel_tt_peek(options.transposition_table, root_key, &cached));
+        CHECK(cached.depth == 1 && cached.score == WIN && !cached.estimated);
+        CHECK(cached.score_kind == XQ_JQ_SEARCH_SCORE_EXACT);
+        CHECK(cached.best_move.from == result.best_move.from &&
+              cached.best_move.to == result.best_move.to);
+
+        CHECK(xq_jq_engine_parallel_search_with_observer(NULL, &position, &options, &result,
+              count_root_events, &root_events) == XQ_JQ_PARALLEL_OK);
+        check_immediate_king_capture(&result, (unsigned)legal.count);
+        CHECK(result.stats.cache.cutoffs == 1 && result.stats.cache.stores == 0);
+        CHECK(atomic_load(&reveal_calls) == 0 && atomic_load(&root_events) == 0);
+        CHECK(memcmp(original, &position, sizeof(original)) == 0);
     }
 
     for (int color = XQ_RED; color < XQ_COLOR_NB; ++color)
@@ -343,6 +389,7 @@ static void root_king_capture_terminals(void)
         CHECK(!result.move_available && result.score_available && !result.score_estimated);
         CHECK(result.score == (color == XQ_RED ? -WIN : WIN) && result.stats.nodes == 0);
     }
+    xq_jq_parallel_transposition_table_destroy(options.transposition_table);
 }
 
 static void internal_king_capture_terminals(void)

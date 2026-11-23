@@ -2066,19 +2066,20 @@ typedef struct QuiescencePathEntry
 } QuiescencePathEntry;
 
 /**
- * @brief Checks whether any candidate captures the opposing king before a move is played.
+ * @brief Finds the first candidate that captures the opposing king.
  *
  * Pseudo-legal captures qualify even when the mover's king is in check. A dark mover's
  * revealed identity does not affect whether it captures the king.
+ * Returns a pointer into the list, or NULL if it contains no king capture.
  */
-static bool parallel_can_capture_king(const XqJqMoveList *moves,
-                                      XqColor            mover)
+static const XqMove *parallel_find_king_capture(const XqJqMoveList *moves,
+                                                XqColor            mover)
 {
     const int opponent_king = xq_make_piece(xq_color_opponent(mover), XQ_KING);
     for (int i = 0; i < moves->count; ++i)
         if (moves->moves[i].captured == opponent_king)
-            return true;
-    return false;
+            return &moves->moves[i];
+    return NULL;
 }
 
 /**
@@ -2226,7 +2227,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
     {
         moves = &generated_moves;
         xq_jq_generate_pseudo_legal(position, moves);
-        if (parallel_can_capture_king(moves, mover))
+        if (parallel_find_king_capture(moves, mover) != NULL)
             return (QuiescenceResult){WIN, false, false};
         in_check = xq_jq_position_in_check(position, mover);
     }
@@ -2507,11 +2508,10 @@ static Interval search_node(Search *,
 /**
  * @brief Searches a disjoint batch of child moves without an explicit scheduling mutex.
  *
- * A legal root capture of the opposing king supplies an exact win before making the move or
- * sampling a reveal. Other moves copy the position and recurse. Bright check evasions retain
- * their depth budget, and other bright moves consume one ply. Dark moves consume their configured
- * total depth cost, and all full-window samples complete before a single averaged result is
- * submitted. Each sample starts with a fresh copy of the public parent position.
+ * Copies the position and recurses for each move. Bright check evasions retain their depth budget,
+ * and other bright moves consume one ply. Dark moves consume their configured total depth cost,
+ * and all full-window samples complete before a single averaged result is submitted. Each sample
+ * starts with a fresh copy of the public parent position.
  * Valid child intervals are submitted once through lock-free `aggregate()`; cancelled results are
  * excluded. A completed node can still accept valid in-flight submissions. A nonempty batch
  * checks the node once before starting. It also checks before each sample and at the end of each
@@ -2522,8 +2522,8 @@ static Interval search_node(Search *,
  * `best_index`. Other batches never read or write this batch's PV while it runs.
  *
  * @param search Shared search state; must not be null.
- * @param node   Parent with generated moves and either positive depth or check; keep it and its
- *               parent chain alive.
+ * @param node   Parent with no king captures in its generated moves, and either positive depth or
+ *               check; keep it and its parent chain alive.
  * @param range  Batch indices, with `0 <= begin <= end <= node->moves.count` and `step > 0`.
  *               Original move indices are retained for child results and PV hints.
  * @param batch  Exclusively owned PV output, initialized with `best_index == -1` before dispatch.
@@ -2539,94 +2539,77 @@ static void search_range(Search            *search,
     if (range.begin == range.end || check_node(search, node))
         return;
 
-    const int opponent_king =
-        xq_make_piece(xq_color_opponent(node->position.side_to_move), XQ_KING);
     for (int i = range.begin; i < range.end; i += range.step)
     {
         if (node->parent == NULL)
             atomic_store_explicit(&search->root_started, 1, memory_order_relaxed);
 
         XqMove move = node->moves.moves[i];
+        bool dark = xq_jq_position_is_dark(&node->position, move.from);
+        unsigned child_depth = node->in_check ? node->depth : node->depth - 1;
+        if (dark)
+            child_depth = node->depth > PARALLEL_DARK_MOVE_DEPTH_COST
+                              ? node->depth - PARALLEL_DARK_MOVE_DEPTH_COST : 0;
+        unsigned count = dark ? reveal_sample_count(search, node->depth, (unsigned)i + 1) : 1;
+        const XqMove *child_hint = NULL;
+        int child_hint_count = 0;
+        if (!dark && i == 0 && node->pv_hint_count > 1)
+        {
+            child_hint = node->pv_hint + 1;
+            child_hint_count = node->pv_hint_count - 1;
+        }
+        int64_t lower_sum = 0, upper_sum = 0;
+        Interval child = {-WIN, WIN, false, dark};
         ParallelPv child_pv = {0};
-        Interval child;
-        if (move.captured == opponent_king)
+        for (unsigned sample = 0; sample < count; ++sample)
         {
-            assert(node->parent == NULL);
             if (check_node(search, node))
+            {
+                child.cancelled = true;
                 break;
-            child = (Interval){WIN, WIN, false, false};
+            }
+            int revealed_type = XQ_JQ_NO_REVEAL;
+            if (dark && !sample_reveal(search, &node->position, stats, &revealed_type))
+            {
+                child.cancelled = true;
+                break;
+            }
+            /* Every sample begins at the same public parent, not at the result of
+             * the previous draw. No real-game hidden identities enter this path. */
+            XqJqPosition child_position = node->position;
+            if (!xq_jq_position_make_move(&child_position, move, revealed_type))
+            {
+                search_move_failed(search);
+                child.cancelled = true;
+                break;
+            }
+            Interval sample_value = search_node(
+                search, &child_position, node, i, child_depth, dark, NULL,
+                child_hint, child_hint_count, &child_pv, stats);
+            if (sample_value.cancelled)
+            {
+                child.cancelled = true;
+                break;
+            }
+            if (dark && sample_value.lower != sample_value.upper)
+            {
+                /* The sample window is isolated. A surviving bound is not an
+                 * exact sample and must never be averaged as a point score. */
+                search_move_failed(search);
+                child.cancelled = true;
+                break;
+            }
+            lower_sum += sample_value.lower;
+            upper_sum += sample_value.upper;
+            child.estimated = child.estimated || sample_value.estimated;
         }
-        else
-        {
-            bool dark = xq_jq_position_is_dark(&node->position, move.from);
-            unsigned child_depth = node->in_check ? node->depth : node->depth - 1;
-            if (dark)
-                child_depth = node->depth > PARALLEL_DARK_MOVE_DEPTH_COST
-                                  ? node->depth - PARALLEL_DARK_MOVE_DEPTH_COST : 0;
-            unsigned count = dark ? reveal_sample_count(search, node->depth, (unsigned)i + 1) : 1;
-            const XqMove *child_hint = NULL;
-            int child_hint_count = 0;
-            if (!dark && i == 0 && node->pv_hint_count > 1)
-            {
-                child_hint = node->pv_hint + 1;
-                child_hint_count = node->pv_hint_count - 1;
-            }
-            int64_t lower_sum = 0, upper_sum = 0;
-            child = (Interval){-WIN, WIN, false, dark};
-            for (unsigned sample = 0; sample < count; ++sample)
-            {
-                if (check_node(search, node))
-                {
-                    child.cancelled = true;
-                    break;
-                }
-                int revealed_type = XQ_JQ_NO_REVEAL;
-                if (dark && !sample_reveal(search, &node->position, stats, &revealed_type))
-                {
-                    child.cancelled = true;
-                    break;
-                }
-                /* Every sample begins at the same public parent, not at the result of
-                 * the previous draw. No real-game hidden identities enter this path. */
-                XqJqPosition child_position = node->position;
-                if (!xq_jq_position_make_move(&child_position, move, revealed_type))
-                {
-                    search_move_failed(search);
-                    child.cancelled = true;
-                    break;
-                }
-                Interval sample_value = search_node(
-                    search, &child_position, node, i, child_depth, dark, NULL,
-                    child_hint, child_hint_count, &child_pv, stats);
-                if (sample_value.cancelled)
-                {
-                    child.cancelled = true;
-                    break;
-                }
-                if (dark && sample_value.lower != sample_value.upper)
-                {
-                    /* The sample window is isolated. A surviving bound is not an
-                     * exact sample and must never be averaged as a point score. */
-                    search_move_failed(search);
-                    child.cancelled = true;
-                    break;
-                }
-                lower_sum += sample_value.lower;
-                upper_sum += sample_value.upper;
-                child.estimated = child.estimated || sample_value.estimated;
-            }
-            if (!child.cancelled)
-            {
-                child.lower = (int)(lower_sum / (int64_t)count);
-                child.upper = (int)(upper_sum / (int64_t)count);
-                /* A PV is conditional on the sampled reveal. Keep only its first move. */
-                if (dark)
-                    child_pv.count = 0;
-            }
-        }
-
         if (!child.cancelled)
         {
+            child.lower = (int)(lower_sum / (int64_t)count);
+            child.upper = (int)(upper_sum / (int64_t)count);
+            /* A PV is conditional on the sampled reveal. Keep only its first move. */
+            if (dark)
+                child_pv.count = 0;
             int best = batch->best_index;
             if (best < 0 || (node->maximizing && child.lower > node->children[best].lower) ||
                 (!node->maximizing && child.upper < node->children[best].upper))
@@ -2820,9 +2803,9 @@ static SearchRange split_node(Search           *search,
  * The root uses the legal, history-filtered list prepared before the helper pool was created.
  * Descendants generate pseudo-legal moves. A capture of the opposing king proves a win for the
  * current side before the depth limit, path repetition or cache lookup, even when both kings are
- * attacked. Legal root king captures are submitted through the ordinary batch path. The public
- * entry handles missing kings at the root. Scoring these captures before applying them or
- * sampling reveals keeps both kings on the board during recursion.
+ * attacked. The public entry handles missing kings and immediate king captures at the root.
+ * Scoring these captures before applying them or sampling reveals keeps both kings on the board
+ * during recursion.
  *
  * A bright move in check consumes no depth when searching its child,
  * including at depth zero. A repeated board and side to move uses the cycle ending here and
@@ -2972,7 +2955,7 @@ static Interval search_node(Search            *search,
     else
     {
         xq_jq_generate_pseudo_legal(position, &node.moves);
-        if (parallel_can_capture_king(&node.moves, position->side_to_move))
+        if (parallel_find_king_capture(&node.moves, position->side_to_move) != NULL)
         {
             score = node.maximizing ? WIN : -WIN;
             leaf  = true;
@@ -3294,12 +3277,15 @@ void xq_jq_parallel_transposition_table_get_stats(const XqJqParallelTranspositio
  * clock; it neither splits tasks nor accesses the table or PV. Node counts include both normal and
  * quiescence entries, including their shared leaf; reported depths exclude check-evasion and
  * quiescence extensions. Real-game history removes root candidates that close a third identical
- * cycle before any helper tasks are dispatched. Legal root king captures score an exact win in the
- * batch search. Non-root nodes score a win when one of their pseudo-legal moves captures the
- * opposing king, before repetition and table lookup. Both paths score king captures without
- * playing the move or sampling a reveal. Ordinary search and quiescence classify the first
- * repetition using the nearest same-side ancestor with matching board, dark markers and public
- * identity pool. The private quiescence path starts at the entry leaf. If the current side always
+ * cycle before any helper tasks are dispatched. After the cache and time-stop checks, the first
+ * surviving legal root king capture returns an exact win at selected depth one before pool
+ * creation. The result uses zero search nodes and emits no iteration events. The entry attempts
+ * to cache the win at depth one when no root move was filtered. Non-root nodes score a win when
+ * one of their pseudo-legal moves captures the opposing king, before repetition and table
+ * lookup. Both paths score king captures before playing moves or sampling reveals.
+ * Ordinary search and quiescence classify the first repetition using the nearest same-side
+ * ancestor with matching board, dark markers and public identity pool. The private quiescence
+ * path starts at the entry leaf. If the current side always
  * gave check during the cycle, the score is a draw when the opponent also always checked, or a loss
  * for the current side otherwise. Only opposing perpetual check returns NONE and continues the
  * current search. If neither side always checked, ordinary search enters quiescence and a
@@ -3331,8 +3317,8 @@ void xq_jq_parallel_transposition_table_get_stats(const XqJqParallelTranspositio
  * root candidates were history-filtered. A cached win also returns if its best move survives root
  * history filtering, even when other candidates were removed. The score is exact,
  * `selected_move_depth` reports the cached depth, and no iteration is started or reported as
- * completed. Terminal roots also succeed but have `move_available == false`; callers must check
- * that flag before using `best_move`. Equal-score move selection may depend on thread scheduling.
+ * completed. Terminal roots without moves have `move_available == false`; callers must check that
+ * flag before using `best_move`. Equal-score move selection may depend on thread scheduling.
  *
  * Evaluators may be called concurrently; the callback and its user data must support this and must
  * not modify positions. Scheduling uses atomic states and semaphores, without explicit mutexes.
@@ -3394,8 +3380,8 @@ XqJqParallelStatus xq_jq_engine_parallel_search(const XqJqEngineAdapter   *engin
  * `FINISHED` after all root callbacks and helper work have completed. `FINISHED` may describe a
  * partial iteration when timing or a winning move permits an early exit. `ROOT_MOVE_COMPLETED`
  * events report valid submitted child results; cancelled children are excluded. Terminal roots,
- * cached proven root outcomes, fully filtered roots and argument, platform or initial resource
- * failures emit no iteration events.
+ * cached proven root outcomes, immediate root captures, fully filtered roots and argument,
+ * platform or initial resource failures emit no iteration events.
  *
  * Root-move callbacks execute synchronously on the thread submitting the result, which may be a
  * helper. They can overlap and arrive out of count order; observers must synchronize shared state
@@ -3553,6 +3539,22 @@ XqJqParallelStatus xq_jq_engine_parallel_search_with_observer(const XqJqEngineAd
         if (moves->count == 0 ||
             atomic_load_explicit(&search.time_state, memory_order_relaxed) == TIME_STOP)
             goto finished;
+
+        const XqMove *king_capture = parallel_find_king_capture(moves, search.root_color);
+        if (king_capture != NULL)
+        {
+            result->best_move                 = *king_capture;
+            result->score                     = WIN;
+            result->score_available           = true;
+            result->score_kind                = XQ_JQ_SEARCH_SCORE_EXACT;
+            result->stats.selected_move_depth = 1;
+            result->stats.winning_move_found  = true;
+            if (!search.filtered_cycles && effective.transposition_table != NULL)
+                parallel_tt_store(effective.transposition_table, xq_jq_position_hash(pos), 1, WIN,
+                                  XQ_JQ_SEARCH_SCORE_EXACT, *king_capture, false, &search.stats.cache);
+            goto finished;
+        }
+
         if (effective.thread_count > 1)
         {
             if (pthread_attr_init(&worker_attributes) != 0)

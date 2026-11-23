@@ -147,12 +147,18 @@ const char *xq_jq_parallel_status_text(XqJqParallelStatus status);
  * to 2 and is the total depth cost. Quiescence dark moves use sample_count with
  * remaining_depth == 0.
  *
- * The public search entry scores a root missing a king as terminal. In a root batch, a legal
- * capture of the opposing king proves an exact win for that move. Ordinary non-root nodes scan
- * pseudo-legal candidates and score a win for the side to move if any candidate captures the
- * opposing king, even when both kings are attacked. This check precedes path repetition,
- * quiescence and table lookup. Scoring a king capture skips the move and reveal sampling, so both
- * kings remain on the board throughout recursion.
+ * The public search entry scores a root missing a king as terminal. After history filtering,
+ * cached outcome and time-stop checks, the entry scans the remaining legal root moves before
+ * creating the helper pool. It scores the first king capture directly, skipping the move and
+ * reveal sampling. The score is an exact +30000 with score_estimated == false,
+ * selected_move_depth == 1 and winning_move_found == true. Node counts, started and completed
+ * depths, and completed root move counts are zero. When a table is available and no root
+ * candidates were filtered, the entry attempts to store the exact win at depth 1.
+ *
+ * Ordinary non-root nodes scan pseudo-legal candidates and score a win for the side to move if
+ * any candidate captures the opposing king, even when both kings are attacked. This check precedes
+ * path repetition, quiescence and table lookup. Scoring a king capture skips the move and reveal
+ * sampling, so both kings remain on the board throughout recursion.
  *
  * Quiescence starts with the ordinary leaf's candidate list and check state. Deeper quiescence
  * nodes generate pseudo-legal candidates and score a king capture as +30000 before repetition,
@@ -197,7 +203,8 @@ XqJqParallelStatus xq_jq_engine_parallel_search(const XqJqEngineAdapter *engine,
     const XqJqPosition *pos, const XqJqParallelOptions *options, XqJqParallelResult *result);
 
 /* Same search with optional observation of ordinary root progress. Terminal roots, cached proven
- * root outcomes, fully filtered roots and argument/resource failures emit no iteration events.
+ * root outcomes, immediate root king captures, fully filtered roots and argument/resource failures
+ * emit no iteration events.
  * There is no path-sampling controller or per-thread state reporting. */
 XqJqParallelStatus xq_jq_engine_parallel_search_with_observer(const XqJqEngineAdapter *engine,
     const XqJqPosition *pos, const XqJqParallelOptions *options, XqJqParallelResult *result,
