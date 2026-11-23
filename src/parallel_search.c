@@ -2397,15 +2397,15 @@ static Interval search_node(Search *,
 /**
  * @brief Searches a disjoint batch of child moves without an explicit scheduling mutex.
  *
- * Copies the position for each move and recursively searches it. A node in check retains its depth
- * budget for every child; other nodes consume one ply. Valid child intervals are submitted once
- * through lock-free `aggregate()`; cancelled results are excluded. A completed node can still
- * accept valid in-flight submissions. `check_node()` then refreshes its window and atomically
- * publishes any completion or cancellation. Only the matched PV move at index zero inherits the
- * hint suffix. The batch retains its best child's variation using the same bound comparison and
- * strict tie rule as `aggregate()`. Within a batch submissions are sequential, so a final global
- * `best_index` must also be its batch's retained `best_index`. Other batches never read or write
- * this batch's PV while it runs.
+ * Recursively searches each move from the parent position. A node in check retains its depth budget
+ * for every child; other nodes consume one ply. Valid child intervals are submitted once through
+ * lock-free `aggregate()`; cancelled results are excluded. A completed node can still accept valid
+ * in-flight submissions. `check_node()` then refreshes its window and atomically publishes any
+ * completion or cancellation. Only the matched PV move at index zero inherits the hint suffix. The
+ * batch retains its best child's variation using the same bound comparison and strict tie rule as
+ * `aggregate()`. Within a batch submissions are sequential, so a final global `best_index` must
+ * also be its batch's retained `best_index`. Other batches never read or write this batch's PV
+ * while it runs.
  *
  * @param search Shared search state; must not be null.
  * @param node   Parent with generated moves free of king captures and either positive depth or
@@ -2435,15 +2435,13 @@ static void search_range(Search            *search,
             child_hint       = node->pv_hint + 1;
             child_hint_count = node->pv_hint_count - 1;
         }
-        XqMove     move           = node->moves.moves[i];
-        XqPosition child_position = node->position;
-        xq_position_make_move(&child_position, move);
+        XqMove move = node->moves.moves[i];
         xq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
         if (stats->sampling != NULL)
             xq_sampling_push(stats->sampling, move, false);
         ParallelPv child_pv;
-        Interval   child = search_node(search, &child_position, node, i, child_depth, NULL,
-                                       child_hint, child_hint_count, &child_pv, stats);
+        Interval   child = search_node(search, NULL, node, i, child_depth, NULL, child_hint,
+                                       child_hint_count, &child_pv, stats);
         if (stats->sampling != NULL)
             xq_sampling_pop(stats->sampling, false);
         xq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
@@ -2641,14 +2639,15 @@ static SearchRange split_node(Search           *search,
 /**
  * @brief Searches a subtree and returns its proven score interval or a cancellation marker.
  *
- * Creates a local `Node` with a copy of `position`, an initially unknown interval `[-WIN, WIN]`,
- * and a link to `parent`. A node is MAX when its side to move equals `search->root_color` and MIN
- * otherwise; its intervals retain the root side's perspective. Quiescence converts to and from the
- * side-to-move perspective at its entry boundary. Checks the deadline at the first ordinary entry
- * on each physical thread and then every `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Uses
- * lock-free `check_node()` at every entry and subsequent checkpoint to refresh inherited bounds and
- * publish completion or cancellation without reading the clock. Scheduling uses atomic worker
- * states and retained semaphore notifications.
+ * Creates a local `Node` with one position copy, an initially unknown interval `[-WIN, WIN]`, and a
+ * link to `parent`. A recursive child copies the parent position and applies the move in its own
+ * node. A node is MAX when its side to move equals `search->root_color` and MIN otherwise; its
+ * intervals retain the root side's perspective. Quiescence converts to and from the side-to-move
+ * perspective at its entry boundary. Checks the deadline at the first ordinary entry on each
+ * physical thread and then every `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Uses lock-free
+ * `check_node()` at every entry and subsequent checkpoint to refresh inherited bounds and publish
+ * completion or cancellation without reading the clock. Scheduling uses atomic worker states and
+ * retained semaphore notifications.
  *
  * The root uses the legal, history-filtered list prepared before the helper pool was created.
  * Descendants generate pseudo-legal moves. A move that captures the opposing king proves a win for
@@ -2722,8 +2721,8 @@ static SearchRange split_node(Search           *search,
  * concurrent invocation.
  *
  * @param search            Initialized shared search state; must not be null.
- * @param position          Position to search; must not be null and must remain unchanged during
- *                          the call.
+ * @param initial_position  Read-only position to search, or `NULL` to derive it from the parent and
+ *                          its move at `parent_move_index`.
  * @param parent            Parent node, or `NULL` for the root.
  * @param parent_move_index Index of the move in the parent's final list, or `-1` for the root.
  * @param depth             Remaining normal-search budget; check evasions do not consume it. `0`
@@ -2742,7 +2741,7 @@ static SearchRange split_node(Search           *search,
  *                          a cancellation marker whose score bounds must not be used.
  */
 static Interval search_node(Search            *search,
-                            const XqPosition  *position,
+                            const XqPosition  *initial_position,
                             Node              *parent,
                             int                parent_move_index,
                             unsigned           depth,
@@ -2756,10 +2755,17 @@ static Interval search_node(Search            *search,
      * Initialize control fields explicitly; arrays are filled before their valid entries are read.
      */
     Node node;
+    if (initial_position != NULL)
+        node.position = *initial_position;
+    else
+    {
+        node.position = parent->position;
+        xq_position_make_move(&node.position, parent->moves.moves[parent_move_index]);
+    }
+    const XqPosition *position   = &node.position;
     pv_out->count                = 0;
     node.parent                  = parent;
     node.parent_move_index       = parent_move_index;
-    node.position                = *position;
     node.depth                   = depth;
     node.maximizing              = position->side_to_move == search->root_color;
     node.owner_pv.best_index     = -1;
