@@ -6,6 +6,8 @@
 #include "movegen_internal_jq.h"
 
 static _Thread_local unsigned pseudo_legal_generations;
+static _Thread_local unsigned full_collections;
+static _Thread_local unsigned capture_collections;
 
 static void count_pseudo_legal_generation(const XqJqPosition *position, XqJqMoveList *moves)
 {
@@ -13,18 +15,29 @@ static void count_pseudo_legal_generation(const XqJqPosition *position, XqJqMove
     xq_jq_generate_pseudo_legal(position, moves);
 }
 
-static void count_cached_generation(XqJqMoveCache *cache, const XqJqPosition *position,
-                                    XqJqMoveList *moves)
+static XqJqMoveCacheSummary count_cache_refresh(XqJqMoveCache *cache, const XqJqPosition *position)
 {
     ++pseudo_legal_generations;
-    xq_jq_move_cache_generate(cache, position, moves);
+    return xq_jq_move_cache_refresh(cache, position);
+}
+
+static void count_cache_collection(const XqJqMoveCache *cache, const XqJqPosition *position,
+                                    XqJqMoveList *moves, bool captures_only)
+{
+    if (captures_only)
+        ++capture_collections;
+    else
+        ++full_collections;
+    xq_jq_move_cache_collect(cache, position, moves, captures_only);
 }
 
 /* CMake copies the implementation with small, independent test-only enum values. */
 #define xq_jq_generate_pseudo_legal count_pseudo_legal_generation
-#define xq_jq_move_cache_generate count_cached_generation
+#define xq_jq_move_cache_refresh count_cache_refresh
+#define xq_jq_move_cache_collect count_cache_collection
 #include "parallel_search_under_test.c"
-#undef xq_jq_move_cache_generate
+#undef xq_jq_move_cache_collect
+#undef xq_jq_move_cache_refresh
 #undef xq_jq_generate_pseudo_legal
 
 _Static_assert(PARALLEL_MAX_SIMILAR_POSITION_QUERIES == XQ_TEST_SIMILARITY_QUERY_LIMIT,
@@ -449,7 +462,7 @@ static void internal_king_capture_terminals(void)
     fixture_destroy(&fixture);
 }
 
-static void quiescence_reuses_leaf_moves(void)
+static void move_collection_after_cutoffs(void)
 {
     Fixture fixture;
     fixture_init(&fixture);
@@ -460,10 +473,32 @@ static void quiescence_reuses_leaf_moves(void)
     SearchThreadStats stats = {0};
     ParallelPv pv = {0};
     pseudo_legal_generations = 0;
+    full_collections = 0;
+    capture_collections = 0;
     Interval value = search_node(&fixture.search, &position, &fixture.parent,
                                  0, 0, false, NULL, NULL, 0, &pv, &stats);
     CHECK(!value.cancelled && !value.estimated && value.lower == score && value.upper == score);
     CHECK(stats.nodes == 2 && pv.count == 0 && pseudo_legal_generations == 1);
+    CHECK(capture_collections == 1 && full_collections == 0);
+
+    /* Stand pat can resolve a quiescence leaf without assembling the capture list. */
+    XqJqMoveCacheSummary candidates = xq_jq_move_cache_refresh(&stats.move_cache, &position);
+    node_init(&fixture.node, &position, NULL, -1);
+    capture_collections = 0;
+    QuiescenceResult quiet = parallel_quiescence_start(&fixture.search, &fixture.node, &position,
+                                                       candidates.count, -INFINITY_SCORE, score,
+                                                       &stats);
+    CHECK(!quiet.stopped && quiet.score == score);
+    CHECK(capture_collections == 0 && full_collections == 0);
+
+    /* An exact table hit resolves the ordinary node before collecting its moves. */
+    XqMove quiet_move = board_move(&position, 3, 0, 3, 1);
+    parallel_tt_store(fixture.search.options.transposition_table, xq_jq_position_hash(&position),
+                      1, score, XQ_JQ_SEARCH_SCORE_EXACT, quiet_move, false, &stats.cache);
+    value = search_node(&fixture.search, &position, &fixture.parent,
+                        0, 1, false, NULL, NULL, 0, &pv, &stats);
+    CHECK(!value.cancelled && value.lower == score && value.upper == score);
+    CHECK(stats.cache.cutoffs == 1 && capture_collections == 0 && full_collections == 0);
     fixture_destroy(&fixture);
 }
 
@@ -476,7 +511,7 @@ int main(void)
     cancellation_after_collection();
     root_king_capture_terminals();
     internal_king_capture_terminals();
-    quiescence_reuses_leaf_moves();
+    move_collection_after_cutoffs();
     puts("Jieqi parallel similarity checks passed");
     return 0;
 }

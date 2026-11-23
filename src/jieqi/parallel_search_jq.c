@@ -2155,8 +2155,8 @@ static PathRepetition parallel_quiescence_repetition(const QuiescencePathEntry *
  * Uses side-to-move negamax scores: each child receives [-beta, -alpha], and its score is negated
  * on return. The evaluator receives the side to move and must return opposite scores for opposite
  * perspectives. Its result is clamped before use. At ply zero, both kings exist and the ordinary
- * leaf's private move list and check status are reused. Deeper plies generate candidates and
- * scan for a capture of the opposing king, even when both kings are attacked. This returns a win
+ * leaf's refreshed move cache and check status are reused. Deeper plies refresh the cache and
+ * check for a capture of the opposing king, even when both kings are attacked. This returns a win
  * before repetition, the extension cap, stand pat or evasion filtering, without playing the move
  * or sampling a reveal.
  * The nearest repetition on the private path uses ordinary search's checking-cycle classification.
@@ -2164,9 +2164,9 @@ static PathRepetition parallel_quiescence_repetition(const QuiescencePathEntry *
  * repetition or reaching the cap returns a static evaluation after the king-capture scan, even
  * in check. A NONE result continues searching when below the cap.
  *
- * Continuing nodes outside check use static evaluation as stand pat and search captures. In check,
- * they search legal evasions without stand pat. The move loop skips non-captures outside check and
- * rejects evasions that leave the mover in check. An empty pseudo-legal list or an in-check node
+ * Continuing nodes outside check use static evaluation as stand pat and collect only captures
+ * after the stand-pat cutoff check. In check, they collect all candidates and reject evasions
+ * that leave the mover in check. An empty pseudo-legal list or an in-check node
  * without a legal evasion scores a loss. Dark moves search each reveal sample with a full window
  * and average the resulting scores.
  *
@@ -2198,6 +2198,7 @@ static PathRepetition parallel_quiescence_repetition(const QuiescencePathEntry *
  *                 below ply are initialized. Each call overwrites its current entry.
  * @param ply      Number of quiescence plies already played, starting at zero. Incremented on each
  *                 recursive move; the extension cap applies independently of normal-search depth.
+ * @param move_count Full candidate count from the entry cache. Deeper plies refresh this count.
  * @param alpha    Lower edge of the local side-to-move window. The initial window is converted from
  *                 the ordinary leaf's snapshot.
  * @param beta     Upper edge of that window; recursion uses -beta as alpha and -alpha as beta.
@@ -2213,6 +2214,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
                                             XqJqPosition        *position,
                                             QuiescencePathEntry *path,
                                             unsigned             ply,
+                                            int                  move_count,
                                             int                  alpha,
                                             int                  beta,
                                             SearchThreadStats   *stats)
@@ -2222,15 +2224,13 @@ static QuiescenceResult parallel_quiescence(Search              *search,
         return (QuiescenceResult){0, true, false};
 
     XqColor mover = position->side_to_move;
-    XqJqMoveList generated_moves;
-    XqJqMoveList *moves = &leaf->moves;
     bool in_check = leaf->in_check;
     if (ply > 0)
     {
-        moves = &generated_moves;
-        xq_jq_move_cache_generate(&stats->move_cache, position, moves);
-        if (parallel_find_king_capture(moves, mover) != NULL)
+        XqJqMoveCacheSummary candidates = xq_jq_move_cache_refresh(&stats->move_cache, position);
+        if (candidates.king_capture)
             return (QuiescenceResult){WIN, false, false};
+        move_count = candidates.count;
         in_check = xq_jq_position_in_check(position, mover);
     }
 
@@ -2258,7 +2258,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
         return (QuiescenceResult){score, false, false};
     }
 
-    if (moves->count == 0)
+    if (move_count == 0)
         return (QuiescenceResult){-WIN, false, false};
 
     int best = -WIN; /* Without a legal evasion, an in-check node is a loss. */
@@ -2276,13 +2276,14 @@ static QuiescenceResult parallel_quiescence(Search              *search,
         if (best > alpha)
             alpha = best;
     }
-    parallel_order_moves(position, moves);
+    XqJqMoveList moves;
+    xq_jq_move_cache_collect(&stats->move_cache, position, &moves, !in_check);
+    /* Captures sort ahead of quiet moves, so filtering preserves their sampling ordinals. */
+    parallel_order_moves(position, &moves);
 
-    for (int i = 0; i < moves->count; ++i)
+    for (int i = 0; i < moves.count; ++i)
     {
-        XqMove move = moves->moves[i];
-        if (!in_check && move.captured == XQ_EMPTY_PIECE)
-            continue;
+        XqMove move = moves.moves[i];
         bool dark = xq_jq_position_is_dark(position, move.from);
         unsigned count = dark ? reveal_sample_count(search, 0, (unsigned)i + 1) : 1;
         int64_t sum = 0;
@@ -2316,7 +2317,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
             /* A sample must be exact before averaging: the caller's window cannot
              * prune one outcome independently of the other sampled outcomes. */
             QuiescenceResult child = parallel_quiescence(
-                search, leaf, position, path, ply + 1,
+                search, leaf, position, path, ply + 1, 0,
                 dark ? -INFINITY_SCORE : -beta,
                 dark ? INFINITY_SCORE : -alpha, stats);
             if (!xq_jq_position_unmake_move(position, &undo))
@@ -2358,6 +2359,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
  * @param leaf     Ordinary node owning this subtree and its stop checks. It and its ancestors must
  *                 remain alive until the search returns.
  * @param position Thread-private mutable entry position; restored before return.
+ * @param move_count Full candidate count from the ordinary leaf's refreshed cache.
  * @param alpha    Lower edge of the entry window, converted to the side-to-move perspective.
  * @param beta     Upper edge of the same window.
  * @param stats    Executing thread's private node counters and reveal randomness.
@@ -2367,12 +2369,13 @@ static QuiescenceResult parallel_quiescence(Search              *search,
 static QuiescenceResult parallel_quiescence_start(Search            *search,
                                                   Node              *leaf,
                                                   XqJqPosition        *position,
+                                                  int                move_count,
                                                   int                alpha,
                                                   int                beta,
                                                   SearchThreadStats *stats)
 {
     QuiescencePathEntry path[PARALLEL_MAX_QUIESCENCE_DEPTH + 1];
-    return parallel_quiescence(search, leaf, position, path, 0, alpha, beta, stats);
+    return parallel_quiescence(search, leaf, position, path, 0, move_count, alpha, beta, stats);
 }
 
 /**
@@ -2823,7 +2826,8 @@ static SearchRange split_node(Search           *search,
  * checked, ordinary search continues. If neither side always checked, even in check, enter
  * thread-local quiescence, as do depth-zero nodes without check. The inherited window snapshot is
  * converted to the side-to-move perspective. Quiescence starts a private repetition path at this
- * leaf and reuses its moves and check status. It searches captures or all legal check evasions.
+ * leaf and reuses its refreshed move cache and check status. It searches captures or all legal
+ * check evasions.
  * Static evaluations are clamped to `[-STATIC_LIMIT,
  * STATIC_LIMIT]`. Its fail-soft result is converted back to the root perspective and classified
  * against that snapshot before publishing an exact or bounded interval; later ancestor updates only
@@ -2958,12 +2962,17 @@ static Interval search_node(Search            *search,
 
     int  score = 0;
     bool leaf  = false;
+    int move_count;
     if (parent == NULL)
+    {
         node.moves = search->root_moves;
+        move_count = node.moves.count;
+    }
     else
     {
-        xq_jq_move_cache_generate(&stats->move_cache, position, &node.moves);
-        if (parallel_find_king_capture(&node.moves, position->side_to_move) != NULL)
+        XqJqMoveCacheSummary candidates = xq_jq_move_cache_refresh(&stats->move_cache, position);
+        move_count = candidates.count;
+        if (candidates.king_capture)
         {
             score = node.maximizing ? WIN : -WIN;
             leaf  = true;
@@ -2991,7 +3000,7 @@ static Interval search_node(Search            *search,
             int beta  = atomic_load_explicit(&node.beta, memory_order_relaxed);
             /* Ordinary nodes use root-side intervals; quiescence uses the side-to-move window. */
             QuiescenceResult quiet = parallel_quiescence_start(
-                search, &node, &node.position, node.maximizing ? alpha : -beta,
+                search, &node, &node.position, move_count, node.maximizing ? alpha : -beta,
                 node.maximizing ? beta : -alpha, stats);
             if (quiet.stopped || quiescence_should_stop(search, &node))
                 return node_value(&node);
@@ -3009,7 +3018,7 @@ static Interval search_node(Search            *search,
             (void)check_node(search, &node);
             return node_value(&node);
         }
-        else if (node.moves.count == 0)
+        else if (move_count == 0)
         {
             score = node.maximizing ? -WIN : WIN;
             leaf  = true;
@@ -3068,6 +3077,7 @@ static Interval search_node(Search            *search,
     SimilarMoveHints hints = {0};
     if (parent != NULL)
     {
+        xq_jq_move_cache_collect(&stats->move_cache, position, &node.moves, false);
         parallel_order_moves(position, &node.moves);
         (void)parallel_collect_similar_hints(search, &node, &hints);
         if (check_node(search, &node))

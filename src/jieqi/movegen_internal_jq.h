@@ -11,6 +11,9 @@ typedef struct XqJqCachedPieceMoves
     XqBitboard dependencies;
     uint8_t count;
     int8_t piece;
+    /* One-based indices. Zero means the row has no candidate of this kind. */
+    uint8_t first_capture_plus_one;
+    uint8_t king_capture_plus_one;
     XqMove moves[XQ_JQ_MAX_PIECE_MOVES];
 } XqJqCachedPieceMoves;
 
@@ -20,6 +23,12 @@ typedef struct XqJqMoveCache
     XqJqCachedPieceMoves rows[XQ_SQUARES];
     XqBitboard changed[XQ_COLOR_NB];
 } XqJqMoveCache;
+
+typedef struct XqJqMoveCacheSummary
+{
+    int count;
+    bool king_capture;
+} XqJqMoveCacheSummary;
 
 /* Mark all rows for refresh before reusing the cache on an unrelated traversal. */
 static inline void xq_jq_move_cache_reset(XqJqMoveCache *cache)
@@ -42,7 +51,11 @@ static inline void xq_jq_move_cache_invalidate(XqJqMoveCache *cache, XqSquare fr
     }
 }
 
-/* Refresh affected rows for the side to move, then emit them in generator order. */
-void xq_jq_move_cache_generate(XqJqMoveCache *cache, const XqJqPosition *pos, XqJqMoveList *list);
+/* Refresh affected rows for the side to move and summarize the full candidate list. */
+XqJqMoveCacheSummary xq_jq_move_cache_refresh(XqJqMoveCache *cache, const XqJqPosition *pos);
+
+/* Collect all candidates or just captures from a cache refreshed for this position. */
+void xq_jq_move_cache_collect(const XqJqMoveCache *cache, const XqJqPosition *pos,
+                               XqJqMoveList *list, bool captures_only);
 
 #endif

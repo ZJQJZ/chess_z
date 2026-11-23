@@ -160,9 +160,10 @@ const char *xq_jq_parallel_status_text(XqJqParallelStatus status);
  * path repetition, quiescence and table lookup. Scoring a king capture skips the move and reveal
  * sampling, so both kings remain on the board throughout recursion.
  *
- * Quiescence starts with the ordinary leaf's candidate list and check state. Deeper quiescence
- * nodes generate pseudo-legal candidates and score a king capture as +30000 before repetition,
- * the extension cap, stand pat or evasion filtering.
+ * Quiescence starts with the ordinary leaf's refreshed move cache and check state. Deeper nodes
+ * refresh their own candidates and score a king capture as +30000 before repetition, the extension
+ * cap, stand pat or evasion filtering. Continuing nodes collect only captures outside check and
+ * all candidates in check.
  *
  * Ordinary search and quiescence classify cycles at the first repetition of a public position.
  * The cycle uses the closest ancestor with the same side to move, board, dark markers and public

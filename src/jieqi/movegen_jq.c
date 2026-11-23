@@ -1,6 +1,5 @@
 #include "movegen_internal_jq.h"
 
-#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -16,6 +15,8 @@ typedef struct MoveWriter
 {
     XqMove *next;
     XqMove *end;
+    XqMove *first_capture;
+    XqMove *king_capture;
 } MoveWriter;
 
 /**
@@ -60,8 +61,16 @@ static void add_move(const XqJqPosition *pos, MoveWriter *writer, XqSquare from,
 
     piece = pos->board[from];
     captured = pos->board[to];
-    if (captured != XQ_EMPTY_PIECE && xq_piece_color(captured) == xq_piece_color(piece))
-        return;
+    if (captured != XQ_EMPTY_PIECE)
+    {
+        if (xq_piece_color(captured) == xq_piece_color(piece))
+            return;
+        if (writer->first_capture == NULL)
+            writer->first_capture = writer->next;
+        if ((captured == xq_make_piece(XQ_RED, XQ_KING) ||
+             captured == xq_make_piece(XQ_BLACK, XQ_KING)) && writer->king_capture == NULL)
+            writer->king_capture = writer->next;
+    }
 
     *writer->next++ = (XqMove){(uint8_t)from, (uint8_t)to, (int8_t)piece, (int8_t)captured};
 }
@@ -315,7 +324,7 @@ void xq_jq_movelist_clear(XqJqMoveList *list)
 void xq_jq_generate_pseudo_legal(const XqJqPosition *pos, XqJqMoveList *list)
 {
     XqBitboard remaining = pos->occupied[pos->side_to_move];
-    MoveWriter writer = {list->moves, list->moves + XQ_JQ_MAX_MOVES};
+    MoveWriter writer = {.next = list->moves, .end = list->moves + XQ_JQ_MAX_MOVES};
     while (!xq_bb_is_empty(remaining))
     {
         XqSquare sq = xq_bb_pop_first_square(&remaining);
@@ -429,15 +438,12 @@ static inline void copy_piece_moves(XqMove *dst, const XqMove *src, int count)
         dst[0] = src[0];
 }
 
-void xq_jq_move_cache_generate(XqJqMoveCache *cache, const XqJqPosition *pos, XqJqMoveList *list)
+XqJqMoveCacheSummary xq_jq_move_cache_refresh(XqJqMoveCache *cache, const XqJqPosition *pos)
 {
-    /* There is space for a full row for every square, even on custom boards. */
-    _Static_assert(XQ_JQ_MAX_MOVES >= XQ_SQUARES * XQ_JQ_MAX_PIECE_MOVES,
-                   "the move list must hold all cached rows");
     XqColor color = pos->side_to_move;
     XqBitboard remaining = pos->occupied[color];
     XqBitboard changed = cache->changed[color];
-    MoveWriter writer = {list->moves, list->moves + XQ_JQ_MAX_MOVES};
+    XqJqMoveCacheSummary summary = {0};
     while (!xq_bb_is_empty(remaining))
     {
         XqSquare sq = xq_bb_pop_first_square(&remaining);
@@ -452,20 +458,48 @@ void xq_jq_move_cache_generate(XqJqMoveCache *cache, const XqJqPosition *pos, Xq
                 row->dependencies = piece_dependencies(sq, piece);
                 row->piece = (int8_t)piece;
             }
-            XqMove *start = writer.next;
+            MoveWriter writer = {.next = row->moves, .end = row->moves + XQ_JQ_MAX_PIECE_MOVES};
             gen_piece(pos, &writer, sq, piece);
-            assert(writer.next - start <= XQ_JQ_MAX_PIECE_MOVES);
-            row->count = (uint8_t)(writer.next - start);
-            copy_piece_moves(row->moves, start, row->count);
+            row->count = (uint8_t)(writer.next - row->moves);
+            row->first_capture_plus_one = writer.first_capture == NULL
+                ? 0 : (uint8_t)(writer.first_capture - row->moves + 1);
+            row->king_capture_plus_one = writer.king_capture == NULL
+                ? 0 : (uint8_t)(writer.king_capture - row->moves + 1);
         }
-        else
+        summary.king_capture |= row->king_capture_plus_one != 0;
+        summary.count += row->count;
+    }
+    cache->changed[color] = xq_bb_empty();
+    return summary;
+}
+
+void xq_jq_move_cache_collect(const XqJqMoveCache *cache, const XqJqPosition *pos,
+                               XqJqMoveList *list, bool captures_only)
+{
+    /* The list has room for a full row for every square, even on custom boards. */
+    _Static_assert(XQ_JQ_MAX_MOVES >= XQ_SQUARES * XQ_JQ_MAX_PIECE_MOVES,
+                   "the move list must hold all cached rows");
+    XqBitboard remaining = pos->occupied[pos->side_to_move];
+    list->count = 0;
+    while (!xq_bb_is_empty(remaining))
+    {
+        XqSquare sq = xq_bb_pop_first_square(&remaining);
+        const XqJqCachedPieceMoves *row = &cache->rows[sq];
+        if (!captures_only)
         {
-            copy_piece_moves(writer.next, row->moves, row->count);
-            writer.next += row->count;
+            copy_piece_moves(list->moves + list->count, row->moves, row->count);
+            list->count += row->count;
+        }
+        else if (row->first_capture_plus_one != 0)
+        {
+            for (int i = row->first_capture_plus_one - 1; i < row->count; ++i)
+            {
+                XqMove move = row->moves[i];
+                if (move.captured != XQ_EMPTY_PIECE)
+                    list->moves[list->count++] = move;
+            }
         }
     }
-    list->count = (int)(writer.next - list->moves);
-    cache->changed[color] = xq_bb_empty();
 }
 
 /**
