@@ -2135,12 +2135,15 @@ static PathRepetition parallel_quiescence_repetition(const QuiescencePathEntry *
  *
  * Uses side-to-move negamax scores: each child receives [-beta, -alpha], and its score is negated
  * on return. The evaluator receives the side to move and must return opposite scores for opposite
- * perspectives. Its result is clamped before use. The ordinary caller handles missing kings
- * before entry. An attacked opposing king scores a win before the repetition or depth checks.
+ * perspectives. Its result is clamped before use. The ordinary caller checks that both kings exist
+ * before entry. The pseudo-legal candidate list is scanned first for a capture of the opposing
+ * king, even when both kings are attacked. This returns a win before repetition, the extension
+ * cap, stand pat or evasion filtering. The search returns without playing that move or sampling a
+ * reveal, keeping both kings present during recursion.
  * The nearest repetition on the private path uses ordinary search's checking-cycle classification.
  * DRAW returns zero and LOSS returns -WIN, before the extension cap is applied. A QUIESCENCE
- * repetition or reaching the cap returns a static evaluation before generating moves, even in
- * check. A NONE result continues searching when below the cap.
+ * repetition or reaching the cap returns a static evaluation after the king-capture scan, even
+ * in check. A NONE result continues searching when below the cap.
  *
  * Continuing nodes outside check use static evaluation as stand pat and search captures. In check,
  * they search legal evasions without stand pat. The move loop skips non-captures outside check and
@@ -2200,8 +2203,12 @@ static QuiescenceResult parallel_quiescence(Search              *search,
         return (QuiescenceResult){0, true, false};
 
     XqColor mover = position->side_to_move;
-    if (xq_jq_position_in_check(position, xq_color_opponent(mover)))
-        return (QuiescenceResult){WIN, false, false};
+    XqJqMoveList moves;
+    xq_jq_generate_pseudo_legal(position, &moves);
+    const int opponent_king = xq_make_piece(xq_color_opponent(mover), XQ_KING);
+    for (int i = 0; i < moves.count; ++i)
+        if (moves.moves[i].captured == opponent_king)
+            return (QuiescenceResult){WIN, false, false};
 
     assert(ply <= PARALLEL_MAX_QUIESCENCE_DEPTH);
     QuiescencePathEntry *current = &path[ply];
@@ -2228,8 +2235,6 @@ static QuiescenceResult parallel_quiescence(Search              *search,
         return (QuiescenceResult){score, false, false};
     }
 
-    XqJqMoveList moves;
-    xq_jq_generate_pseudo_legal(position, &moves);
     if (moves.count == 0)
         return (QuiescenceResult){-WIN, false, false};
 

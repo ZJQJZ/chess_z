@@ -147,6 +147,12 @@ const char *xq_jq_parallel_status_text(XqJqParallelStatus status);
  * to 2 and is the total depth cost. Quiescence dark moves use sample_count with
  * remaining_depth == 0.
  *
+ * Ordinary search checks for both kings before entering quiescence. Quiescence scans its
+ * pseudo-legal candidates and returns +30000 for a capture of the opposing king, even when both
+ * kings are attacked. This happens before repetition, the extension cap, stand pat or evasion
+ * filtering. The winning candidate is scored without playing it or sampling a reveal, so both kings
+ * remain present throughout quiescence recursion.
+ *
  * Ordinary search and quiescence classify cycles at the first repetition of a public position.
  * The cycle uses the closest ancestor with the same side to move, board, dark markers and public
  * identity counts. It starts after that ancestor and includes the closing move. If both sides
@@ -154,9 +160,10 @@ const char *xq_jq_parallel_status_text(XqJqParallelStatus status);
  * loses. If only its opponent always gave check, search continues. If neither side always gave
  * check, ordinary search enters quiescence and a quiescence branch returns a static evaluation.
  * Each quiescence invocation starts a private path at its entry position. At 500 plies or a
- * repetition requiring static evaluation, quiescence evaluates the current position and clamps
- * the score to +/-28999, even while in check. Repetition draws and losses take precedence over
- * the cap. The root still filters real-game cycles using the supplied history.
+ * repetition requiring static evaluation, quiescence evaluates the current position after the
+ * king-capture scan and clamps the score to +/-28999, even while in check. Repetition draws and
+ * losses take precedence over the cap. The root still filters real-game cycles using the supplied
+ * history.
  *
  * Cache keys include public dark markers and identity counts. Scores and bounds, including
  * estimates, may be reused when the cached remaining depth is at least the requested depth.
