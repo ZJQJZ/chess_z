@@ -2484,6 +2484,7 @@ static Interval search_node(Search *,
                             int,
                             unsigned,
                             bool,
+                            int,
                             XqMove *,
                             const XqMove *,
                             int,
@@ -2493,10 +2494,10 @@ static Interval search_node(Search *,
 /**
  * @brief Searches a disjoint batch of child moves without an explicit scheduling mutex.
  *
- * Copies the position and recurses for each move. Bright check evasions retain their depth budget,
- * and other bright moves consume one ply. Dark moves consume their configured total depth cost,
- * and all full-window samples complete before a single averaged result is submitted. Each sample
- * starts with a fresh copy of the public parent position.
+ * Recursively searches each move from the parent position. Bright check evasions retain their
+ * depth budget, and other bright moves consume one ply. Dark moves consume their configured total
+ * depth cost, and all full-window samples complete before a single averaged result is submitted.
+ * Each sample starts with a fresh copy of the public parent position in its own node.
  * Valid child intervals are submitted once through lock-free `aggregate()`; cancelled results are
  * excluded. A completed node can still accept valid in-flight submissions. A nonempty batch
  * checks the node once before starting. It also checks before each sample and at the end of each
@@ -2559,18 +2560,9 @@ static void search_range(Search            *search,
                 child.cancelled = true;
                 break;
             }
-            /* Every sample begins at the same public parent, not at the result of
-             * the previous draw. No real-game hidden identities enter this path. */
-            XqJqPosition child_position = node->position;
-            if (!xq_jq_position_make_move(&child_position, move, revealed_type))
-            {
-                search_move_failed(search);
-                child.cancelled = true;
-                break;
-            }
             xq_jq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
             Interval sample_value = search_node(
-                search, &child_position, node, i, child_depth, dark, NULL,
+                search, NULL, node, i, child_depth, dark, revealed_type, NULL,
                 child_hint, child_hint_count, &child_pv, stats);
             xq_jq_move_cache_invalidate(&stats->move_cache, (XqSquare)move.from, (XqSquare)move.to);
             if (sample_value.cancelled)
@@ -2780,14 +2772,16 @@ static SearchRange split_node(Search           *search,
 /**
  * @brief Searches a subtree and returns its proven score interval or a cancellation marker.
  *
- * Creates a local `Node` with a copy of `position`, an initially unknown interval `[-WIN, WIN]`,
- * and a link to `parent`. A node is MAX when its side to move equals `search->root_color` and MIN
- * otherwise; its intervals retain the root side's perspective. Quiescence converts to and from the
- * side-to-move perspective at its entry boundary. Checks the deadline at the first ordinary entry
- * on each physical thread and then every `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Uses
- * lock-free `check_node()` at every entry and subsequent checkpoint to refresh inherited bounds and
- * publish completion or cancellation without reading the clock. Scheduling uses atomic worker
- * states and retained semaphore notifications.
+ * Creates a local `Node` with one position copy, an initially unknown interval `[-WIN, WIN]`, and a
+ * link to `parent`. A recursive child copies the public parent position and applies the move and
+ * its sampled reveal in its own node. A node is MAX when its side to move equals
+ * `search->root_color` and MIN otherwise; its intervals retain the root side's perspective.
+ * Quiescence converts to and from the side-to-move perspective at its entry boundary. Checks the
+ * deadline at the first ordinary entry on each physical thread and then every
+ * `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Uses lock-free `check_node()` at every entry
+ * and subsequent checkpoint to refresh inherited bounds and publish completion or cancellation
+ * without reading the clock. Scheduling uses atomic worker states and retained semaphore
+ * notifications.
  *
  * The root uses the legal, history-filtered list prepared before the helper pool was created.
  * Descendants generate pseudo-legal moves. A capture of the opposing king proves a win for the
@@ -2867,8 +2861,8 @@ static SearchRange split_node(Search           *search,
  * concurrent invocation.
  *
  * @param search            Initialized shared search state; must not be null.
- * @param position          Position to search; must not be null and must remain unchanged during
- *                          the call.
+ * @param initial_position Read-only position to search, or `NULL` to derive it from the parent and
+ *                          its move at `parent_move_index`.
  * @param parent            Parent node, or `NULL` for the root.
  * @param parent_move_index Index of the move in the parent's final list, or `-1` for the root.
  * @param depth             Remaining normal-search budget; bright check evasions retain it,
@@ -2876,6 +2870,8 @@ static SearchRange split_node(Search           *search,
  *                          quiescence at a non-terminal leaf only when not in check.
  * @param window_barrier    True at a reveal sample's root: retain ancestors for cancellation
  *                          and repetition, but start a fresh full score window.
+ * @param revealed_type     Sampled piece type for a dark move, or `XQ_JQ_NO_REVEAL`. Used only
+ *                          when deriving the position from the parent.
  * @param best_move         Optional root candidate output, valid when `iteration.move_available` is
  *                          `true`, even if the root was cancelled. Pass `NULL` for recursive child
  *                          searches.
@@ -2890,11 +2886,12 @@ static SearchRange split_node(Search           *search,
  *                          a cancellation marker whose score bounds must not be used.
  */
 static Interval search_node(Search            *search,
-                            const XqJqPosition  *position,
+                            const XqJqPosition *initial_position,
                             Node              *parent,
                             int                parent_move_index,
                             unsigned           depth,
                             bool               window_barrier,
+                            int                revealed_type,
                             XqMove            *best_move,
                             const XqMove      *pv_hint,
                             int                pv_hint_count,
@@ -2905,10 +2902,22 @@ static Interval search_node(Search            *search,
      * Initialize control fields explicitly; arrays are filled before their valid entries are read.
      */
     Node node;
-    pv_out->count                = 0;
+    pv_out->count = 0;
+    if (initial_position != NULL)
+        node.position = *initial_position;
+    else
+    {
+        node.position = parent->position;
+        if (!xq_jq_position_make_move(&node.position, parent->moves.moves[parent_move_index],
+                                      revealed_type))
+        {
+            search_move_failed(search);
+            return (Interval){-WIN, WIN, true, false};
+        }
+    }
+    const XqJqPosition *position = &node.position;
     node.parent                  = parent;
     node.parent_move_index       = parent_move_index;
-    node.position                = *position;
     node.depth                   = depth;
     node.window_barrier          = window_barrier;
     node.maximizing              = position->side_to_move == search->root_color;
@@ -3618,8 +3627,8 @@ XqJqParallelStatus xq_jq_engine_parallel_search_with_observer(const XqJqEngineAd
                                           search.evaluate_user, search.root_color, &effective);
             ParallelPv current_pv = {0};
             XqMove     best       = {0};
-            (void)search_node(&search, pos, NULL, -1, current_depth, false, &best, previous_pv.moves,
-                              previous_pv.count, &current_pv, &search.stats);
+            (void)search_node(&search, pos, NULL, -1, current_depth, false, XQ_JQ_NO_REVEAL,
+                              &best, previous_pv.moves, previous_pv.count, &current_pv, &search.stats);
             (void)search_check_time(&search);
             if (atomic_load_explicit(&search.root_started, memory_order_relaxed))
             {

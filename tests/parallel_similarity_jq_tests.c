@@ -315,7 +315,7 @@ static void cancellation_after_collection(void)
         SearchThreadStats stats = {0};
         ParallelPv pv = {0};
         Interval stopped = search_node(&fixture.search, &fixture.node.position, &fixture.parent,
-                                       0, 1, false, NULL, NULL, 0, &pv, &stats);
+                                       0, 1, false, XQ_JQ_NO_REVEAL, NULL, NULL, 0, &pv, &stats);
         CHECK(stopped.cancelled && stats.nodes == 1 && pv.count == 0);
         fixture_destroy(&fixture);
     }
@@ -430,7 +430,7 @@ static void internal_king_capture_terminals(void)
     SearchThreadStats stats = {0};
     ParallelPv pv = {0};
     Interval value = search_node(&fixture.search, &position, &fixture.parent,
-                                 0, 0, false, NULL, NULL, 0, &pv, &stats);
+                                 0, 0, false, XQ_JQ_NO_REVEAL, NULL, NULL, 0, &pv, &stats);
     CHECK(!value.cancelled && !value.estimated && value.lower == WIN && value.upper == WIN);
     CHECK(stats.nodes == 1 && stats.cache.probes == 0 && pv.count == 0);
     CHECK(!atomic_load(&fixture.parent.repetition_seen));
@@ -446,7 +446,7 @@ static void internal_king_capture_terminals(void)
     fixture.search.root_color = XQ_BLACK;
     stats = (SearchThreadStats){0};
     value = search_node(&fixture.search, &position, &fixture.parent,
-                        0, 1, false, NULL, NULL, 0, &pv, &stats);
+                        0, 1, false, XQ_JQ_NO_REVEAL, NULL, NULL, 0, &pv, &stats);
     CHECK(!value.cancelled && !value.estimated && value.lower == -WIN && value.upper == -WIN);
     CHECK(stats.nodes == 1 && stats.cache.probes == 0 && pv.count == 0);
 
@@ -458,7 +458,7 @@ static void internal_king_capture_terminals(void)
     CHECK(moves.count == 0);
     stats = (SearchThreadStats){0};
     value = search_node(&fixture.search, &position, &fixture.parent,
-                        0, 1, false, NULL, NULL, 0, &pv, &stats);
+                        0, 1, false, XQ_JQ_NO_REVEAL, NULL, NULL, 0, &pv, &stats);
     CHECK(!value.cancelled && !value.estimated && value.lower == WIN && value.upper == WIN);
     CHECK(stats.nodes == 1 && pv.count == 0);
     fixture_destroy(&fixture);
@@ -478,7 +478,7 @@ static void move_collection_after_cutoffs(void)
     full_collections = 0;
     capture_collections = 0;
     Interval value = search_node(&fixture.search, &position, &fixture.parent,
-                                 0, 0, false, NULL, NULL, 0, &pv, &stats);
+                                 0, 0, false, XQ_JQ_NO_REVEAL, NULL, NULL, 0, &pv, &stats);
     CHECK(!value.cancelled && !value.estimated && value.lower == score && value.upper == score);
     CHECK(stats.nodes == 2 && pv.count == 0 && pseudo_legal_generations == 1);
     CHECK(capture_collections == 1 && full_collections == 0);
@@ -498,7 +498,7 @@ static void move_collection_after_cutoffs(void)
     parallel_tt_store(fixture.search.options.transposition_table, xq_jq_position_hash(&position),
                       1, score, XQ_JQ_SEARCH_SCORE_EXACT, quiet_move, false, &stats.cache);
     value = search_node(&fixture.search, &position, &fixture.parent,
-                        0, 1, false, NULL, NULL, 0, &pv, &stats);
+                        0, 1, false, XQ_JQ_NO_REVEAL, NULL, NULL, 0, &pv, &stats);
     CHECK(!value.cancelled && value.lower == score && value.upper == score);
     CHECK(stats.cache.cutoffs == 1 && capture_collections == 0 && full_collections == 0);
     fixture_destroy(&fixture);
@@ -520,9 +520,27 @@ static void quiescence_reveal_failure(void)
     SearchThreadStats stats = {0};
     ParallelPv pv = {0};
     Interval value = search_node(&fixture.search, &position, &fixture.parent,
-                                 0, 0, false, NULL, NULL, 0, &pv, &stats);
+                                 0, 0, false, XQ_JQ_NO_REVEAL, NULL, NULL, 0, &pv, &stats);
     CHECK(value.cancelled && stats.nodes == 2 && pv.count == 0);
     CHECK(atomic_load(&fixture.search.error_status) == XQ_JQ_PARALLEL_INVALID_ARGUMENT);
+    fixture_destroy(&fixture);
+}
+
+static void child_move_failure(void)
+{
+    Fixture fixture;
+    fixture_init(&fixture);
+    atomic_init(&fixture.search.error_status, XQ_JQ_PARALLEL_OK);
+
+    /* The dark move requires a sampled type before it can be applied. */
+    CHECK(xq_jq_position_is_dark(&fixture.parent.position, fixture.parent.moves.moves[1].from));
+    ParallelPv pv = {.count = 1};
+    SearchThreadStats stats = {0};
+    Interval value = search_node(&fixture.search, NULL, &fixture.parent, 1, 0, true,
+                                 XQ_JQ_NO_REVEAL, NULL, NULL, 0, &pv, &stats);
+    CHECK(value.cancelled && stats.nodes == 0 && pv.count == 0);
+    CHECK(atomic_load(&fixture.search.error_status) == XQ_JQ_PARALLEL_INVALID_ARGUMENT);
+    CHECK(atomic_load(&fixture.search.time_state) == TIME_STOP);
     fixture_destroy(&fixture);
 }
 
@@ -537,6 +555,7 @@ int main(void)
     internal_king_capture_terminals();
     move_collection_after_cutoffs();
     quiescence_reveal_failure();
+    child_move_failure();
     puts("Jieqi parallel similarity checks passed");
     return 0;
 }
