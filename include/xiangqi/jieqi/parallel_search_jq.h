@@ -144,8 +144,19 @@ const char *xq_jq_parallel_status_text(XqJqParallelStatus status);
  * estimate from a proof. EXACT denotes a resolved value for the current sampled search tree;
  * it does not claim an exact underlying expectation when score_estimated is true.
  * Ordinary dark moves enter max(remaining_depth - C, 0), where the source enum constant C defaults
- * to 2 and is the total depth cost. It does not change quiescence's original extension rules.
- * Quiescence dark moves still use sample_count with remaining_depth == 0.
+ * to 2 and is the total depth cost. Quiescence dark moves use sample_count with
+ * remaining_depth == 0.
+ *
+ * Ordinary search and quiescence classify cycles at the first repetition of a public position.
+ * The cycle uses the closest ancestor with the same side to move, board, dark markers and public
+ * identity counts. It starts after that ancestor and includes the closing move. If both sides
+ * always gave check, the score is a draw. If only the side to move always gave check, that side
+ * loses. If only its opponent always gave check, search continues. If neither side always gave
+ * check, ordinary search enters quiescence and a quiescence branch returns a static evaluation.
+ * Each quiescence invocation starts a private path at its entry position. At 500 plies or a
+ * repetition requiring static evaluation, quiescence evaluates the current position and clamps
+ * the score to +/-28999, even while in check. Repetition draws and losses take precedence over
+ * the cap. The root still filters real-game cycles using the supplied history.
  *
  * Cache keys include public dark markers and identity counts. Scores and bounds, including
  * estimates, may be reused when the cached remaining depth is at least the requested depth.

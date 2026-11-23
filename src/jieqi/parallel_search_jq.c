@@ -197,7 +197,6 @@ enum
     INFINITY_SCORE                              = 30001,
     PARALLEL_DARK_MOVE_DEPTH_COST                = 2,
     PARALLEL_MAX_QUIESCENCE_DEPTH               = 500,
-    PARALLEL_QUIESCENCE_DRAW_CHECK_PLIES        = 6,
     PARALLEL_MIN_SPLIT_DEPTH                    = 5,
     PARALLEL_INTERLEAVED_SPLIT_THREADS          = 2,
     PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
@@ -1672,6 +1671,21 @@ typedef enum PathRepetition
 } PathRepetition;
 
 /**
+ * @brief Classifies a repeated cycle using the checks given by each side.
+ *
+ * The cycle starts after the nearest matching ancestor and includes the move into the current
+ * node. The own side is the current side to move, which also starts the cycle. Ordinary and
+ * quiescence search share the classification and handle its result in their own search context.
+ */
+static PathRepetition parallel_repetition_kind(bool own_all_checks,
+                                               bool opponent_all_checks)
+{
+    if (own_all_checks)
+        return opponent_all_checks ? PATH_REPETITION_DRAW : PATH_REPETITION_LOSS;
+    return opponent_all_checks ? PATH_REPETITION_NONE : PATH_REPETITION_QUIESCENCE;
+}
+
+/**
  * @brief Classifies the nearest repeated cycle and marks DRAW/LOSS cycle nodes to skip TT writes.
  *
  * Search moves alternate sides, so same-side ancestors occur only at even distances. Walks toward
@@ -1738,9 +1752,8 @@ static PathRepetition parallel_path_repetition(Node *node)
             {
                 for (Node *mark = node; mark != ancestor; mark = mark->parent)
                     atomic_store_explicit(&mark->repetition_seen, 1, memory_order_relaxed);
-                return opponent_all_checks ? PATH_REPETITION_DRAW : PATH_REPETITION_LOSS;
             }
-            return opponent_all_checks ? PATH_REPETITION_NONE : PATH_REPETITION_QUIESCENCE;
+            return parallel_repetition_kind(own_all_checks, opponent_all_checks);
         }
 
         cursor = ancestor;
@@ -2041,6 +2054,17 @@ typedef struct QuiescenceResult
     bool estimated;
 } QuiescenceResult;
 
+/* Private snapshots remain stable while the search position is made and unmade in place. */
+typedef struct QuiescencePathEntry
+{
+    uint64_t   piece_hash;
+    XqBitboard dark;
+    uint16_t   pool[XQ_COLOR_NB][XQ_PIECE_TYPE_NB];
+    uint16_t   pool_total[XQ_COLOR_NB];
+    int8_t     board[XQ_SQUARES];
+    bool       in_check;
+} QuiescencePathEntry;
+
 /**
  * @brief Checks the published stop state and ordinary leaf's ancestors during quiescence.
  *
@@ -2058,7 +2082,8 @@ typedef struct QuiescenceResult
  * This is a cooperative checkpoint, not an asynchronous interrupt or a wait for other threads. It
  * does not modify the position, publish a quiescence score, update counters or invoke progress
  * callbacks. A false result only means no stop was observed at this checkpoint. Quiescence checks
- * once at each recursive entry; the ordinary caller checks again before publishing its result.
+ * at each recursive entry and between reveal samples; the ordinary caller checks again before
+ * publishing its result.
  *
  * @param search Initialized, non-null shared search state whose published time state is observed.
  * @param leaf   Non-null ordinary node owning the entire quiescence subtree, passed unchanged
@@ -2076,44 +2101,33 @@ static bool quiescence_should_stop(Search *search,
 }
 
 /**
- * @brief Filters cycle losses while preserving legal moves that can complete a check draw.
+ * @brief Classifies the nearest repeated public position on the private quiescence path.
  *
- * Called only after five consecutive checking plies and below the extension cap. The ordinary cycle
- * filter supplies surviving candidates; rejected legal counterchecks are restored in their original
- * order so the child can distinguish checkmate from a six-ply mutual-check draw. Trials use
- * position copies and leave the search position and history unchanged. The temporary candidate copy
- * belongs to this helper frame rather than every recursive quiescence frame.
- *
- * @param history  Private quiescence history ending at `position`.
- * @param position Current position, borrowed read-only.
- * @param moves    Pseudo-legal candidates to filter in place, preserving survivor order.
+ * Each descent makes one move, so ancestors two plies apart have the same side to move. The scan
+ * accumulates checks over (ancestor, current] until the first matching position. Equal piece
+ * hashes still require an exact match of the board, dark markers and public identity pools.
+ * Entry zero can match, and its check flag belongs to the move outside the path. Only snapshots
+ * at indices 0 through ply are read. Ordinary nodes and their table-write flags are separate.
  */
-static void parallel_quiescence_filter_cycles(const XqJqHistory  *history,
-                                              const XqJqPosition *position,
-                                              XqJqMoveList       *moves)
+static PathRepetition parallel_quiescence_repetition(const QuiescencePathEntry *path,
+                                                     unsigned                   ply)
 {
-    XqJqMoveList filtered = *moves;
-    if (!xq_jq_history_filter_cycles(history, position, &filtered))
-        return;
-
-    XqColor mover = position->side_to_move;
-    int     count = 0, survivor = 0;
-    for (int i = 0; i < moves->count; ++i)
+    const QuiescencePathEntry *current             = &path[ply];
+    bool                       own_all_checks      = true;
+    bool                       opponent_all_checks = true;
+    for (unsigned cursor = ply; cursor >= 2; cursor -= 2)
     {
-        XqMove move = moves->moves[i];
-        if (survivor < filtered.count && filtered.moves[survivor].from == move.from &&
-            filtered.moves[survivor].to == move.to)
-            ++survivor;
-        else
-        {
-            XqJqPosition next = *position;
-            if (!xq_jq_position_make_move(&next, move, XQ_JQ_NO_REVEAL) || xq_jq_position_in_check(&next, mover) ||
-                !xq_jq_position_in_check(&next, next.side_to_move))
-                continue;
-        }
-        moves->moves[count++] = move;
+        const QuiescencePathEntry *ancestor = &path[cursor - 2];
+        own_all_checks &= path[cursor - 1].in_check;
+        opponent_all_checks &= path[cursor].in_check;
+        if (current->piece_hash == ancestor->piece_hash &&
+            memcmp(current->board, ancestor->board, sizeof(current->board)) == 0 &&
+            current->dark.lo == ancestor->dark.lo && current->dark.hi == ancestor->dark.hi &&
+            memcmp(current->pool, ancestor->pool, sizeof(current->pool)) == 0 &&
+            memcmp(current->pool_total, ancestor->pool_total, sizeof(current->pool_total)) == 0)
+            return parallel_repetition_kind(own_all_checks, opponent_all_checks);
     }
-    moves->count = count;
+    return PATH_REPETITION_NONE;
 }
 
 /**
@@ -2121,29 +2135,27 @@ static void parallel_quiescence_filter_cycles(const XqJqHistory  *history,
  *
  * Uses side-to-move negamax scores: each child receives [-beta, -alpha], and its score is negated
  * on return. The evaluator receives the side to move and must return opposite scores for opposite
- * perspectives. Its result is clamped before use. Outside check, static evaluation is a stand-pat
- * candidate and only captures are searched. In check, all legal evasions are searched without stand
- * pat. The ordinary caller handles missing kings before entry; here an attacked opponent king is
- * scored as a win before any king-capture move is played. All move lists are pseudo-legal: the move
- * loop skips non-captures outside check, and after making a candidate in check rejects it if the
- * original mover is still in check. Six consecutive checking moves in this private path produce a
- * draw unless the final check is mate. Entry zero is excluded from that count. Candidates closing a
- * third identical cycle are losses for the mover under the root-cycle rule, except when the move
- * reaches the mutual-check terminal check first. If no evasion survives, the position is a loss.
- * King, mate, mutual-check and missing evasion checks take precedence over the extension limit.
- * Outside check, no separate test for a legal continuation is performed before stand pat. At the
- * extension limit, an in-check position must have an evasion that is not a cycle loss before static
- * evaluation of the original position is used; no extra ply is searched to reach a check draw.
+ * perspectives. Its result is clamped before use. The ordinary caller handles missing kings
+ * before entry. An attacked opposing king scores a win before the repetition or depth checks.
+ * The nearest repetition on the private path uses ordinary search's checking-cycle classification.
+ * DRAW returns zero and LOSS returns -WIN, before the extension cap is applied. A QUIESCENCE
+ * repetition or reaching the cap returns a static evaluation before generating moves, even in
+ * check. A NONE result continues searching when below the cap.
+ *
+ * Continuing nodes outside check use static evaluation as stand pat and search captures. In check,
+ * they search legal evasions without stand pat. The move loop skips non-captures outside check and
+ * rejects evasions that leave the mover in check. An empty pseudo-legal list or an in-check node
+ * without a legal evasion scores a loss. Dark moves search each reveal sample with a full window
+ * and average the resulting scores.
  *
  * `position` is a private mutable copy owned by the ordinary leaf. Every made move is unmade before
  * inspecting cancellation or returning. Recursion uses only local windows and move lists, not the
  * larger shared `Node` structure. The ordinary leaf is used solely to check the published stop
  * state and its ancestors. No table, PV or progress updates occur here; each entry contributes to
  * the executing thread's node count. Published stop state and ancestor cancellation are checked
- * once at entry without reading the clock. A child's stopped result propagates after restoring the
- * move and history; the ordinary caller performs the final stop check. The private history starts
- * at this quiescence subtree's entry, excluding real-game and ordinary-search history, and is
- * restored between sibling branches.
+ * without reading the clock. A child's stopped result propagates after restoring the move. The
+ * ordinary caller performs the final stop check. Snapshots start at this quiescence subtree's
+ * entry. Each call writes its ply, and deeper slots are reused by sibling moves and reveal samples.
  *
  * A stopped result has no usable score. Otherwise the score is fail-soft and must be classified
  * against the caller's original window before being published as a proven interval. A score <= the
@@ -2160,9 +2172,8 @@ static void parallel_quiescence_filter_cycles(const XqJqHistory  *history,
  *                 Stop checks may tighten its window or publish its terminal state.
  * @param position Thread-private mutable position; restored before every return. The evaluator
  *                 borrows it read-only. No other thread may access it during this call.
- * @param history  Thread-private history view ending at position, with count == ply + 1. Its fixed
- *                 storage holds the entry position plus the maximum number of extension plies. Only
- *                 this recursive path is recorded; count is restored before every return.
+ * @param path     Thread-private snapshot storage for plies 0 through the extension cap. Ancestors
+ *                 below ply are initialized. Each call overwrites its current entry.
  * @param ply      Number of quiescence plies already played, starting at zero. Incremented on each
  *                 recursive move; the extension cap applies independently of normal-search depth.
  * @param alpha    Lower edge of the local side-to-move window. The initial window is converted from
@@ -2175,14 +2186,14 @@ static void parallel_quiescence_filter_cycles(const XqJqHistory  *history,
  *                 let the ordinary caller read node_value(leaf) to distinguish ancestor/ time
  *                 cancellation from a valid interval cutoff already published on the leaf.
  */
-static QuiescenceResult parallel_quiescence(Search            *search,
-                                            Node              *leaf,
-                                            XqJqPosition      *position,
-                                            XqJqHistory       *history,
-                                            unsigned           ply,
-                                            int                alpha,
-                                            int                beta,
-                                            SearchThreadStats *stats)
+static QuiescenceResult parallel_quiescence(Search              *search,
+                                            Node                *leaf,
+                                            XqJqPosition        *position,
+                                            QuiescencePathEntry *path,
+                                            unsigned             ply,
+                                            int                  alpha,
+                                            int                  beta,
+                                            SearchThreadStats   *stats)
 {
     ++stats->nodes;
     if (quiescence_should_stop(search, leaf))
@@ -2192,30 +2203,35 @@ static QuiescenceResult parallel_quiescence(Search            *search,
     if (xq_jq_position_in_check(position, xq_color_opponent(mover)))
         return (QuiescenceResult){WIN, false, false};
 
-    bool     in_check       = history->entries[history->count - 1].in_check;
-    unsigned checking_plies = 0;
-    for (size_t i = history->count - 1;
-         i > 0 && checking_plies < PARALLEL_QUIESCENCE_DRAW_CHECK_PLIES &&
-         history->entries[i].in_check;
-         --i)
-        ++checking_plies;
+    assert(ply <= PARALLEL_MAX_QUIESCENCE_DEPTH);
+    QuiescencePathEntry *current = &path[ply];
+    current->piece_hash = position->piece_hash;
+    current->dark = position->dark;
+    memcpy(current->pool, position->pool, sizeof(current->pool));
+    memcpy(current->pool_total, position->pool_total, sizeof(current->pool_total));
+    memcpy(current->board, position->board, sizeof(current->board));
+    bool in_check = xq_jq_position_in_check(position, mover);
+    current->in_check = in_check;
+
+    PathRepetition repetition = parallel_quiescence_repetition(path, ply);
+    if (repetition == PATH_REPETITION_LOSS)
+        return (QuiescenceResult){-WIN, false, false};
+    if (repetition == PATH_REPETITION_DRAW)
+        return (QuiescenceResult){0, false, false};
+    if (repetition == PATH_REPETITION_QUIESCENCE || ply >= PARALLEL_MAX_QUIESCENCE_DEPTH)
+    {
+        int score = search->evaluate(position, mover, search->evaluate_user);
+        if (score > STATIC_LIMIT)
+            score = STATIC_LIMIT;
+        if (score < -STATIC_LIMIT)
+            score = -STATIC_LIMIT;
+        return (QuiescenceResult){score, false, false};
+    }
 
     XqJqMoveList moves;
-    if (checking_plies == PARALLEL_QUIESCENCE_DRAW_CHECK_PLIES)
-    {
-        /* Actual mate outranks a draw; cycle losses do not make an evasion illegal. */
-        xq_jq_generate_legal(position, &moves);
-        return (QuiescenceResult){moves.count == 0 ? -WIN : 0, false, false};
-    }
     xq_jq_generate_pseudo_legal(position, &moves);
     if (moves.count == 0)
         return (QuiescenceResult){-WIN, false, false};
-
-    bool depth_limited = ply >= PARALLEL_MAX_QUIESCENCE_DEPTH;
-    if (!depth_limited && checking_plies == PARALLEL_QUIESCENCE_DRAW_CHECK_PLIES - 1)
-        parallel_quiescence_filter_cycles(history, position, &moves);
-    else
-        (void)xq_jq_history_filter_cycles(history, position, &moves);
 
     int best = -WIN; /* Without a legal evasion, an in-check node is a loss. */
     bool estimated = false;
@@ -2227,13 +2243,12 @@ static QuiescenceResult parallel_quiescence(Search            *search,
         if (stand_pat < -STATIC_LIMIT)
             stand_pat = -STATIC_LIMIT;
         best = stand_pat;
-        if (depth_limited || best >= beta)
+        if (best >= beta)
             return (QuiescenceResult){best, false, false};
         if (best > alpha)
             alpha = best;
     }
-    if (!depth_limited)
-        parallel_order_moves(position, &moves);
+    parallel_order_moves(position, &moves);
 
     for (int i = 0; i < moves.count; ++i)
     {
@@ -2269,31 +2284,12 @@ static QuiescenceResult parallel_quiescence(Search            *search,
                 legal = false;
                 break;
             }
-            if (depth_limited)
-            {
-                /* At the cap only a legal evasion's existence matters. */
-                if (!xq_jq_position_unmake_move(position, &undo))
-                {
-                    search_move_failed(search);
-                    return (QuiescenceResult){0, true, false};
-                }
-                int score = search->evaluate(position, mover, search->evaluate_user);
-                if (score > STATIC_LIMIT)
-                    score = STATIC_LIMIT;
-                if (score < -STATIC_LIMIT)
-                    score = -STATIC_LIMIT;
-                return (QuiescenceResult){score, false, false};
-            }
-            history->entries[history->count] = xq_jq_history_next_entry(
-                &history->entries[history->count - 1], move, revealed_type, position);
-            ++history->count;
             /* A sample must be exact before averaging: the caller's window cannot
              * prune one outcome independently of the other sampled outcomes. */
             QuiescenceResult child = parallel_quiescence(
-                search, leaf, position, history, ply + 1,
+                search, leaf, position, path, ply + 1,
                 dark ? -INFINITY_SCORE : -beta,
                 dark ? INFINITY_SCORE : -alpha, stats);
-            --history->count;
             if (!xq_jq_position_unmake_move(position, &undo))
             {
                 search_move_failed(search);
@@ -2321,20 +2317,12 @@ static QuiescenceResult parallel_quiescence(Search            *search,
 }
 
 /**
- * @brief Starts quiescence at an ordinary leaf with an independent, bounded cycle history.
+ * @brief Starts quiescence at an ordinary leaf with an independent, bounded repetition path.
  *
- * Records the entry position as the start of a fresh path, excluding real-game history and the
- * ordinary-search prefix. Entries cache whether their side to move is in check; the recursive
- * search checks the last six move entries for a mutual-check draw, with mate taking precedence.
- * Entry zero does not represent a searched move and is excluded from this count. The root-cycle
- * rule applies after these terminal outcomes, and the path is restored between sibling branches.
- * Each invocation owns its history, so concurrent leaves never share or modify one another's path.
- *
- * The fixed stack buffer holds the entry position plus at most `PARALLEL_MAX_QUIESCENCE_DEPTH`
- * moves. Keeping it in this entry wrapper avoids declaring a full buffer in every recursive search
- * frame. The history view borrows this storage only until return; it must not be passed to
- * allocation or destruction helpers. The recursive call starts at `ply == 0` and restores
- * `position` before return, including when time or ancestor cancellation stops the search.
+ * Each invocation owns one stack buffer for the entry position and up to the extension cap.
+ * The recursive search starts at ply zero, fills snapshots only as it descends, and limits
+ * repetition checks to this path. Every made move is restored before returning, including on
+ * cancellation.
  *
  * @param search   Shared search state supplying the evaluator and time control.
  * @param leaf     Ordinary node owning this subtree and its stop checks. It and its ancestors must
@@ -2353,19 +2341,8 @@ static QuiescenceResult parallel_quiescence_start(Search            *search,
                                                   int                beta,
                                                   SearchThreadStats *stats)
 {
-    XqJqHistoryEntry entries[PARALLEL_MAX_QUIESCENCE_DEPTH + 1];
-    entries[0] = (XqJqHistoryEntry){
-        .key      = xq_jq_position_hash(position),
-        .power    = 1,
-        .in_check = xq_jq_position_in_check(position, position->side_to_move),
-        .revealed_type = XQ_JQ_NO_REVEAL,
-    };
-    XqJqHistory history = {
-        .entries  = entries,
-        .count    = 1,
-        .capacity = sizeof(entries) / sizeof(entries[0]),
-    };
-    return parallel_quiescence(search, leaf, position, &history, 0, alpha, beta, stats);
+    QuiescencePathEntry path[PARALLEL_MAX_QUIESCENCE_DEPTH + 1];
+    return parallel_quiescence(search, leaf, position, path, 0, alpha, beta, stats);
 }
 
 /**
@@ -2809,8 +2786,8 @@ static SearchRange split_node(Search           *search,
  * the current side otherwise. Move counters do not affect repetition. If only the opponent always
  * checked, ordinary search continues. If neither side always checked, even in check, enter
  * thread-local quiescence, as do depth-zero nodes without check. The inherited window snapshot is
- * converted to the side-to-move perspective. Each entry starts a fresh private quiescence history,
- * excluding the ordinary-search prefix. Quiescence filters pseudo-legal moves in its move loop to
+ * converted to the side-to-move perspective. Quiescence starts a private repetition path at this
+ * leaf. Quiescence filters pseudo-legal moves in its move loop to
  * search captures or all legal check evasions. Static evaluations are clamped to `[-STATIC_LIMIT,
  * STATIC_LIMIT]`. Its fail-soft result is converted back to the root perspective and classified
  * against that snapshot before publishing an exact or bounded interval; later ancestor updates only
@@ -3293,16 +3270,16 @@ void xq_jq_parallel_transposition_table_get_stats(const XqJqParallelTranspositio
  * clock; it neither splits tasks nor accesses the table or PV. Node counts include both normal and
  * quiescence entries, including their shared leaf; reported depths exclude check-evasion and
  * quiescence extensions. Real-game history removes root candidates that close a third identical
- * cycle before any helper tasks are dispatched. Each quiescence subtree applies the same cycle rule
- * to its private path, excluding real-game and ordinary-search history. Six consecutive checking
- * plies in that path are a draw unless the final check is mate; both outcomes precede cycle losses.
- * Ordinary nodes whose board and side to move repeat a strict ancestor use the nearest matching
- * ancestor to define the cycle; move counters are ignored. If the current side always gave check
- * during that cycle, returns an exact draw when the opponent also always checked, or an exact loss
- * for the current side otherwise. Only opposing perpetual check returns NONE and continues ordinary
- * search; neither side always checking requests quiescence. Repetition handling precedes table
- * lookup. DRAW/LOSS marks only (matching ancestor, repeated node] to skip table writes; QUIESCENCE
- * does not mark nodes. Position-only table cutoffs remain enabled and may skip descendant
+ * cycle before any helper tasks are dispatched. Ordinary search and quiescence classify the first
+ * repetition using the nearest same-side ancestor with matching board, dark markers and public
+ * identity pool. The private quiescence path starts at the entry leaf. If the current side always
+ * gave check during the cycle, the score is a draw when the opponent also always checked, or a loss
+ * for the current side otherwise. Only opposing perpetual check returns NONE and continues the
+ * current search. If neither side always checked, ordinary search enters quiescence and a
+ * quiescence branch returns a clamped static evaluation. The 500-ply cap also returns that
+ * evaluation, including in check, after DRAW and LOSS are resolved. Repetition handling precedes
+ * table lookup. Ordinary DRAW/LOSS marks only (matching ancestor, repeated node] to skip table
+ * writes. Position-only table cutoffs remain enabled and may skip descendant
  * repetitions or reuse path-dependent ancestor results. A nonzero time budget uses a monotonic
  * deadline shared across preparation and all iterations. Each physical thread checks at its first
  * ordinary entry and then every `PARALLEL_TIME_CHECK_INTERVAL` ordinary entries. Preparation,
@@ -3316,9 +3293,9 @@ void xq_jq_parallel_transposition_table_get_stats(const XqJqParallelTranspositio
  * selects `xq_jq_engine_default_static_evaluate` with null user data. Ordinary node intervals and
  * returned scores use the root side's perspective; quiescence uses side-to-move scores internally.
  * Static scores are clamped to `[-STATIC_LIMIT, STATIC_LIMIT]`, while terminal wins and losses
- * receive `WIN` and `-WIN`. Terminal positions are checked before the depth limit, and ordinary
- * search treats no legal moves as a loss even without check. Quiescence uses pseudo-legal move
- * lists and treats an empty list or an in-check position with no legal evasion as a loss; outside
+ * receive `WIN` and `-WIN`. Ordinary search checks terminal positions before the depth limit and
+ * treats no legal moves as a loss even without check. Continuing quiescence nodes use pseudo-legal
+ * move lists and treat an empty list or an in-check position with no legal evasion as a loss; outside
  * check it performs no extra legal-move scan before stand pat. On success, returns the last
  * complete iteration, a proven win, or completed first-iteration candidates. A partial first
  * iteration supplies a lower-bound score; with no completed candidates, returns a legal unsearched
@@ -3342,7 +3319,7 @@ void xq_jq_parallel_transposition_table_get_stats(const XqJqParallelTranspositio
  * reconstruction does not contribute to them. Per-call node/cache counters, depth progress and
  * monotonic elapsed time are returned in `stats`. Joins all created helpers and releases resources,
  * including after partial thread-creation failure. The input position is never modified, and no
- * helper remains running after the call. A filtered root is not cached; DRAW/LOSS cycles also
+ * helper remains running after the call. A filtered root is not cached; ordinary DRAW/LOSS cycles
  * suppress writes for nodes in (matching ancestor, repeated node]. Fully filtered roots return the
  * original legal fallback with no score.
  *
@@ -3377,11 +3354,11 @@ XqJqParallelStatus xq_jq_engine_parallel_search(const XqJqEngineAdapter   *engin
  * Uses the same search semantics as `xq_jq_engine_parallel_search()`: copies `options` or selects the
  * defaults, creates a helper pool once, and searches depths 1 through the configured maximum. Stops
  * early for a terminal root, non-estimated proven winning move, or time stop. Bright
- * check evasions retain depth; dark moves consume their configured total cost. Ordinary path
- * repetitions adjudicate a draw or
- * current-side loss when the cycle's starting side always checked. Only opposing perpetual check
- * continues ordinary search. Other repetitions and zero-depth nodes without check run thread-local
- * quiescence. Extensions contribute to node counts but not reported depths or root progress. Root
+ * check evasions retain depth; dark moves consume their configured total cost. Both search paths
+ * use the nearest same-side public position to classify repetition. If neither side always
+ * checked, ordinary search starts quiescence and an existing quiescence branch returns a static
+ * evaluation. Quiescence also starts at zero-depth nodes outside check. Extensions contribute to
+ * node counts but not reported depths or root progress. Root
  * ordering, PV hints and an optional borrowed transposition table are retained across iterations;
  * cached results, including estimates, may come from greater search depths. Estimated
  * results still require matching sampling configuration and cannot prove a game outcome.
