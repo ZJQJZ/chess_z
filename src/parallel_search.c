@@ -803,17 +803,15 @@ static bool parallel_prioritize_move(XqMoveList *list,
 /**
  * @brief Stably sorts candidates by the built-in capture-ordering score, highest first.
  *
- * Calls `xq_engine_default_move_order_score()` once per move, reusing `engine.c`'s piece values and
- * MVV-LVA-style formula: quiet moves score zero; captures score `CAPTURE_ORDER_BASE` plus sixteen
- * times the victim's value minus the attacker's value. Captures precede quiet moves, with valuable
- * victims and cheaper attackers generally preferred. Both MAX and MIN nodes sort descending: these
- * scores predict promising moves for the moving side, not the root's position evaluation.
+ * Calls `xq_engine_default_move_order_score()` once per capture, using the MVV-LVA-style formula
+ * `CAPTURE_ORDER_BASE` plus sixteen times the victim's value minus the attacker's value. Captures
+ * have positive scores and precede quiet moves, which score zero. Both MAX and MIN nodes sort
+ * descending because these scores predict promising moves for the moving side.
  *
- * Uses insertion sort directly on `list->moves`, keeping a parallel local array of ordering scores.
- * At iteration `i`, the prefix `[0, i)` is already sorted and its scores are initialized. Saves the
- * current move before shifting that prefix, then inserts the move and score at the same index. Only
- * strictly smaller scores shift right, so equal-scoring moves retain their input order. The move
- * count and all move metadata are preserved; the position is never modified.
+ * Leaves trailing quiet moves in place. In the remaining prefix, inserts each capture into the
+ * sorted capture prefix and buffers quiet moves in input order. Copies the buffered quiet moves
+ * back after the captures. Only strictly smaller capture scores shift right, so equal-scoring moves
+ * retain their input order.
  *
  * Call for the first root iteration and continuing internal nodes, before promoting cache/PV hints
  * and before assigning batches to helpers. Later root iterations retain their previous
@@ -822,7 +820,7 @@ static bool parallel_prioritize_move(XqMoveList *list,
  * provides no synchronization: the caller must exclusively own the move list. It neither checks
  * move legality nor searches children, and does not invoke a custom scorer.
  *
- * Empty and single-move lists require no shifts. Worst-case time is `O(count squared)`, with
+ * Worst-case time is linear in the move count plus quadratic in the capture count, with
  * `O(XQ_MAX_MOVES)` stack storage and no heap allocation.
  *
  * @param position Position in which the candidates were generated; must not be null. Passed to the
@@ -833,12 +831,26 @@ static bool parallel_prioritize_move(XqMoveList *list,
 static void parallel_order_moves(const XqPosition *position,
                                  XqMoveList       *list)
 {
-    int scores[XQ_MAX_MOVES];
-    for (int i = 0; i < list->count; ++i)
+    int end = list->count;
+    /* Quiet moves after the last capture already occupy their final positions. */
+    while (end > 0 && list->moves[end - 1].captured == XQ_EMPTY_PIECE)
+        --end;
+
+    int    scores[XQ_MAX_MOVES];
+    XqMove quiet_moves[XQ_MAX_MOVES];
+    int    capture_count = 0;
+    int    quiet_count   = 0;
+    for (int i = 0; i < end; ++i)
     {
-        XqMove move  = list->moves[i];
-        int    score = xq_engine_default_move_order_score(position, move, NULL);
-        int    j     = i;
+        XqMove move = list->moves[i];
+        if (move.captured == XQ_EMPTY_PIECE)
+        {
+            quiet_moves[quiet_count++] = move;
+            continue;
+        }
+
+        int score = xq_engine_default_move_order_score(position, move, NULL);
+        int j     = capture_count++;
         while (j > 0 && scores[j - 1] < score)
         {
             list->moves[j] = list->moves[j - 1];
@@ -848,6 +860,9 @@ static void parallel_order_moves(const XqPosition *position,
         list->moves[j] = move;
         scores[j]      = score;
     }
+    if (quiet_count > 0)
+        memcpy(list->moves + capture_count, quiet_moves,
+               (size_t)quiet_count * sizeof(*quiet_moves));
 }
 
 typedef struct ParallelPv
