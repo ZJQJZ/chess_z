@@ -105,6 +105,84 @@ static void test_piece_dependencies(void)
     check_both_sides(&cache, &pos);
 }
 
+static bool row_depends_on(const XqCachedPieceMoves *row, int file, int rank)
+{
+    return xq_bb_test(row->dependencies, xq_square_make(file, rank));
+}
+
+static void test_rook_ray_dependencies(void)
+{
+    XqMoveCache cache = {0};
+    XqPosition pos;
+    CHECK(xq_position_from_fen(&pos, "3k5/9/1p7/1R2P4/9/9/9/9/9/4K4 r - -"));
+    check_both_sides(&cache, &pos);
+
+    XqSquare from = xq_square_make(1, 6);
+    XqSquare blocker = xq_square_make(1, 7);
+    const XqCachedPieceMoves *row = &cache.rows[from];
+    CHECK(row_depends_on(row, 1, 6));
+    CHECK(row_depends_on(row, 1, 7));
+    CHECK(row_depends_on(row, 4, 6));
+    CHECK(row_depends_on(row, 1, 0));
+    CHECK(!row_depends_on(row, 1, 8));
+    CHECK(!row_depends_on(row, 7, 6));
+
+    /* Edits behind the blockers in both directions leave the rook's row valid. */
+    XqBitboard before = row->dependencies;
+    edit_square(&cache, &pos, 1, 8, xq_make_piece(XQ_BLACK, XQ_KNIGHT));
+    edit_square(&cache, &pos, 7, 6, xq_make_piece(XQ_BLACK, XQ_PAWN));
+    CHECK(row->dependencies.lo == before.lo && row->dependencies.hi == before.hi);
+
+    /* Removing the nearest blocker exposes a farther piece as a capture. */
+    edit_square(&cache, &pos, 4, 6, XQ_EMPTY_PIECE);
+    CHECK(row_depends_on(row, 7, 6));
+    CHECK(!row_depends_on(row, 8, 6));
+    edit_square(&cache, &pos, 7, 6, xq_make_piece(XQ_RED, XQ_PAWN));
+
+    XqMove capture = {(uint8_t)from, (uint8_t)blocker, pos.board[from], pos.board[blocker]};
+    CHECK(xq_position_make_move(&pos, capture));
+    xq_move_cache_invalidate(&cache, from, blocker);
+    check_both_sides(&cache, &pos);
+    CHECK(row_depends_on(&cache.rows[blocker], 1, 8));
+    CHECK(xq_position_unmake_move(&pos, capture));
+    xq_move_cache_invalidate(&cache, from, blocker);
+    check_both_sides(&cache, &pos);
+    CHECK(!row_depends_on(row, 1, 8));
+
+    /* The origin is dirty even if only the moving piece's type changes. */
+    edit_square(&cache, &pos, 1, 6, xq_make_piece(XQ_RED, XQ_CANNON));
+    CHECK(row_depends_on(row, 1, 8));
+}
+
+static void test_cannon_ray_dependencies(void)
+{
+    XqMoveCache cache = {0};
+    XqPosition pos;
+    CHECK(xq_position_from_fen(&pos, "3k5/9/2P2C3/5P3/9/5p3/9/9/9/4K4 r - -"));
+    check_both_sides(&cache, &pos);
+
+    const XqCachedPieceMoves *row = &cache.rows[xq_square_make(5, 7)];
+    CHECK(row_depends_on(row, 5, 7));
+    CHECK(row_depends_on(row, 5, 6));
+    CHECK(row_depends_on(row, 5, 5));
+    CHECK(row_depends_on(row, 5, 4));
+    CHECK(!row_depends_on(row, 5, 3));
+    CHECK(row_depends_on(row, 0, 7));
+
+    edit_square(&cache, &pos, 5, 2, xq_make_piece(XQ_BLACK, XQ_ROOK));
+    CHECK(!row_depends_on(row, 5, 2));
+    /* The second blocker cannot be captured once it changes to a friendly piece. */
+    edit_square(&cache, &pos, 5, 4, xq_make_piece(XQ_RED, XQ_PAWN));
+    edit_square(&cache, &pos, 5, 6, XQ_EMPTY_PIECE);
+    CHECK(row_depends_on(row, 5, 2));
+    CHECK(!row_depends_on(row, 5, 1));
+
+    /* A square between the screen and capture still affects the cannon's row. */
+    edit_square(&cache, &pos, 5, 3, xq_make_piece(XQ_RED, XQ_PAWN));
+    CHECK(row_depends_on(row, 5, 3));
+    CHECK(!row_depends_on(row, 5, 2));
+}
+
 static void test_output_capacity(void)
 {
     XqMoveCache cache = {0};
@@ -146,6 +224,8 @@ static void test_branches(XqMoveCache *cache, XqPosition *pos, unsigned depth, u
 int main(void)
 {
     test_piece_dependencies();
+    test_rook_ray_dependencies();
+    test_cannon_ray_dependencies();
     test_output_capacity();
     XqMoveCache cache = {0};
     XqPosition pos;
