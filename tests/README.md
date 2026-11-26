@@ -28,9 +28,9 @@ The CMake build registers the following CTest cases when `BUILD_TESTING` is on:
   and overflow targets use separate report directories; CTest fixtures generate
   fresh reports before running either Python validator.
 - `parallel_similarity`: white-box coverage of incremental move hashes, sibling-key enumeration,
-  shared query budgets, invalid moves, duplicate keys, read-only hint collection, unified
-  winning/quiet-move ordering and read-only TT
-  snapshots, plus serial and parallel search, sampling and cancellation checks.
+  query budgets that count repeated keys, invalid moves, read-only hint collection, unified
+  winning/quiet-move ordering and read-only TT snapshots, plus serial and parallel search,
+  sampling and cancellation checks.
 - `parallel_similarity_disabled`: the same driver with a query limit of `0` to check
   disabled behavior.
 - `parallel_similarity_jq` and `parallel_similarity_jq_disabled`: Jieqi coverage

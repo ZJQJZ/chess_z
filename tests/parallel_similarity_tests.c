@@ -148,12 +148,28 @@ static void check_moves(const XqMoveList *actual, const XqMoveList *expected)
         CHECK(equal_move(actual->moves[i], expected->moves[i]));
 }
 
+/* Most fixtures keep only the moves needed to assert their exact ordering. */
+static unsigned collect_fixture_hints(Search *search, Node *node, SimilarMoveHints *hints)
+{
+    XqMoveCache move_cache = {0};
+    for (int i = 0; i < node->moves.count; ++i)
+    {
+        XqMove move = node->moves.moves[i];
+        CHECK(move.from < XQ_SQUARES);
+        XqCachedPieceMoves *row = &move_cache.rows[move.from];
+        CHECK(row->count < XQ_MAX_PIECE_MOVES);
+        row->piece = move.piece;
+        row->moves[row->count++] = move;
+    }
+    return parallel_collect_similar_hints(search, node, &move_cache, hints);
+}
+
 /* Retain end-to-end hint tests while checking that collection never changes move order. */
 static unsigned collect_and_apply(Search *search, Node *node, unsigned *winning_count)
 {
     XqMoveList original = node->moves;
     SimilarMoveHints hints = {.quiet_count = 123, .winning_count = 123};
-    unsigned queries = parallel_collect_similar_hints(search, node, &hints);
+    unsigned queries = collect_fixture_hints(search, node, &hints);
     check_moves(&node->moves, &original);
     CHECK(hints.quiet_count <= queries && hints.winning_count <= queries);
     if (winning_count != NULL)
@@ -330,6 +346,46 @@ static void disabled_or_inapplicable(void)
 }
 
 #if XQ_TEST_SIMILARITY_QUERY_LIMIT > 0
+static void cached_hint_move_lookup(void)
+{
+    XqPosition position;
+    XqMoveCache move_cache = {0};
+    Node node;
+
+    xq_position_startpos(&position);
+    XqMove opposing_move = find_move(&position, 0, 3, 0, 4);
+    (void)xq_move_cache_refresh(&move_cache, &position);
+    position.side_to_move = XQ_BLACK;
+    node_init(&node, &position, NULL, -1);
+    (void)xq_move_cache_refresh(&move_cache, &node.position);
+    xq_move_cache_collect(&move_cache, &node.position, &node.moves, false);
+
+    /* The opponent's old row is still populated after refreshing the active side. */
+    CHECK(move_cache.rows[opposing_move.from].count != 0);
+    CHECK(parallel_find_similar_hint_move(&node, &move_cache, opposing_move) == NULL);
+
+    XqMove capture = find_move(&position, 1, 7, 1, 0);
+    XqMove hint = capture;
+    hint.captured = XQ_EMPTY_PIECE;
+    const XqMove *matched = parallel_find_similar_hint_move(&node, &move_cache, hint);
+    CHECK(matched != NULL && equal_move(*matched, capture));
+
+    /* The final rook row contains a move past the flattened list's capacity. */
+    CHECK(xq_position_from_fen(&position, "kR3C1Rn/R1N1N1N1R/1N1N1N1N1/2N1N1N2/1N1N1N1N1/"
+                                         "2N1N1N2/1N1N1N1N1/2N1N1N2/1C1N1N1N1/C2K4C r - -"));
+    CHECK(xq_position_remove_piece(&position, xq_square_make(3, 0)));
+    node_init(&node, &position, NULL, -1);
+    xq_move_cache_reset(&move_cache);
+    (void)xq_move_cache_refresh(&move_cache, &node.position);
+    xq_move_cache_collect(&move_cache, &node.position, &node.moves, false);
+    CHECK(node.moves.count == XQ_MAX_MOVES);
+    const XqCachedPieceMoves *row = &move_cache.rows[xq_square_make(7, 9)];
+    CHECK(row->count == 3 && row->moves[2].to == xq_square_make(7, 8));
+    CHECK(parallel_find_similar_hint_move(&node, &move_cache, row->moves[2]) == NULL);
+    const XqMove *last_move = &node.moves.moves[node.moves.count - 1];
+    CHECK(parallel_find_similar_hint_move(&node, &move_cache, *last_move) == last_move);
+}
+
 static void collection_preserves_moves(void)
 {
     Fixture fixture;
@@ -342,7 +398,7 @@ static void collection_preserves_moves(void)
     store_hint(&fixture, 1, XQ_SEARCH_SCORE_EXACT, stale_quiet);
     store_scored_hint(&fixture, 2, WIN, XQ_SEARCH_SCORE_LOWER_BOUND, stale_winner);
     SimilarMoveHints hints = {.quiet_count = 123, .winning_count = 123};
-    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, &hints) == 2);
+    CHECK(collect_fixture_hints(&fixture.search, &fixture.node, &hints) == 2);
     check_moves(&fixture.node.moves, &original);
     CHECK(hints.quiet_count == 1 && hints.winning_count == 1);
     CHECK(equal_move(hints.quiet_moves[0], fixture.quiet[3]));
@@ -431,7 +487,7 @@ static void ordering_and_hints(void)
     /* The unified stage applies cache and PV hints together with collected hints. */
     fixture.node.moves = original;
     SimilarMoveHints hints;
-    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, &hints) == 2);
+    CHECK(collect_fixture_hints(&fixture.search, &fixture.node, &hints) == 2);
     XqMove hash_move = fixture.quiet[4];
     XqMove pv_hint[] = {fixture.quiet[2]};
     parallel_apply_move_hints(&fixture.node, &hints, &hash_move, pv_hint, 1);
@@ -629,27 +685,31 @@ static void duplicate_candidates_and_hints(void)
 {
     Fixture fixture;
     fixture_init(&fixture);
-    /* Current key and duplicate sibling keys consume no lookup budget. */
+    /* The current key is skipped. Repeated sibling keys exhaust the budget. */
     XqMove sibling = fixture.parent.moves.moves[1];
     XqMove second = fixture.parent.moves.moves[2];
-    fixture.parent.moves.count = 6;
     fixture.parent.moves.moves[1] = fixture.parent.moves.moves[0];
     fixture.parent.moves.moves[2] = sibling;
     fixture.parent.moves.moves[3] = sibling;
     fixture.parent.moves.moves[4] = second;
-    fixture.parent.moves.moves[5] = fixture.parent.moves.moves[0];
+    store_hint(&fixture, 1, XQ_SEARCH_SCORE_EXACT, fixture.quiet[3]);
     store_hint(&fixture, 2, XQ_SEARCH_SCORE_EXACT, fixture.quiet[4]);
     store_hint(&fixture, 4, XQ_SEARCH_SCORE_LOWER_BOUND, fixture.quiet[2]);
-    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 2);
-    CHECK(equal_move(fixture.node.moves.moves[2], fixture.quiet[4]));
-    CHECK(equal_move(fixture.node.moves.moves[3], fixture.quiet[2]));
+    SimilarMoveHints hints = {0};
+    CHECK(collect_fixture_hints(&fixture.search, &fixture.node, &hints) == 2);
+    CHECK(hints.quiet_count == 1 && equal_move(hints.quiet_moves[0], fixture.quiet[4]));
+
+    /* Distinct sibling keys can also suggest the same move. */
     xq_parallel_transposition_table_clear(fixture.search.options.transposition_table);
+    fixture.parent.moves.moves[3] = second;
     store_hint(&fixture, 2, XQ_SEARCH_SCORE_EXACT, fixture.quiet[4]);
-    store_hint(&fixture, 4, XQ_SEARCH_SCORE_LOWER_BOUND, fixture.quiet[4]);
+    store_hint(&fixture, 3, XQ_SEARCH_SCORE_LOWER_BOUND, fixture.quiet[4]);
     fixture.node.moves.count = 5;
     for (int i = 0; i < 5; ++i)
         fixture.node.moves.moves[i] = fixture.quiet[i];
-    CHECK(collect_and_apply(&fixture.search, &fixture.node, NULL) == 2);
+    CHECK(collect_fixture_hints(&fixture.search, &fixture.node, &hints) == 2);
+    CHECK(hints.quiet_count == 1 && equal_move(hints.quiet_moves[0], fixture.quiet[4]));
+    parallel_apply_move_hints(&fixture.node, &hints, NULL, NULL, 0);
     const int expected[] = {4, 0, 1, 2, 3};
     for (int i = 0; i < 5; ++i)
         CHECK(equal_move(fixture.node.moves.moves[i], fixture.quiet[expected[i]]));
@@ -720,7 +780,7 @@ static void timing_and_cutoff_isolation(void)
         XqMoveList original = fixture.node.moves;
         SimilarMoveHints hints = {0};
         /* Collection finishes its bounded reads without observing or changing stop state. */
-        CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, &hints) == 2);
+        CHECK(collect_fixture_hints(&fixture.search, &fixture.node, &hints) == 2);
         CHECK(hints.quiet_count == 1 && equal_move(hints.quiet_moves[0], fixture.quiet[4]));
         CHECK(hints.winning_count == 0);
         check_moves(&fixture.node.moves, &original);
@@ -1178,6 +1238,7 @@ int main(void)
     readonly_peek();
     disabled_or_inapplicable();
 #if XQ_TEST_SIMILARITY_QUERY_LIMIT > 0
+    cached_hint_move_lookup();
     collection_preserves_moves();
     unified_hint_precedence();
     ordering_and_hints();

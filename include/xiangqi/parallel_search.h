@@ -155,12 +155,12 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * root candidates. Sampled normal plies count actual moves and may exceed the iteration depth.
  * The first root iteration and internal nodes use the built-in stable capture ordering. With a
  * table, non-root normal-search nodes that do not return early also borrow move-ordering hints from
- * similar positions, even when a matching cache or PV move exists. Initially these positions are
- * legal siblings: the parent's current best branch first, then its ordered move list, excluding
- * the current branch and duplicate positions. Other sources can share the same per-node budget.
+ * similar positions, even when a matching cache or PV move exists. The sibling source tries the
+ * parent's current best branch first, then its ordered move list, skipping the current branch
+ * and the already attempted branch. Other sources can share the same per-node budget.
  * The `PARALLEL_MAX_SIMILAR_POSITION_QUERIES` enum constant in `parallel_search.c` (set to `0`
- * to disable) limits actual lookup attempts, including misses, busy buckets and unusable hits;
- * rejected candidate positions do not consume the budget. Only `XQ_SEARCH_SCORE_EXACT` or
+ * to disable) limits lookup attempts, including repeated keys, misses, busy buckets and unusable
+ * hits. The current position's key does not consume the budget. Only `XQ_SEARCH_SCORE_EXACT` or
  * `XQ_SEARCH_SCORE_LOWER_BOUND` entries supply hints, regardless of depth. Hints must match a current
  * move's `from`, `to` and `piece` (including color/type); the current move's complete data is retained.
  * An entry with `score == WIN` (`30000`, from the candidate's side-to-move perspective) supplies a
