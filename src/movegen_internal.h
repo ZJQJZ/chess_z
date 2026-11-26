@@ -18,25 +18,38 @@ typedef struct XqCachedPieceMoves
     XqMove *first_capture;
 } XqCachedPieceMoves;
 
+typedef struct XqCachedKingCheck
+{
+    XqBitboard dependencies;
+    XqSquare king;
+    bool in_check;
+    bool valid;
+} XqCachedKingCheck;
+
 /* One cache per position traversal. Zero initialize and keep populated rows at a fixed address. */
 typedef struct XqMoveCache
 {
     XqCachedPieceMoves rows[XQ_SQUARES];
     XqBitboard changed[XQ_COLOR_NB];
+    XqCachedKingCheck king_check[XQ_COLOR_NB];
 } XqMoveCache;
 
 typedef struct XqMoveCacheSummary
 {
     int count;
     bool king_capture;
+    bool in_check; /* Available when king_capture is false. */
 } XqMoveCacheSummary;
 
-/* Reuse the storage on an unrelated traversal by marking every square changed. */
+/* Reuse the storage on an unrelated traversal by invalidating rows and check results. */
 static inline void xq_move_cache_reset(XqMoveCache *cache)
 {
     XqBitboard all = {UINT64_MAX, (UINT64_C(1) << (XQ_SQUARES - 64)) - 1};
     for (int color = 0; color < XQ_COLOR_NB; ++color)
+    {
         cache->changed[color] = all;
+        cache->king_check[color].valid = false;
+    }
 }
 
 /* Report each changed square before collecting again; for a single square pass it twice.
@@ -53,7 +66,8 @@ static inline void xq_move_cache_invalidate(XqMoveCache *cache, XqSquare from, X
     }
 }
 
-/* Refresh affected rows for pos->side_to_move. The summary describes the first XQ_MAX_MOVES. */
+/* Refresh affected rows and check status for pos->side_to_move. The count is capped at
+ * XQ_MAX_MOVES. */
 XqMoveCacheSummary xq_move_cache_refresh(XqMoveCache *cache, const XqPosition *pos);
 
 /* Collect from a refreshed cache in generator order, applying the list limit before filtering. */

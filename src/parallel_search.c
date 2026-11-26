@@ -2155,7 +2155,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
         if (candidates.king_capture)
             return (QuiescenceResult){WIN, false};
         move_count = candidates.count;
-        in_check   = xq_position_in_check(position, mover);
+        in_check   = candidates.in_check;
     }
 
     assert(ply <= PARALLEL_MAX_QUIESCENCE_DEPTH);
@@ -2839,7 +2839,10 @@ static Interval search_node(Search            *search,
     bool leaf       = false;
     int  move_count = search->root_moves.count;
     if (parent == NULL)
-        node.moves = search->root_moves;
+    {
+        node.moves    = search->root_moves;
+        node.in_check = xq_position_in_check(position, position->side_to_move);
+    }
     else
     {
         XqMoveCacheSummary candidates = xq_move_cache_refresh(&stats->move_cache, position);
@@ -2849,11 +2852,12 @@ static Interval search_node(Search            *search,
             score = node.maximizing ? WIN : -WIN;
             leaf  = true;
         }
+        else
+            node.in_check = candidates.in_check;
     }
 
     if (!leaf)
     {
-        node.in_check             = xq_position_in_check(position, position->side_to_move);
         PathRepetition repetition = parallel_path_repetition(&node);
         if (repetition == PATH_REPETITION_DRAW)
         {

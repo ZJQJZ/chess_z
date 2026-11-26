@@ -397,6 +397,32 @@ static void add_dependency(XqBitboard *dependencies,
         xq_bb_set(dependencies, xq_square_make(file, rank));
 }
 
+static void add_rank_file_dependencies(XqBitboard *dependencies,
+                                       int         file,
+                                       int         rank)
+{
+    for (int f = 0; f < XQ_FILES; ++f)
+        xq_bb_set(dependencies, xq_square_make(f, rank));
+    for (int r = 0; r < XQ_RANKS; ++r)
+        xq_bb_set(dependencies, xq_square_make(file, r));
+}
+
+static XqBitboard king_attack_dependencies(XqSquare king)
+{
+    XqBitboard dependencies = xq_bb_empty();
+    if (king == XQ_NO_SQUARE)
+        return dependencies;
+
+    int file = xq_square_file(king);
+    int rank = xq_square_rank(king);
+    /* Cover rook, cannon and flying-general rays, plus nearby attackers and their blockers. */
+    add_rank_file_dependencies(&dependencies, file, rank);
+    for (int r = rank - 2; r <= rank + 2; ++r)
+        for (int f = file - 2; f <= file + 2; ++f)
+            add_dependency(&dependencies, f, r);
+    return dependencies;
+}
+
 /* Geometry is independent of occupancy, so blocked rays can retain the same mask. */
 static XqBitboard piece_dependencies(XqSquare sq,
                                      int      piece)
@@ -411,10 +437,7 @@ static XqBitboard piece_dependencies(XqSquare sq,
     {
     case XQ_ROOK:
     case XQ_CANNON:
-        for (int f = 0; f < XQ_FILES; ++f)
-            xq_bb_set(&dependencies, xq_square_make(f, rank));
-        for (int r = 0; r < XQ_RANKS; ++r)
-            xq_bb_set(&dependencies, xq_square_make(file, r));
+        add_rank_file_dependencies(&dependencies, file, rank);
         break;
     case XQ_KING:
     case XQ_ADVISOR: {
@@ -532,6 +555,28 @@ XqMoveCacheSummary xq_move_cache_refresh(XqMoveCache      *cache,
         }
         summary.king_capture |= row->king_capture;
         summary.count += row->count;
+    }
+
+    XqCachedKingCheck *check = &cache->king_check[color];
+    if (summary.king_capture)
+    {
+        /* The dirty squares are about to be cleared even though check was skipped. */
+        check->valid = false;
+    }
+    else
+    {
+        XqSquare king         = xq_position_king_square(pos, color);
+        bool     king_changed = check->king != king;
+        if (!check->valid || king_changed ||
+            ((check->dependencies.lo & changed.lo) | (check->dependencies.hi & changed.hi)) != 0)
+        {
+            if (king_changed || xq_bb_is_empty(check->dependencies))
+                check->dependencies = king_attack_dependencies(king);
+            check->king     = king;
+            check->in_check = xq_position_in_check(pos, color);
+            check->valid    = true;
+        }
+        summary.in_check = check->in_check;
     }
     cache->changed[color] = xq_bb_empty();
     if (summary.count > XQ_MAX_MOVES)
