@@ -193,6 +193,14 @@ const char *xq_jq_parallel_status_text(XqJqParallelStatus status);
  * continues to report actual completed candidates. A cancelled, unfinished sample set supplies no
  * candidate score. A fallback has score_available == false and selected_move_depth == 0.
  *
+ * Each ordinary node may split after move ordering when its remaining budget is at least
+ * PARALLEL_MIN_SPLIT_DEPTH (5, defined in parallel_search_jq.c). CONTIGUOUS assigns a tail batch
+ * to at most one helper. INTERLEAVED calls interleaved_split_threads() with the remaining budget
+ * and the budget consumed from this iteration's root. Consumed budget is zero at the root,
+ * includes dark-move costs and excludes check-evasion extensions. The function currently returns
+ * 3, including the owner. Actual participants are limited by moves and idle helpers, without
+ * waiting for workers to become idle. INTERLEAVED ignores split_percent, including zero.
+ *
  * PV ordering hints stop at the first dark-moving move, including that move but no hypothetical
  * revealed continuation. Cache-reconstructed PVs follow the same rule; neighboring hints do not
  * randomly reveal dark pieces. Hints do not prove values or change hidden real-game assignments.

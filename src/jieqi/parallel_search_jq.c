@@ -199,7 +199,6 @@ enum
     PARALLEL_DARK_MOVE_DEPTH_COST                = 2,
     PARALLEL_MAX_QUIESCENCE_DEPTH               = 500,
     PARALLEL_MIN_SPLIT_DEPTH                    = 5,
-    PARALLEL_INTERLEAVED_SPLIT_THREADS          = 2,
     PARALLEL_MIN_WORKER_STACK_BYTES             = 32 * 1024 * 1024,
     PARALLEL_MAX_PV_MOVES                       = 64,
     PARALLEL_CACHE_LINE_ALIGNMENT               = 128,
@@ -210,8 +209,6 @@ enum
     PARALLEL_FINISH_ITERATION_THRESHOLD_PERCENT = 15
 };
 
-_Static_assert(PARALLEL_INTERLEAVED_SPLIT_THREADS >= 1,
-               "interleaved splitting requires a positive participant limit");
 _Static_assert(PARALLEL_TT_BUCKET_COUNT > 0 &&
                    (PARALLEL_TT_BUCKET_COUNT & (PARALLEL_TT_BUCKET_COUNT - 1u)) == 0,
                "parallel table requires a positive power-of-two bucket count");
@@ -1334,6 +1331,7 @@ typedef struct Search
     atomic_int         root_started;
     atomic_int         error_status;
     unsigned           root_total;
+    unsigned           root_iteration_depth; /* Set before each root search and shared read-only. */
     RootIteration      iteration;
     /* Keep the caller's hot writes on separate cache lines from shared search state. */
     _Alignas(PARALLEL_CACHE_LINE_ALIGNMENT) SearchThreadStats stats;
@@ -2693,23 +2691,38 @@ static void *worker_main(void *argument)
 }
 
 /**
+ * @brief Returns the per-node interleaved participant limit, including the current thread.
+ *
+ * The default policy allows three participants at every eligible depth.
+ *
+ * @param remaining_depth Remaining normal-search budget after the minimum depth check.
+ * @param consumed_depth  Normal-search budget consumed on the path from this iteration's root,
+ *                        including dark-move costs and excluding check-evasion extensions.
+ * @return                At least one participant. One assigns all moves to the current thread.
+ */
+static int interleaved_split_threads(unsigned remaining_depth,
+                                     unsigned consumed_depth)
+{
+    (void)remaining_depth;
+    (void)consumed_depth;
+    return 3;
+}
+
+/**
  * @brief Assigns a node's helper batches and returns the owner's range in the ordered move list.
  *
- * Called once after all move ordering and before searching any child. With remaining normal-search
- * depth below `PARALLEL_MIN_SPLIT_DEPTH`, fewer than two moves, no idle helper, or a zero split
- * percentage under `CONTIGUOUS`, returns `{0, count, 1}` without dispatching a task, leaving all
- * moves for the current thread to search serially. The depth threshold applies to both strategies
- * at root and descendant nodes and uses the remaining budget, excluding check-evasion and
- * quiescence extensions. It limits planned task depth; pruning, terminal positions and cancellation
- * may still end work early.
+ * Called once after all move ordering and before searching any child. Both strategies require at
+ * least `PARALLEL_MIN_SPLIT_DEPTH` before applying their split policies. The depth budget excludes
+ * check-evasion and quiescence extensions. With fewer than two moves, no idle helper, or a policy
+ * that allows only the owner, returns `{0, count, 1}` and leaves all moves for the current thread.
  *
- * `CONTIGUOUS` reserves at most one helper and assigns the last `ceil(count * split_percent / 100)`
- * moves, limited to `1..count-1`, with `step` `1` for both batches. `INTERLEAVED` ignores the
- * percentage (including zero), using at most `PARALLEL_INTERLEAVED_SPLIT_THREADS` participants
- * including the owner, capped by the move count. A participant limit of one disables interleaved
- * splitting. The actual count N is one plus the number of successfully prepared helpers: the owner
- * searches `{0, count, N}` and helper k searches `{k, count, N}` for k in `1..N-1`. Both strategies
- * produce non-empty, disjoint batches covering all original indices.
+ * `CONTIGUOUS` requires a nonzero `split_percent`. It assigns the last `ceil(count * split_percent
+ * / 100)` moves to one helper, limited to `1..count-1`, with `step` `1` for both batches.
+ * `INTERLEAVED` ignores the percentage (including zero) and gets its participant limit from
+ * `interleaved_split_threads()` using the remaining and consumed normal-search budgets. The limit
+ * includes the owner and is capped by the move count. The actual count N is one plus the number of
+ * prepared helpers. The owner searches `{0, count, N}` and helper k searches `{k, count, N}` for k
+ * in `1..N-1`. Both strategies produce non-empty, disjoint batches covering all original indices.
  *
  * Reserves workers in pool order using `IDLE` to `RESERVED` CAS, acquiring their previous releases.
  * Builds all completion records before publishing any task, so the actual participant count and
@@ -2742,13 +2755,21 @@ static SearchRange split_node(Search           *search,
     int         count = node->moves.count;
     SearchRange owner = {0, count, 1};
     *pending          = NULL;
-    if (node->depth < PARALLEL_MIN_SPLIT_DEPTH || count < 2 ||
-        (search->options.split_strategy == XQ_JQ_PARALLEL_SPLIT_CONTIGUOUS &&
-         search->options.split_percent == 0))
+
+    if (node->depth < PARALLEL_MIN_SPLIT_DEPTH || count < 2)
         return owner;
 
-    bool interleaved  = search->options.split_strategy == XQ_JQ_PARALLEL_SPLIT_INTERLEAVED;
-    int  helper_limit = interleaved ? PARALLEL_INTERLEAVED_SPLIT_THREADS - 1 : 1;
+    bool interleaved = search->options.split_strategy == XQ_JQ_PARALLEL_SPLIT_INTERLEAVED;
+    if (!interleaved && search->options.split_percent == 0)
+        return owner;
+
+    int helper_limit = 1;
+    if (interleaved)
+    {
+        assert(node->depth <= search->root_iteration_depth);
+        unsigned consumed_depth = search->root_iteration_depth - node->depth;
+        helper_limit            = interleaved_split_threads(node->depth, consumed_depth) - 1;
+    }
     if (helper_limit > count - 1)
         helper_limit = count - 1;
     int              helper_count = 0;
@@ -3300,11 +3321,11 @@ void xq_jq_parallel_transposition_table_get_stats(const XqJqParallelTranspositio
  * move, or a time stop, as in the built-in search. Each iteration waits for all its helper work
  * before the next begins. `CONTIGUOUS` assigns a tail batch by percentage; zero disables splitting,
  * not helper creation. `INTERLEAVED` distributes sorted indices round-robin among the owner and
- * prepared helpers, up to `PARALLEL_INTERLEAVED_SPLIT_THREADS` total participants, ignoring the
- * percentage even when zero. With N actual participants, the owner takes `0,N,...` and helper k
- * takes `k,k+N,...`. N shrinks when moves, idle workers or completion resources are insufficient; a
- * limit of one is serial. Both strategies require remaining normal-search depth of at least
- * `PARALLEL_MIN_SPLIT_DEPTH` and an idle helper; otherwise all moves stay with the current thread.
+ * prepared helpers, with the total participant limit set by `interleaved_split_threads()` after the
+ * minimum depth check. It ignores the percentage even when zero. With N actual participants, the
+ * owner takes `0,N,...` and helper k takes `k,k+N,...`. N shrinks when moves, idle workers or
+ * completion resources are insufficient; a limit of one is serial. Both strategies require
+ * remaining normal-search depth of at least `PARALLEL_MIN_SPLIT_DEPTH` and an idle helper.
  * The search is synchronous; bright check evasions retain their normal depth budget,
  * including at depth zero. Zero-depth nodes without check and repetitions where neither side always
  * checked run thread-local quiescence for captures and legal evasions, with at most 500 extension
@@ -3660,6 +3681,7 @@ XqJqParallelStatus xq_jq_engine_parallel_search_with_observer(const XqJqEngineAd
                                           search.evaluate_user, search.root_color, &effective);
             ParallelPv current_pv = {0};
             XqMove     best       = {0};
+            search.root_iteration_depth = current_depth;
             (void)search_node(&search, pos, NULL, -1, current_depth, false, XQ_JQ_NO_REVEAL,
                               &best, previous_pv.moves, previous_pv.count, &current_pv, &search.stats);
             (void)search_check_time(&search);

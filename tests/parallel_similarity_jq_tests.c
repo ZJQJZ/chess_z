@@ -603,6 +603,147 @@ static void child_move_failure(void)
     fixture_destroy(&fixture);
 }
 
+static void mark_split_range(SearchRange range, int count, unsigned *visits)
+{
+    CHECK(range.begin >= 0 && range.begin < range.end && range.end <= count);
+    CHECK(range.step > 0);
+    for (int i = range.begin; i < range.end; i += range.step)
+        CHECK(++visits[i] == 1);
+}
+
+static void check_split_assignment(XqJqParallelSplitStrategy strategy,
+                                    unsigned depth, unsigned consumed_depth, int move_count,
+                                    unsigned idle_workers, unsigned split_percent,
+                                    SearchRange expected_owner, unsigned expected_helpers)
+{
+    Search search = {0};
+    Node node = {0};
+    Worker workers[3] = {0};
+    search.options = xq_jq_parallel_options_default();
+    search.options.split_strategy = strategy;
+    search.options.split_percent = split_percent;
+    search.root_iteration_depth = depth + consumed_depth;
+    search.workers = workers;
+    search.worker_count = 3;
+    node.depth = depth;
+    node.moves.count = move_count;
+    for (unsigned i = 0; i < search.worker_count; ++i)
+    {
+        workers[i].search = &search;
+        atomic_init(&workers[i].state,
+                    (idle_workers & (1u << i)) ? WORKER_IDLE : WORKER_RESERVED);
+        CHECK(search_semaphore_init(&workers[i].task_available));
+    }
+
+    TaskCompletion *pending = NULL;
+    SearchRange owner = split_node(&search, &node, &pending);
+    CHECK(owner.begin == expected_owner.begin && owner.end == expected_owner.end);
+    CHECK(owner.step == expected_owner.step);
+    unsigned visits[XQ_JQ_MAX_MOVES] = {0};
+    mark_split_range(owner, move_count, visits);
+    unsigned helpers = 0;
+    unsigned assigned_workers = 0;
+    for (TaskCompletion *completion = pending; completion != NULL; completion = completion->next)
+    {
+        Worker *worker = completion->worker;
+        unsigned index = (unsigned)(worker - workers);
+        CHECK(index < search.worker_count && (idle_workers & (1u << index)));
+        CHECK(!(assigned_workers & (1u << index)));
+        assigned_workers |= 1u << index;
+        ++helpers;
+        CHECK(atomic_load(&worker->state) == WORKER_READY);
+        CHECK(worker->node == &node && worker->completion == completion);
+        CHECK(worker->range.begin == (strategy == XQ_JQ_PARALLEL_SPLIT_INTERLEAVED
+                                      ? (int)helpers : expected_owner.end));
+        CHECK(worker->range.end == move_count && worker->range.step == expected_owner.step);
+        mark_split_range(worker->range, move_count, visits);
+    }
+    CHECK(helpers == expected_helpers);
+    for (int i = 0; i < move_count; ++i)
+        CHECK(visits[i] == 1);
+    for (unsigned i = 0; i < search.worker_count; ++i)
+        if (!(assigned_workers & (1u << i)))
+            CHECK(atomic_load(&workers[i].state) ==
+                  ((idle_workers & (1u << i)) ? WORKER_IDLE : WORKER_RESERVED));
+
+    /* No physical workers were started: consume their dispatches and complete each task here. */
+    while (pending != NULL)
+    {
+        TaskCompletion *next = pending->next;
+        Worker *worker = pending->worker;
+        search_semaphore_wait(&worker->task_available);
+        worker->node = NULL;
+        worker->completion = NULL;
+        atomic_store(&pending->finished, 1);
+        atomic_store(&worker->state, WORKER_IDLE);
+        search_semaphore_post(&pending->notification);
+        task_completion_release(pending); /* Worker reference. */
+        search_semaphore_wait(&pending->notification);
+        CHECK(atomic_load(&pending->finished));
+        task_completion_release(pending); /* Owner reference. */
+        pending = next;
+    }
+    for (unsigned i = 0; i < search.worker_count; ++i)
+        search_semaphore_destroy(&workers[i].task_available);
+}
+
+static void split_assignments(void)
+{
+    /* Three participants, including the owner, partition all ordered moves at root or below it. */
+    check_split_assignment(XQ_JQ_PARALLEL_SPLIT_INTERLEAVED, 5, 0, 8, 7, 50,
+                           (SearchRange){0, 8, 3}, 2);
+    check_split_assignment(XQ_JQ_PARALLEL_SPLIT_INTERLEAVED, 5, 2, 8, 7, 0,
+                           (SearchRange){0, 8, 3}, 2);
+    /* Busy helpers and short move lists reduce the actual participant count. */
+    check_split_assignment(XQ_JQ_PARALLEL_SPLIT_INTERLEAVED, 5, 0, 8, 2, 50,
+                           (SearchRange){0, 8, 2}, 1);
+    check_split_assignment(XQ_JQ_PARALLEL_SPLIT_INTERLEAVED, 5, 0, 2, 7, 50,
+                           (SearchRange){0, 2, 2}, 1);
+    check_split_assignment(XQ_JQ_PARALLEL_SPLIT_INTERLEAVED, 5, 0, 1, 7, 50,
+                           (SearchRange){0, 1, 1}, 0);
+    check_split_assignment(XQ_JQ_PARALLEL_SPLIT_INTERLEAVED, 5, 0, 8, 0, 50,
+                           (SearchRange){0, 8, 1}, 0);
+    check_split_assignment(XQ_JQ_PARALLEL_SPLIT_INTERLEAVED, 4, 2, 8, 7, 50,
+                           (SearchRange){0, 8, 1}, 0);
+    /* Contiguous splitting retains its one-helper tail batch and depth/percentage gates. */
+    check_split_assignment(XQ_JQ_PARALLEL_SPLIT_CONTIGUOUS, 5, 0, 8, 7, 50,
+                           (SearchRange){0, 4, 1}, 1);
+    check_split_assignment(XQ_JQ_PARALLEL_SPLIT_CONTIGUOUS, 4, 2, 8, 7, 50,
+                           (SearchRange){0, 8, 1}, 0);
+    check_split_assignment(XQ_JQ_PARALLEL_SPLIT_CONTIGUOUS, 5, 0, 8, 7, 0,
+                           (SearchRange){0, 8, 1}, 0);
+}
+
+static void searches_with_splits(void)
+{
+    XqJqPosition position;
+    CHECK(xq_jq_position_from_fen(&position,
+        "4k4/9/9/9/4p4/4P4/9/9/9/4K4 r - - 0 1"));
+    unsigned char original[sizeof(position)];
+    memcpy(original, &position, sizeof(original));
+    int serial_score = 0;
+    for (unsigned mode = 0; mode < 3; ++mode)
+    {
+        XqJqParallelOptions options = xq_jq_parallel_options_default();
+        options.depth = 7;
+        options.thread_count = mode == 0 ? 1 : 4;
+        options.time_limit_ms = 0;
+        options.split_strategy = mode == 2 ? XQ_JQ_PARALLEL_SPLIT_CONTIGUOUS :
+                                             XQ_JQ_PARALLEL_SPLIT_INTERLEAVED;
+        XqJqParallelResult result;
+        CHECK(xq_jq_engine_parallel_search(NULL, &position, &options, &result) == XQ_JQ_PARALLEL_OK);
+        CHECK(result.move_available && result.score_available && !result.score_estimated);
+        CHECK(!result.stats.stopped && !result.stats.winning_move_found);
+        CHECK(result.stats.completed_depth == options.depth);
+        CHECK(result.stats.selected_move_depth == options.depth);
+        CHECK(memcmp(original, &position, sizeof(original)) == 0);
+        if (mode == 0)
+            serial_score = result.score;
+        else
+            CHECK(result.score == serial_score);
+    }
+}
+
 int main(void)
 {
     incremental_hashes();
@@ -616,6 +757,8 @@ int main(void)
     move_collection_after_cutoffs();
     quiescence_reveal_failure();
     child_move_failure();
+    split_assignments();
+    searches_with_splits();
     puts("Jieqi parallel similarity checks passed");
     return 0;
 }
