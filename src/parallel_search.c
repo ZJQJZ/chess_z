@@ -280,9 +280,10 @@ XqParallelTranspositionTable *xq_parallel_transposition_table_create(void)
  *
  * Requires exclusive access to a quiescent table: no worker may be accessing a bucket and no other
  * caller may be using the table. This function does not acquire the bucket guards or wait for an
- * active search to finish. External callers must wait until the borrowing search returns; search
- * setup may also clear the table before publishing any tasks when its evaluator context changes.
- * Use `reset_stats` instead when cached entries and their context should be retained.
+ * active search to finish. External callers must wait until the borrowing search returns. Search
+ * setup may clear the table when the evaluator context changes, and a search returning a proven
+ * root winning move clears it after joining every helper. Use `reset_stats` instead when cached
+ * entries and their context should be retained.
  *
  * @param table Table to reset without freeing its storage; `NULL` is accepted and does nothing.
  */
@@ -3185,11 +3186,12 @@ void xq_parallel_transposition_table_get_stats(const XqParallelTranspositionTabl
  * Zeroes a non-null `result` before validating arguments. On success, fills the move and score
  * validity metadata. Cache counters accumulate on the optional borrowed table; PV cache
  * reconstruction does not contribute to them. Per-call node/cache counters, depth progress and
- * monotonic elapsed time are returned in `stats`. Joins all created helpers and releases resources,
- * including after partial thread-creation failure. The input position is never modified, and no
- * helper remains running after the call. A filtered root is not cached; ordinary DRAW/LOSS cycles
- * suppress writes for nodes in (matching ancestor, repeated node]. Fully filtered roots return the
- * original legal fallback with no score.
+ * monotonic elapsed time are returned in `stats`. A proven root winning move clears the borrowed
+ * table after all helpers join and preserves the per-call counters in `stats`. The search releases
+ * resources even after partial thread-creation failure. The input position is never modified, and
+ * no helper remains running after the call. A filtered root is not cached; ordinary DRAW/LOSS
+ * cycles suppress writes for nodes in (matching ancestor, repeated node]. Fully filtered roots
+ * return the original legal fallback with no score.
  *
  * @param engine                        Optional adapter providing evaluation, user data and
  *                                      real-game history; keep borrowed state unchanged until
@@ -3537,6 +3539,13 @@ XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter  
         if (worker_attributes_initialized)
             pthread_attr_destroy(&worker_attributes);
         stop_pool(&search);
+        if (effective.transposition_table != NULL)
+        {
+            if (result->stats.winning_move_found)
+                xq_parallel_transposition_table_clear(effective.transposition_table);
+            else
+                parallel_tt_add_stats(&effective.transposition_table->stats, &search.stats.cache);
+        }
         result->stats.nodes = search.stats.nodes;
         result->stats.cache = search.stats.cache;
         result->stats.stopped =
@@ -3546,8 +3555,6 @@ XqParallelStatus xq_engine_parallel_search_with_observer(const XqEngineAdapter  
             search.start_available && parallel_clock_ms(&end_ms) && end_ms >= search.start_ms;
         if (result->stats.elapsed_available)
             result->stats.elapsed_ms = end_ms - search.start_ms;
-        if (effective.transposition_table != NULL)
-            parallel_tt_add_stats(&effective.transposition_table->stats, &search.stats.cache);
         return status;
     }
 #endif

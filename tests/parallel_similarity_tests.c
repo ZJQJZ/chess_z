@@ -918,6 +918,20 @@ static void repetition_rule_checks(void)
     }
 }
 
+static void check_table_cleared(const XqParallelTranspositionTable *table)
+{
+    CHECK(table->generation == 0 && !table->has_context);
+    CHECK(table->evaluate == NULL && table->evaluate_user == NULL);
+    for (size_t i = 0; i < PARALLEL_TT_BUCKET_COUNT; ++i)
+        for (int j = 0; j < PARALLEL_TT_BUCKET_SIZE; ++j)
+            CHECK(table->buckets[i].entries[j].depth == 0);
+
+    XqTranspositionStats cumulative;
+    xq_parallel_transposition_table_get_stats(table, &cumulative);
+    CHECK(cumulative.probes == 0 && cumulative.hits == 0 && cumulative.cutoffs == 0);
+    CHECK(cumulative.stores == 0 && cumulative.replacements == 0);
+}
+
 static void king_capture_terminals(void)
 {
     Fixture fixture;
@@ -951,6 +965,8 @@ static void king_capture_terminals(void)
     options.depth = 5;
     parallel_tt_store(options.transposition_table, root_key, 1, 12345,
                       XQ_SEARCH_SCORE_EXACT, quiet, &ignored);
+    parallel_tt_store(options.transposition_table, root_key ^ 1u, 1, 12345,
+                      XQ_SEARCH_SCORE_EXACT, quiet, &ignored);
     XqParallelResult result;
     CHECK(xq_engine_parallel_search(NULL, &position, &options, &result) == XQ_PARALLEL_OK);
     CHECK(result.move_available && result.best_move.captured == black_king);
@@ -958,12 +974,12 @@ static void king_capture_terminals(void)
     CHECK(result.stats.nodes == 0 && result.stats.selected_move_depth == 1);
     CHECK(result.stats.iteration_total_moves == (unsigned)legal.count);
     CHECK(result.stats.cache.hits == 1 && result.stats.cache.cutoffs == 0);
-    CHECK(result.stats.cache.stores == 1);
-    const ParallelTtEntry *cached = entry_for(options.transposition_table, root_key);
-    CHECK(cached->depth == 1 && cached->score == WIN && cached->score_kind == XQ_SEARCH_SCORE_EXACT);
-    CHECK(equal_move(cached->best_move, result.best_move));
+    CHECK(result.stats.winning_move_found && result.stats.cache.stores == 1);
+    check_table_cleared(options.transposition_table);
     CHECK(xq_engine_parallel_search(NULL, &position, &options, &result) == XQ_PARALLEL_OK);
-    CHECK(result.stats.cache.cutoffs == 1 && result.stats.cache.stores == 0);
+    CHECK(result.stats.winning_move_found && result.best_move.captured == black_king);
+    CHECK(result.stats.cache.hits == 0 && result.stats.cache.cutoffs == 0);
+    check_table_cleared(options.transposition_table);
 
     /* Both generals are attacked. The side to move can win before any cache cutoff. */
     CHECK(xq_position_from_fen(&position, "4k4/9/9/9/9/9/9/9/9/4K4 r - -"));
@@ -993,6 +1009,61 @@ static void king_capture_terminals(void)
     CHECK(stats.nodes == 1 && pv.count == 0);
 
     fixture_destroy(&fixture);
+}
+
+static void root_win_clears_table(void)
+{
+    XqPosition position;
+    CHECK(xq_position_from_fen(&position, "3nkn3/1RR6/9/9/9/9/9/9/9/3K5 r - -"));
+    uint64_t root_key = xq_position_hash(&position);
+    uint64_t same_bucket_key = root_key ^ PARALLEL_TT_BUCKET_COUNT;
+    uint64_t other_bucket_key = root_key ^ 1u;
+    XqMove move = find_move(&position, 2, 8, 4, 8);
+    XqEngineAdapter adapter = {.static_evaluate = xq_engine_default_static_evaluate,
+                               .user = &position};
+    XqParallelOptions options = xq_parallel_options_default();
+    options.depth = 1;
+    options.thread_count = 1;
+    options.time_limit_ms = 0;
+    XqParallelTranspositionTable *table = xq_parallel_transposition_table_create();
+    CHECK(table != NULL);
+    options.transposition_table = table;
+
+    /* A cached loss leaves the entries, evaluator binding and cumulative counters in place. */
+    XqTranspositionStats ignored = {0};
+    parallel_tt_store(table, root_key, 7, -WIN, XQ_SEARCH_SCORE_UPPER_BOUND, move, &ignored);
+    parallel_tt_store(table, same_bucket_key, 8, 12345, XQ_SEARCH_SCORE_EXACT, move, &ignored);
+    parallel_tt_store(table, other_bucket_key, 8, 12345, XQ_SEARCH_SCORE_EXACT, move, &ignored);
+    XqParallelResult result;
+    CHECK(xq_engine_parallel_search(&adapter, &position, &options, &result) == XQ_PARALLEL_OK);
+    CHECK(result.score_available && result.score == -WIN && !result.stats.winning_move_found);
+    CHECK(result.stats.nodes == 0 && result.stats.cache.cutoffs == 1);
+    CHECK(entry_for(table, root_key)->score == -WIN);
+    CHECK(entry_for(table, same_bucket_key)->score == 12345);
+    CHECK(entry_for(table, other_bucket_key)->score == 12345);
+    CHECK(table->generation == 1 && table->has_context && table->evaluate_user == &position);
+    XqTranspositionStats cumulative;
+    xq_parallel_transposition_table_get_stats(table, &cumulative);
+    CHECK(cumulative.probes == 1 && cumulative.hits == 1 && cumulative.cutoffs == 1);
+
+    /* A cached winning move is still returned, including its per-search cache hit. */
+    parallel_tt_store(table, root_key, 7, WIN, XQ_SEARCH_SCORE_LOWER_BOUND, move, &ignored);
+    CHECK(xq_engine_parallel_search(&adapter, &position, &options, &result) == XQ_PARALLEL_OK);
+    CHECK(result.move_available && equal_move(result.best_move, move));
+    CHECK(result.score_available && result.score_kind == XQ_SEARCH_SCORE_EXACT && result.score == WIN);
+    CHECK(result.stats.winning_move_found && result.stats.selected_move_depth == 7);
+    CHECK(result.stats.nodes == 0 && result.stats.cache.hits == 1 && result.stats.cache.cutoffs == 1);
+    check_table_cleared(table);
+
+    /* A win established by ordinary search also clears the entire table. */
+    parallel_tt_store(table, root_key, 1, 12345, XQ_SEARCH_SCORE_EXACT, move, &ignored);
+    parallel_tt_store(table, other_bucket_key, 8, 12345, XQ_SEARCH_SCORE_EXACT, move, &ignored);
+    CHECK(xq_engine_parallel_search(&adapter, &position, &options, &result) == XQ_PARALLEL_OK);
+    CHECK(result.score_available && result.score == WIN && result.stats.winning_move_found);
+    CHECK(result.stats.nodes > 0 && result.stats.selected_move_depth == 1);
+    CHECK(result.stats.cache.hits == 1 && result.stats.cache.stores > 0);
+    check_table_cleared(table);
+    xq_parallel_transposition_table_destroy(table);
 }
 
 typedef struct SampleCheck
@@ -1119,6 +1190,7 @@ int main(void)
 #endif
     repetition_rule_checks();
     king_capture_terminals();
+    root_win_clears_table();
     searches_and_sampling();
     puts("parallel similarity checks passed");
     return 0;

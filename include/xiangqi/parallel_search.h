@@ -115,7 +115,9 @@ const char *xq_parallel_status_text(XqParallelStatus status);
  * for a terminal root, proven winning move or time stop. Exact results describe the selected
  * iteration; a partial first iteration supplies a lower bound. An unsearched legal fallback has
  * score_available == false and selected_move_depth == 0. Table generations advance per iteration
- * and entries survive between them.
+ * and entries survive between them. When the search returns a proven root winning move, it clears
+ * the optional table after all helpers finish, including its entries, generation, evaluator binding
+ * and cumulative cache counters. The result still reports its own search counters.
  * Ordinary nodes in check pass their unchanged depth budget to every child, including at depth
  * zero. Other ordinary nodes consume one ply. There is no separate check-extension limit; terminal
  * and path-repetition checks still take precedence. Zero-depth check-evasion nodes skip current-node
