@@ -29,15 +29,6 @@ static bool is_friend(const XqJqPosition *pos, XqSquare sq, XqColor color)
 }
 
 /**
- * 是否是敌人
- */
-static bool is_enemy(const XqJqPosition *pos, XqSquare sq, XqColor color)
-{
-    int piece = pos->board[sq];
-    return piece != XQ_EMPTY_PIECE && xq_piece_color(piece) != color;
-}
-
-/**
  * 是否在九宫
  * file 列  rank 行
  */
@@ -48,22 +39,16 @@ static bool in_palace(XqColor color, int file, int rank)
     return color == XQ_RED ? (rank >= 0 && rank <= 2) : (rank >= 7 && rank <= 9);
 }
 
-/**
- * 将 *pos 的 from->to 走棋追加到 *writer 中
- */
-static void add_move(const XqJqPosition *pos, MoveWriter *writer, XqSquare from, XqSquare to)
+/* Append a move whose occupants and on-board coordinates are already known. */
+static inline void write_move(MoveWriter *writer, XqSquare from, XqSquare to, int piece, int captured)
 {
-    int piece;
-    int captured;
-
-    if (writer->next == writer->end || to < 0 || to >= XQ_SQUARES)
+    if (writer->next == writer->end)
         return;
 
-    piece = pos->board[from];
-    captured = pos->board[to];
     if (captured != XQ_EMPTY_PIECE)
     {
-        if (xq_piece_color(captured) == xq_piece_color(piece))
+        /* The piece encoding assigns a contiguous range to each color. */
+        if ((captured >= XQ_PIECE_TYPE_NB) == (piece >= XQ_PIECE_TYPE_NB))
             return;
         if (writer->first_capture == NULL)
             writer->first_capture = writer->next;
@@ -76,6 +61,17 @@ static void add_move(const XqJqPosition *pos, MoveWriter *writer, XqSquare from,
 }
 
 /**
+ * 将 *pos 的 from->to 走棋追加到 *writer 中
+ */
+static void add_move(const XqJqPosition *pos, MoveWriter *writer, XqSquare from, XqSquare to)
+{
+    if (writer->next == writer->end || to < 0 || to >= XQ_SQUARES)
+        return;
+
+    write_move(writer, from, to, pos->board[from], pos->board[to]);
+}
+
+/**
  * 带有棋盘合法位置检测和友伤判断的 add_move
  */
 static void add_step_if_valid(const XqJqPosition *pos, MoveWriter *writer, XqSquare from, int file, int rank)
@@ -85,89 +81,130 @@ static void add_step_if_valid(const XqJqPosition *pos, MoveWriter *writer, XqSqu
         add_move(pos, writer, from, xq_square_make(file, rank));
 }
 
-/**
- * 生成车的走法，放到 *writer 中
- */
-static void gen_rook(const XqJqPosition *pos, MoveWriter *writer, XqSquare from)
+/* Set all bits from first through last, including both endpoints. */
+static inline XqBitboard square_interval(int first, int last)
 {
-    XqColor color = xq_piece_color(pos->board[from]);
-    int from_file = xq_square_file(from);
-    int from_rank = xq_square_rank(from);
-    int i;
+    if (last < 64)
+        return (XqBitboard){(UINT64_MAX << first) & (UINT64_MAX >> (63 - last)), 0};
+    if (first >= 64)
+        return (XqBitboard){0, (UINT64_MAX << (first - 64)) & (UINT64_MAX >> (127 - last))};
+    return (XqBitboard){UINT64_MAX << first, UINT64_MAX >> (127 - last)};
+}
 
-    for (i = 0; i < 4; ++i)
-    {
-        int file = from_file + orthogonal[i][0];
-        int rank = from_rank + orthogonal[i][1];
-        while (xq_square_is_valid(file, rank))
-        {
-            XqSquare to = xq_square_make(file, rank);
-            if (pos->board[to] == XQ_EMPTY_PIECE)
-                add_move(pos, writer, from, to);
-            else
-            {
-                if (is_enemy(pos, to, color))
-                    add_move(pos, writer, from, to);
-                break;
-            }
-            file += orthogonal[i][0];
-            rank += orthogonal[i][1];
-        }
-    }
+static inline XqBitboard bounded_ray_dependencies(int file, int left, int right, int lower,
+                                                  int upper)
+{
+    _Static_assert(XQ_FILES == 9 && XQ_RANKS == 10, "file mask assumes a 9x10 board");
+    /* File A contains squares 0, 9, ..., 81. Its bit at square 63 can cross into hi. */
+    uint64_t file_lo = UINT64_C(0x8040201008040201) << file;
+    uint64_t file_hi = (UINT64_C(0x20100) << file) | ((UINT64_C(1) << file) >> 1);
+
+    XqBitboard rank_span = square_interval(left, right);
+    XqBitboard file_span = square_interval(lower, upper);
+    return (XqBitboard){rank_span.lo | (file_span.lo & file_lo),
+                        rank_span.hi | (file_span.hi & file_hi)};
 }
 
 /**
- * 生成炮的走法，放到 *writer 中
+ * 生成车的走法，射线依赖包含第一个挡子。
  */
-static void gen_cannon(const XqJqPosition *pos, MoveWriter *writer, XqSquare from)
+static void gen_rook(const XqJqPosition *pos, MoveWriter *writer, XqSquare from, int piece,
+                     XqBitboard *dependencies)
 {
-    int row_start = from - xq_square_file(from);
+    int from_file = xq_square_file(from);
+    int from_rank = xq_square_rank(from);
+    /* Right, left, increasing rank, decreasing rank. */
+    XqSquare ends[4];
+
+    for (int i = 0; i < 4; ++i)
+    {
+        int file = from_file + orthogonal[i][0];
+        int rank = from_rank + orthogonal[i][1];
+        XqSquare to = from;
+        while (xq_square_is_valid(file, rank))
+        {
+            to = xq_square_make(file, rank);
+            int captured = pos->board[to];
+            write_move(writer, from, to, piece, captured);
+            if (captured != XQ_EMPTY_PIECE)
+                break;
+            file += orthogonal[i][0];
+            rank += orthogonal[i][1];
+        }
+        ends[i] = to;
+    }
+    if (dependencies != NULL)
+        *dependencies = bounded_ray_dependencies(from_file, ends[1], ends[0], ends[3], ends[2]);
+}
+
+/**
+ * 生成炮的走法，射线依赖包含炮架以及炮架后的第一个挡子。
+ */
+static void gen_cannon(const XqJqPosition *pos, MoveWriter *writer, XqSquare from, int piece,
+                       XqBitboard *dependencies)
+{
+    int file      = xq_square_file(from);
+    int row_start = from - file;
     int row_end   = row_start + XQ_FILES;
     int to;
 
-    /* 炮架前生成空格走法，越过炮架后由 add_move 判断第一颗棋子能否被吃。 */
+    /* 炮架前生成空格走法，越过炮架后由 write_move 判断第一颗棋子能否被吃。 */
+    /* 找不到第二个挡子时，依赖一直延伸到棋盘边缘。 */
     /* 向右 */
     for (to = from + 1; to < row_end && pos->board[to] == XQ_EMPTY_PIECE; ++to)
-        add_move(pos, writer, from, (XqSquare)to);
+        write_move(writer, from, (XqSquare)to, piece, XQ_EMPTY_PIECE);
     for (++to; to < row_end; ++to)
     {
-        if (pos->board[to] == XQ_EMPTY_PIECE)
+        int captured = pos->board[to];
+        if (captured == XQ_EMPTY_PIECE)
             continue;
-        add_move(pos, writer, from, (XqSquare)to);
+        write_move(writer, from, (XqSquare)to, piece, captured);
         break;
     }
+    int right = to < row_end ? to : row_end - 1;
 
     /* 向左 */
     for (to = from - 1; to >= row_start && pos->board[to] == XQ_EMPTY_PIECE; --to)
-        add_move(pos, writer, from, (XqSquare)to);
+        write_move(writer, from, (XqSquare)to, piece, XQ_EMPTY_PIECE);
     for (--to; to >= row_start; --to)
     {
-        if (pos->board[to] == XQ_EMPTY_PIECE)
+        int captured = pos->board[to];
+        if (captured == XQ_EMPTY_PIECE)
             continue;
-        add_move(pos, writer, from, (XqSquare)to);
+        write_move(writer, from, (XqSquare)to, piece, captured);
         break;
     }
+    int left = to >= row_start ? to : row_start;
 
     /* 行号递增 */
     for (to = from + XQ_FILES; to < XQ_SQUARES && pos->board[to] == XQ_EMPTY_PIECE; to += XQ_FILES)
-        add_move(pos, writer, from, (XqSquare)to);
+        write_move(writer, from, (XqSquare)to, piece, XQ_EMPTY_PIECE);
     for (to += XQ_FILES; to < XQ_SQUARES; to += XQ_FILES)
     {
-        if (pos->board[to] == XQ_EMPTY_PIECE)
+        int captured = pos->board[to];
+        if (captured == XQ_EMPTY_PIECE)
             continue;
-        add_move(pos, writer, from, (XqSquare)to);
+        write_move(writer, from, (XqSquare)to, piece, captured);
         break;
     }
+    int last  = file + (XQ_RANKS - 1) * XQ_FILES;
+    int upper = to <= last ? to : last;
 
     /* 行号递减 */
     for (to = from - XQ_FILES; to >= 0 && pos->board[to] == XQ_EMPTY_PIECE; to -= XQ_FILES)
-        add_move(pos, writer, from, (XqSquare)to);
+        write_move(writer, from, (XqSquare)to, piece, XQ_EMPTY_PIECE);
     for (to -= XQ_FILES; to >= 0; to -= XQ_FILES)
     {
-        if (pos->board[to] == XQ_EMPTY_PIECE)
+        int captured = pos->board[to];
+        if (captured == XQ_EMPTY_PIECE)
             continue;
-        add_move(pos, writer, from, (XqSquare)to);
+        write_move(writer, from, (XqSquare)to, piece, captured);
         break;
+    }
+    if (dependencies != NULL)
+    {
+        int lower     = to >= file ? to : file;
+        *dependencies = bounded_ray_dependencies(file, left, right, lower, upper);
     }
 }
 
@@ -295,7 +332,8 @@ static void gen_pawn(const XqJqPosition *pos, MoveWriter *writer, XqSquare from)
     }
 }
 
-static inline void gen_piece(const XqJqPosition *pos, MoveWriter *writer, XqSquare sq, int piece)
+static inline void gen_piece(const XqJqPosition *pos, MoveWriter *writer, XqSquare sq, int piece,
+                             XqBitboard *ray_dependencies)
 {
     switch (xq_piece_type(piece))
     {
@@ -312,10 +350,10 @@ static inline void gen_piece(const XqJqPosition *pos, MoveWriter *writer, XqSqua
         gen_knight(pos, writer, sq);
         break;
     case XQ_ROOK:
-        gen_rook(pos, writer, sq);
+        gen_rook(pos, writer, sq, piece, ray_dependencies);
         break;
     case XQ_CANNON:
-        gen_cannon(pos, writer, sq);
+        gen_cannon(pos, writer, sq, piece, ray_dependencies);
         break;
     case XQ_PAWN:
         gen_pawn(pos, writer, sq);
@@ -347,7 +385,7 @@ void xq_jq_generate_pseudo_legal(const XqJqPosition *pos, XqJqMoveList *list)
         XqSquare sq = xq_bb_pop_first_square(&remaining);
         if (sq == XQ_NO_SQUARE)
             break;
-        gen_piece(pos, &writer, sq, pos->board[sq]);
+        gen_piece(pos, &writer, sq, pos->board[sq], NULL);
     }
     list->count = (int)(writer.next - list->moves);
 }
@@ -358,7 +396,31 @@ static void add_dependency(XqBitboard *dependencies, int file, int rank)
         xq_bb_set(dependencies, xq_square_make(file, rank));
 }
 
-/* Include destinations as well as blockers: captured-piece values can change in place. */
+static void add_rank_file_dependencies(XqBitboard *dependencies, int file, int rank)
+{
+    for (int f = 0; f < XQ_FILES; ++f)
+        xq_bb_set(dependencies, xq_square_make(f, rank));
+    for (int r = 0; r < XQ_RANKS; ++r)
+        xq_bb_set(dependencies, xq_square_make(file, r));
+}
+
+static XqBitboard king_attack_dependencies(XqSquare king)
+{
+    XqBitboard dependencies = xq_bb_empty();
+    if (king == XQ_NO_SQUARE)
+        return dependencies;
+
+    int file = xq_square_file(king);
+    int rank = xq_square_rank(king);
+    /* Cover rook, cannon and flying-general rays, plus nearby attackers and their blockers. */
+    add_rank_file_dependencies(&dependencies, file, rank);
+    for (int r = rank - 2; r <= rank + 2; ++r)
+        for (int f = file - 2; f <= file + 2; ++f)
+            add_dependency(&dependencies, f, r);
+    return dependencies;
+}
+
+/* Include destinations and blockers. Rooks and cannons replace this mask on regeneration. */
 static XqBitboard piece_dependencies(XqSquare sq, int piece)
 {
     XqBitboard dependencies = xq_bb_empty();
@@ -368,13 +430,6 @@ static XqBitboard piece_dependencies(XqSquare sq, int piece)
     xq_bb_set(&dependencies, sq);
     switch (xq_piece_type(piece))
     {
-    case XQ_ROOK:
-    case XQ_CANNON:
-        for (int f = 0; f < XQ_FILES; ++f)
-            xq_bb_set(&dependencies, xq_square_make(f, rank));
-        for (int r = 0; r < XQ_RANKS; ++r)
-            xq_bb_set(&dependencies, xq_square_make(file, r));
-        break;
     case XQ_KING:
     {
         for (int i = 0; i < 4; ++i)
@@ -480,13 +535,35 @@ XqJqMoveCacheSummary xq_jq_move_cache_refresh(XqJqMoveCache *cache, const XqJqPo
                 row->piece = (int8_t)piece;
             }
             MoveWriter writer = {.next = row->moves, .end = row->moves + XQ_JQ_MAX_PIECE_MOVES};
-            gen_piece(pos, &writer, sq, piece);
+            gen_piece(pos, &writer, sq, piece, &row->dependencies);
             row->count         = (uint8_t)(writer.next - row->moves);
             row->first_capture = writer.first_capture;
             row->king_capture  = writer.king_capture != NULL;
         }
         summary.king_capture |= row->king_capture;
         summary.count += row->count;
+    }
+
+    XqJqCachedKingCheck *check = &cache->king_check[color];
+    if (summary.king_capture)
+    {
+        /* The dirty squares are about to be cleared even though check was skipped. */
+        check->valid = false;
+    }
+    else
+    {
+        XqSquare king = xq_jq_position_king_square(pos, color);
+        bool king_changed = check->king != king;
+        if (!check->valid || king_changed ||
+            ((check->dependencies.lo & changed.lo) | (check->dependencies.hi & changed.hi)) != 0)
+        {
+            if (king_changed || xq_bb_is_empty(check->dependencies))
+                check->dependencies = king_attack_dependencies(king);
+            check->king = king;
+            check->in_check = xq_jq_position_in_check(pos, color);
+            check->valid = true;
+        }
+        summary.in_check = check->in_check;
     }
     cache->changed[color] = xq_bb_empty();
     return summary;

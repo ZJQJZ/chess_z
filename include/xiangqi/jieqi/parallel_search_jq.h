@@ -196,6 +196,9 @@ const char *xq_jq_parallel_status_text(XqJqParallelStatus status);
  * PV ordering hints stop at the first dark-moving move, including that move but no hypothetical
  * revealed continuation. Cache-reconstructed PVs follow the same rule; neighboring hints do not
  * randomly reveal dark pieces. Hints do not prove values or change hidden real-game assignments.
+ * The neighboring lookup limit in `parallel_search_jq.c` counts each attempted lookup, including
+ * repeated keys, misses, busy buckets and unusable entries. The current position's key is skipped.
+ * Hint moves are matched by `from`, `to` and `piece` and retain the current position's capture data.
  *
  * Results are initialized even on failure. Every helper and callback completes before return.
  * Equal-score choices may depend on scheduling. POSIX pthread implementation requiring

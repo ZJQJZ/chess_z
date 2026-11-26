@@ -179,6 +179,7 @@ static void fixture_init(Fixture *fixture)
     fixture->node.moves.moves[0] = board_move(&current, 0, 6, 0, 5);
     fixture->node.moves.moves[1] = board_move(&current, 2, 6, 2, 5);
     fixture->node.moves.moves[2] = board_move(&current, 6, 6, 6, 5);
+    (void)xq_jq_move_cache_refresh(&fixture->search.stats.move_cache, &current);
 }
 
 static void fixture_destroy(Fixture *fixture)
@@ -225,10 +226,50 @@ static void store_hint(Fixture *fixture, int sibling, int move, bool estimated)
                       estimated, &ignored);
 }
 
-static void query_budget_and_deduplication(void)
+static void cached_hint_move_lookup(void)
+{
+    XqJqPosition position;
+    XqJqMoveCache move_cache = {0};
+    Node node;
+
+    xq_jq_position_startpos(&position);
+    XqMove opposing_move = board_move(&position, 0, 3, 0, 4);
+    (void)xq_jq_move_cache_refresh(&move_cache, &position);
+    position.side_to_move = XQ_BLACK;
+    node_init(&node, &position, NULL, -1);
+    (void)xq_jq_move_cache_refresh(&move_cache, &node.position);
+    xq_jq_move_cache_collect(&move_cache, &node.position, &node.moves, false);
+
+    CHECK(move_cache.rows[opposing_move.from].count != 0);
+    CHECK(parallel_find_similar_hint_move(&node, &move_cache, opposing_move) == NULL);
+
+    XqMove capture = board_move(&position, 1, 7, 1, 0);
+    XqMove hint = capture;
+    hint.captured = XQ_EMPTY_PIECE;
+    const XqMove *matched = parallel_find_similar_hint_move(&node, &move_cache, hint);
+    CHECK(capture.captured != XQ_EMPTY_PIECE);
+    CHECK(matched != NULL && matched->captured == capture.captured &&
+          matched->from == capture.from && matched->to == capture.to && matched->piece == capture.piece);
+
+    CHECK(xq_jq_position_from_fen(&position, "kR3C1Rn/R1N1N1N1R/1N1N1N1N1/2N1N1N2/1N1N1N1N1/"
+                                          "2N1N1N2/1N1N1N1N1/2N1N1N2/1C1N1N1N1/C2K4C r - - 0 1"));
+    CHECK(xq_jq_position_remove_piece(&position, xq_square_make(3, 0)));
+    node_init(&node, &position, NULL, -1);
+    xq_jq_move_cache_reset(&move_cache);
+    (void)xq_jq_move_cache_refresh(&move_cache, &position);
+    xq_jq_move_cache_collect(&move_cache, &position, &node.moves, false);
+    CHECK(node.moves.count > XQ_MAX_MOVES);
+    XqMove last_move = node.moves.moves[node.moves.count - 1];
+    const XqJqCachedPieceMoves *last_row = &move_cache.rows[last_move.from];
+    CHECK(parallel_find_similar_hint_move(&node, &move_cache, last_move) ==
+          &last_row->moves[last_row->count - 1]);
+}
+
+static void repeated_keys_consume_budget(void)
 {
     Fixture fixture;
     fixture_init(&fixture);
+    const XqJqMoveCache *move_cache = &fixture.search.stats.move_cache;
     XqJqMoveList *siblings = &fixture.parent.moves;
     siblings->moves[6] = siblings->moves[4];
     siblings->moves[5] = siblings->moves[3];
@@ -236,6 +277,8 @@ static void query_budget_and_deduplication(void)
     siblings->moves[4] = siblings->moves[2];
     siblings->moves[2] = siblings->moves[0];
     siblings->count = 7;
+    /* The current position's duplicate is skipped. The other duplicate spends a query. */
+    store_hint(&fixture, 2, 2, false);
     store_hint(&fixture, 3, 0, true);
     store_hint(&fixture, 5, 1, false);
     store_hint(&fixture, 6, 2, false);
@@ -243,20 +286,32 @@ static void query_budget_and_deduplication(void)
     unsigned char original[sizeof(fixture.node.moves)];
     memcpy(original, &fixture.node.moves, sizeof(original));
     SimilarMoveHints hints = {.quiet_count = 99, .winning_count = 99};
-    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, &hints) ==
+    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, move_cache, &hints) ==
           PARALLEL_MAX_SIMILAR_POSITION_QUERIES);
     if (PARALLEL_MAX_SIMILAR_POSITION_QUERIES == 0)
         CHECK(hints.quiet_count == 0 && hints.winning_count == 0);
     else
     {
         CHECK(hints.quiet_count == 1 && hints.quiet_moves[0].from == fixture.node.moves.moves[0].from);
-        CHECK(hints.winning_count == 1 && hints.winning_moves[0].from == fixture.node.moves.moves[1].from);
+        CHECK(hints.winning_count == 0);
     }
     CHECK(memcmp(original, &fixture.node.moves, sizeof(original)) == 0);
 
     xq_jq_parallel_transposition_table_clear(fixture.search.options.transposition_table);
+    siblings->moves[4] = siblings->moves[5];
+    store_hint(&fixture, 3, 0, true);
+    store_hint(&fixture, 4, 1, false);
+    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, move_cache, &hints) ==
+          PARALLEL_MAX_SIMILAR_POSITION_QUERIES);
+    if (PARALLEL_MAX_SIMILAR_POSITION_QUERIES != 0)
+    {
+        CHECK(hints.quiet_count == 1 && hints.quiet_moves[0].from == fixture.node.moves.moves[0].from);
+        CHECK(hints.winning_count == 1 && hints.winning_moves[0].from == fixture.node.moves.moves[1].from);
+    }
+
+    xq_jq_parallel_transposition_table_clear(fixture.search.options.transposition_table);
     store_hint(&fixture, 6, 2, false);
-    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, &hints) ==
+    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, move_cache, &hints) ==
           PARALLEL_MAX_SIMILAR_POSITION_QUERIES);
     CHECK(hints.quiet_count == 0 && hints.winning_count == 0);
     fixture_destroy(&fixture);
@@ -284,7 +339,10 @@ static void pseudo_legal_keys(void)
     check_next(&iterator, &fixture, 1);
     check_next(&iterator, &fixture, 2);
     SimilarMoveHints hints = {0};
-    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, &hints) ==
+    XqJqMoveCache *move_cache = &fixture.search.stats.move_cache;
+    xq_jq_move_cache_reset(move_cache);
+    (void)xq_jq_move_cache_refresh(move_cache, &current);
+    CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, move_cache, &hints) ==
           PARALLEL_MAX_SIMILAR_POSITION_QUERIES);
     CHECK(hints.quiet_count == 0 && hints.winning_count == 0);
     fixture_destroy(&fixture);
@@ -303,7 +361,8 @@ static void cancellation_after_collection(void)
         store_hint(&fixture, 2, 0, false);
 
         SimilarMoveHints hints = {0};
-        CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node, &hints) ==
+        CHECK(parallel_collect_similar_hints(&fixture.search, &fixture.node,
+                                            &fixture.search.stats.move_cache, &hints) ==
               PARALLEL_MAX_SIMILAR_POSITION_QUERIES);
         CHECK(hints.winning_count == (PARALLEL_MAX_SIMILAR_POSITION_QUERIES != 0 ? 1u : 0u));
         CHECK(atomic_load(&fixture.node.state) == NODE_RUNNING);
@@ -548,7 +607,8 @@ int main(void)
 {
     incremental_hashes();
     sibling_iterator();
-    query_budget_and_deduplication();
+    cached_hint_move_lookup();
+    repeated_keys_consume_budget();
     pseudo_legal_keys();
     cancellation_after_collection();
     root_king_capture_terminals();

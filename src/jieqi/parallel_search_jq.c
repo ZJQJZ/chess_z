@@ -1835,8 +1835,8 @@ static SimilarPositionIterator parallel_similar_positions(const Node *node)
  * are skipped along with invalid moves.
  *
  * Parent move lists may be pseudo-legal. Keys are also computed for positions missing a king or
- * leaving the mover in check. The iterator leaves deduplication and table queries to its caller.
- * It uses only the parent's stable position and move list.
+ * leaving the mover in check. Different move indices can produce the same key. The iterator uses
+ * only the parent's stable position and move list and leaves table queries to its caller.
  *
  * The iterator must belong to a non-root node reached by one move from its live parent. All
  * borrowed node data must remain stable, and `key` must be private output.
@@ -1883,8 +1883,8 @@ static bool parallel_similar_sibling_next(SimilarPositionIterator *iterator,
  * `SIMILAR_POSITION_SOURCE_COUNT` ends enumeration; an iterator initialized for a root is already
  * at this sentinel and produces no keys.
  *
- * Sources compute keys for the same side to move. The consumer handles key deduplication, bounded
- * table queries and move-hint acceptance. New sources must keep enumeration bounded so collection
+ * Sources compute keys for the same side to move. The consumer skips the current key, bounds
+ * table queries and accepts move hints. New sources must keep enumeration bounded so collection
  * can finish before the caller checks for cancellation.
  *
  * Keep the iterator's borrowed node and parent chain alive with their shared metadata unchanged.
@@ -1914,6 +1914,31 @@ static bool parallel_similar_position_next(SimilarPositionIterator *iterator,
 }
 
 /**
+ * @brief Matches a neighboring TT move in the current side's refreshed cache row.
+ *
+ * The source must still hold the same piece for the side to move. This excludes rows left by
+ * the other side. The complete cache holds all pseudo-legal candidates, so the row supplies
+ * the current capture data without scanning the assembled list. Copy the record before
+ * refreshing the cache again.
+ */
+static const XqMove *parallel_find_similar_hint_move(const Node          *node,
+                                                     const XqJqMoveCache *move_cache,
+                                                     XqMove               candidate)
+{
+    const XqJqPosition *position = &node->position;
+    if (candidate.from >= XQ_SQUARES || candidate.to >= XQ_SQUARES ||
+        position->board[candidate.from] != candidate.piece ||
+        !xq_bb_test(position->occupied[position->side_to_move], (XqSquare)candidate.from))
+        return NULL;
+
+    const XqJqCachedPieceMoves *row = &move_cache->rows[candidate.from];
+    for (unsigned i = 0; i < row->count; ++i)
+        if (row->moves[i].to == candidate.to)
+            return &row->moves[i];
+    return NULL;
+}
+
+/**
  * @brief Collects neighboring move-order hints without changing the current move list.
  *
  * Called while the executing thread exclusively owns `node`, after `parallel_order_moves()` and
@@ -1924,19 +1949,18 @@ static bool parallel_similar_position_next(SimilarPositionIterator *iterator,
  * hint.
  *
  * Enumerates keys for the same side to move, including keys for positions missing a king or
- * leaving the mover in check. Skips the current key and keys already queried. Each remaining key
- * consumes one query before `parallel_tt_peek()` is attempted. Misses, busy buckets and unusable
- * hits therefore consume budget too. Neighboring reads leave entry generations and ordinary TT
- * counters unchanged.
+ * leaving the mover in check. Skips the current key. Each remaining candidate consumes one query
+ * before `parallel_tt_peek()` is attempted, including repeated keys, misses, busy buckets and
+ * unusable hits. Neighboring reads leave entry generations and ordinary TT counters unchanged.
  *
  * Only `XQ_JQ_SEARCH_SCORE_EXACT` and `XQ_JQ_SEARCH_SCORE_LOWER_BOUND` entries may supply hints; their
- * depths need not cover `node->depth`. Matches `cached.best_move` against the current list by
- * `from`, `to` and `piece`. A non-estimated `WIN` retains the matching move as a winning hint,
+ * depths need not cover `node->depth`. Matches `cached.best_move` against the refreshed cache row
+ * by `from`, `to` and `piece`. A non-estimated `WIN` retains the matching move as a winning hint,
  * whether it is a capture or a quiet move. Collection continues within the query budget.
  * Winning hints are deduplicated by `from`/`to` and retain discovery order. They are only ordering
  * signals, not proof of a win in the current position. Non-winning hints require
- * `captured == XQ_EMPTY_PIECE` and are deduplicated by `from`/`to`, separately from candidate-key
- * deduplication. All hints use the current list's complete move records. Neighbor scores, bounds
+ * `captured == XQ_EMPTY_PIECE` and are deduplicated by `from`/`to`. All hints use complete move
+ * records for the current position. Neighbor scores, bounds
  * and PVs are not reused to evaluate the current position or justify a cutoff.
  *
  * Stores accepted hints in `hints->quiet_moves` or `hints->winning_moves`, each in discovery order.
@@ -1947,17 +1971,19 @@ static bool parallel_similar_position_next(SimilarPositionIterator *iterator,
  * The next stop check occurs when a search batch begins. The node and its parent chain must
  * remain alive, and the table must remain valid under the search's existing concurrency contract.
  *
- * @param search Non-null shared search state supplying the borrowed table.
- * @param node   Non-null, exclusively owned node with its current moves stably capture-ordered.
- * @param hints  Non-null caller-owned output; both counts are reset on entry, including when
- *               neighboring queries are disabled or inapplicable.
- * @return       Number of neighboring TT lookup attempts, at most
- *               `PARALLEL_MAX_SIMILAR_POSITION_QUERIES`, or `0` when disabled, inapplicable or no
- *               distinct candidate key is available.
+ * @param search     Non-null shared search state supplying the borrowed table.
+ * @param node       Non-null, exclusively owned node with its current moves stably capture-ordered.
+ * @param move_cache Executing thread's move cache refreshed for `node->position`.
+ * @param hints      Non-null caller-owned output; both counts are reset on entry, including when
+ *                   neighboring queries are disabled or inapplicable.
+ * @return           Number of neighboring TT lookup attempts, at most
+ *                   `PARALLEL_MAX_SIMILAR_POSITION_QUERIES`, or `0` when disabled, inapplicable or no
+ *                   candidate key survives filtering.
  */
-static unsigned parallel_collect_similar_hints(Search           *search,
-                                               Node             *node,
-                                               SimilarMoveHints *hints)
+static unsigned parallel_collect_similar_hints(Search             *search,
+                                               Node               *node,
+                                               const XqJqMoveCache *move_cache,
+                                               SimilarMoveHints   *hints)
 {
     hints->quiet_count   = 0;
     hints->winning_count = 0;
@@ -1966,10 +1992,6 @@ static unsigned parallel_collect_similar_hints(Search           *search,
         search->options.transposition_table == NULL)
         return 0;
 
-    /* Keep zero-limit builds valid C11 without zero-sized arrays. */
-    uint64_t                queried_keys[PARALLEL_MAX_SIMILAR_POSITION_QUERIES > 0
-                                             ? PARALLEL_MAX_SIMILAR_POSITION_QUERIES
-                                             : 1];
     unsigned                queries     = 0;
     uint64_t                current_key = xq_jq_position_hash(&node->position);
     SimilarPositionIterator iterator    = parallel_similar_positions(node);
@@ -1978,44 +2000,38 @@ static unsigned parallel_collect_similar_hints(Search           *search,
         uint64_t key;
         if (!parallel_similar_position_next(&iterator, &key))
             break;
-        bool duplicate = key == current_key;
-        for (unsigned i = 0; i < queries && !duplicate; ++i)
-            duplicate = queried_keys[i] == key;
-        if (duplicate)
+        if (key == current_key)
             continue;
 
-        queried_keys[queries++] = key;
+        ++queries;
         ParallelTtEntry cached;
         if (!parallel_tt_peek(search->options.transposition_table, key, &cached) ||
             (cached.score_kind != XQ_JQ_SEARCH_SCORE_EXACT &&
              cached.score_kind != XQ_JQ_SEARCH_SCORE_LOWER_BOUND))
             continue;
-        for (int i = 0; i < node->moves.count; ++i)
+        const XqMove *matched = parallel_find_similar_hint_move(node, move_cache, cached.best_move);
+        if (matched == NULL)
+            continue;
+
+        XqMove move = *matched;
+        if (cached.score == WIN && !cached.estimated)
         {
-            XqMove move = node->moves.moves[i];
-            if (move.from != cached.best_move.from || move.to != cached.best_move.to ||
-                move.piece != cached.best_move.piece)
-                continue;
-            if (cached.score == WIN && !cached.estimated)
-            {
-                bool repeated = false;
-                for (unsigned j = 0; j < hints->winning_count && !repeated; ++j)
-                    repeated = hints->winning_moves[j].from == move.from &&
-                               hints->winning_moves[j].to == move.to;
-                if (!repeated)
-                    hints->winning_moves[hints->winning_count++] = move;
-                break;
-            }
-            if (move.captured != XQ_EMPTY_PIECE)
-                continue;
             bool repeated = false;
-            for (unsigned j = 0; j < hints->quiet_count && !repeated; ++j)
-                repeated =
-                    hints->quiet_moves[j].from == move.from && hints->quiet_moves[j].to == move.to;
+            for (unsigned j = 0; j < hints->winning_count && !repeated; ++j)
+                repeated = hints->winning_moves[j].from == move.from &&
+                           hints->winning_moves[j].to == move.to;
             if (!repeated)
-                hints->quiet_moves[hints->quiet_count++] = move;
-            break;
+                hints->winning_moves[hints->winning_count++] = move;
+            continue;
         }
+        if (move.captured != XQ_EMPTY_PIECE)
+            continue;
+        bool repeated = false;
+        for (unsigned j = 0; j < hints->quiet_count && !repeated; ++j)
+            repeated =
+                hints->quiet_moves[j].from == move.from && hints->quiet_moves[j].to == move.to;
+        if (!repeated)
+            hints->quiet_moves[hints->quiet_count++] = move;
     }
 
     return queries;
@@ -2224,7 +2240,7 @@ static QuiescenceResult parallel_quiescence(Search              *search,
         if (candidates.king_capture)
             return (QuiescenceResult){WIN, false, false};
         move_count = candidates.count;
-        in_check = xq_jq_position_in_check(position, mover);
+        in_check = candidates.in_check;
     }
 
     assert(ply <= PARALLEL_MAX_QUIESCENCE_DEPTH);
@@ -2970,6 +2986,7 @@ static Interval search_node(Search            *search,
     {
         node.moves = search->root_moves;
         move_count = node.moves.count;
+        node.in_check = xq_jq_position_in_check(position, position->side_to_move);
     }
     else
     {
@@ -2980,11 +2997,12 @@ static Interval search_node(Search            *search,
             score = node.maximizing ? WIN : -WIN;
             leaf  = true;
         }
+        else
+            node.in_check = candidates.in_check;
     }
 
     if (!leaf)
     {
-        node.in_check = xq_jq_position_in_check(position, position->side_to_move);
         PathRepetition repetition = parallel_path_repetition(&node);
         if (repetition == PATH_REPETITION_DRAW)
         {
@@ -3080,7 +3098,7 @@ static Interval search_node(Search            *search,
     {
         xq_jq_move_cache_collect(&stats->move_cache, position, &node.moves, false);
         parallel_order_moves(position, &node.moves);
-        (void)parallel_collect_similar_hints(search, &node, &hints);
+        (void)parallel_collect_similar_hints(search, &node, &stats->move_cache, &hints);
     }
     parallel_apply_move_hints(&node, &hints, has_hash_move ? &hash_move : NULL, pv_hint,
                               pv_hint_count);

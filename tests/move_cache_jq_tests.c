@@ -50,6 +50,8 @@ static int check_moves(XqJqMoveCache *cache, const XqJqPosition *pos)
     XqJqMoveCacheSummary summary = xq_jq_move_cache_refresh(cache, pos);
     CHECK(summary.count == full.count);
     CHECK(summary.king_capture == king_capture);
+    if (!king_capture)
+        CHECK(summary.in_check == xq_jq_position_in_check(pos, pos->side_to_move));
     xq_jq_move_cache_collect(cache, pos, &cached, false);
     check_move_list(&cached, &full, pos);
     xq_jq_move_cache_collect(cache, pos, &cached, true);
@@ -102,6 +104,111 @@ static void piece_dependencies(void)
     edit_square(&cache, &pos, 3, 5, xq_make_piece(XQ_BLACK, XQ_PAWN));
     edit_square(&cache, &pos, 2, 4, XQ_EMPTY_PIECE);
     edit_square(&cache, &pos, 3, 5, xq_make_piece(XQ_RED, XQ_PAWN));
+}
+
+static bool row_depends_on(const XqJqCachedPieceMoves *row, int file, int rank)
+{
+    return xq_bb_test(row->dependencies, xq_square_make(file, rank));
+}
+
+static void rook_ray_dependencies(void)
+{
+    XqJqMoveCache cache = {0};
+    XqJqPosition pos;
+    CHECK(xq_jq_position_from_fen(&pos, "3k5/9/1p*7/1R*2P4/9/9/9/9/9/4K4 r - - 0 1"));
+    check_both_sides(&cache, &pos);
+
+    XqSquare from = xq_square_make(1, 6);
+    XqSquare blocker = xq_square_make(1, 7);
+    const XqJqCachedPieceMoves *row = &cache.rows[from];
+    CHECK(row_depends_on(row, 1, 6));
+    CHECK(row_depends_on(row, 1, 7));
+    CHECK(row_depends_on(row, 4, 6));
+    CHECK(row_depends_on(row, 1, 0));
+    CHECK(!row_depends_on(row, 1, 8));
+    CHECK(!row_depends_on(row, 7, 6));
+
+    /* Changes beyond either blocker leave the rook's dependencies unchanged. */
+    XqBitboard before = row->dependencies;
+    edit_square(&cache, &pos, 1, 8, xq_make_piece(XQ_BLACK, XQ_KNIGHT));
+    edit_square(&cache, &pos, 7, 6, xq_make_piece(XQ_BLACK, XQ_PAWN));
+    CHECK(row->dependencies.lo == before.lo && row->dependencies.hi == before.hi);
+
+    edit_square(&cache, &pos, 4, 6, XQ_EMPTY_PIECE);
+    CHECK(row_depends_on(row, 7, 6));
+    CHECK(!row_depends_on(row, 8, 6));
+    edit_square(&cache, &pos, 7, 6, xq_make_piece(XQ_RED, XQ_PAWN));
+
+    XqMove capture = {(uint8_t)from, (uint8_t)blocker, pos.board[from], pos.board[blocker]};
+    XqJqUndo undo;
+    CHECK(xq_jq_position_save_undo(&pos, capture, XQ_ROOK, &undo));
+    CHECK(xq_jq_position_make_move(&pos, capture, XQ_ROOK));
+    xq_jq_move_cache_invalidate(&cache, from, blocker);
+    check_both_sides(&cache, &pos);
+    CHECK(row_depends_on(&cache.rows[blocker], 1, 8));
+    CHECK(xq_jq_position_unmake_move(&pos, &undo));
+    xq_jq_move_cache_invalidate(&cache, from, blocker);
+    check_both_sides(&cache, &pos);
+    CHECK(!row_depends_on(row, 1, 8));
+
+    edit_square(&cache, &pos, 1, 6, xq_make_piece(XQ_RED, XQ_CANNON));
+    CHECK(row_depends_on(row, 1, 8));
+}
+
+static void cannon_ray_dependencies(void)
+{
+    XqJqMoveCache cache = {0};
+    XqJqPosition pos;
+    CHECK(xq_jq_position_from_fen(&pos, "3k5/9/2P2C*3/5P3/9/5p3/9/9/9/4K4 r - - 0 1"));
+    check_both_sides(&cache, &pos);
+
+    const XqJqCachedPieceMoves *row = &cache.rows[xq_square_make(5, 7)];
+    CHECK(row_depends_on(row, 5, 7));
+    CHECK(row_depends_on(row, 5, 6));
+    CHECK(row_depends_on(row, 5, 5));
+    CHECK(row_depends_on(row, 5, 4));
+    CHECK(!row_depends_on(row, 5, 3));
+    CHECK(row_depends_on(row, 0, 7));
+
+    edit_square(&cache, &pos, 5, 2, xq_make_piece(XQ_BLACK, XQ_ROOK));
+    CHECK(!row_depends_on(row, 5, 2));
+    edit_square(&cache, &pos, 5, 4, xq_make_piece(XQ_RED, XQ_PAWN));
+    edit_square(&cache, &pos, 5, 6, XQ_EMPTY_PIECE);
+    CHECK(row_depends_on(row, 5, 2));
+    CHECK(!row_depends_on(row, 5, 1));
+
+    edit_square(&cache, &pos, 5, 3, xq_make_piece(XQ_RED, XQ_PAWN));
+    CHECK(row_depends_on(row, 5, 3));
+    CHECK(!row_depends_on(row, 5, 2));
+}
+
+static void king_check_dependencies(void)
+{
+    XqJqMoveCache cache = {0};
+    XqJqPosition pos;
+    CHECK(xq_jq_position_from_fen(&pos, "3k5/9/9/9/9/9/9/2b6/3P5/4K4 r - - 0 1"));
+    check_both_sides(&cache, &pos);
+
+    const XqJqCachedKingCheck *check = &cache.king_check[XQ_RED];
+    CHECK(check->valid && !check->in_check);
+    CHECK(xq_bb_test(check->dependencies, xq_square_make(2, 2)));
+    CHECK(xq_bb_test(check->dependencies, xq_square_make(3, 1)));
+    CHECK(!xq_bb_test(check->dependencies, xq_square_make(3, 8)));
+
+    /* The bishop attacks across the river once its eye is empty. */
+    edit_square(&cache, &pos, 3, 1, XQ_EMPTY_PIECE);
+    CHECK(check->valid && check->in_check);
+
+    /* A king capture skips the check, even if an earlier edit touched its dependencies. */
+    edit_square(&cache, &pos, 3, 8, xq_make_piece(XQ_RED, XQ_ROOK));
+    edit_square(&cache, &pos, 3, 1, xq_make_piece(XQ_RED, XQ_PAWN));
+    CHECK(!check->valid);
+    edit_square(&cache, &pos, 3, 8, XQ_EMPTY_PIECE);
+    CHECK(check->valid && !check->in_check);
+
+    xq_jq_move_cache_reset(&cache);
+    CHECK(!check->valid && !cache.king_check[XQ_BLACK].valid);
+    check_both_sides(&cache, &pos);
 }
 
 static void reveal_capture_and_undo(void)
@@ -178,6 +285,9 @@ static void test_branches(XqJqMoveCache *cache, XqJqPosition *pos, unsigned dept
 int main(void)
 {
     piece_dependencies();
+    rook_ray_dependencies();
+    cannon_ray_dependencies();
+    king_check_dependencies();
     reveal_capture_and_undo();
     large_move_list();
     XqJqMoveCache cache = {0};

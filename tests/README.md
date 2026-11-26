@@ -35,9 +35,9 @@ The CMake build registers the following CTest cases when `BUILD_TESTING` is on:
   disabled behavior.
 - `parallel_similarity_jq` and `parallel_similarity_jq_disabled`: Jieqi coverage
   of move hashes with reveals and dark captures, bright sibling-key enumeration,
-  query deduplication and budgets, pseudo-legal candidates, and cancellation after
-  hint collection. The enabled drivers use a limit of `2` and the disabled drivers
-  use `0`. All similarity drivers use a test-only TT with 64 buckets. CMake generates
+  query budgets that count repeated keys, current-move lookup in the cache, pseudo-legal
+  candidates, and cancellation after hint collection. The enabled drivers use a limit of `2`
+  and the disabled drivers use `0`. All similarity drivers use a test-only TT with 64 buckets. CMake generates
   separate implementation copies in the build directory and changes only those two
   enum initializers. Editing either search source regenerates its copies.
 
