@@ -8,6 +8,8 @@
 static _Thread_local unsigned pseudo_legal_generations;
 static _Thread_local unsigned full_collections;
 static _Thread_local unsigned capture_collections;
+static _Thread_local unsigned dark_move_applications;
+static _Thread_local unsigned identity_samples;
 
 static void count_pseudo_legal_generation(const XqJqPosition *position, XqJqMoveList *moves)
 {
@@ -31,11 +33,29 @@ static void count_cache_collection(const XqJqMoveCache *cache, const XqJqPositio
     xq_jq_move_cache_collect(cache, position, moves, captures_only);
 }
 
+static bool count_move_application(XqJqPosition *position, XqMove move, int revealed_type)
+{
+    if (xq_jq_position_is_dark(position, (XqSquare)move.from))
+        ++dark_move_applications;
+    return xq_jq_position_make_move(position, move, revealed_type);
+}
+
+static bool count_identity_sample(const XqJqPosition *position, XqColor color,
+                                   uint64_t *state, XqPieceType *type)
+{
+    ++identity_samples;
+    return xq_jq_position_sample_type(position, color, state, type);
+}
+
 /* CMake copies the implementation with small, independent test-only enum values. */
 #define xq_jq_generate_pseudo_legal count_pseudo_legal_generation
 #define xq_jq_move_cache_refresh count_cache_refresh
 #define xq_jq_move_cache_collect count_cache_collection
+#define xq_jq_position_make_move count_move_application
+#define xq_jq_position_sample_type count_identity_sample
 #include "parallel_search_under_test.c"
+#undef xq_jq_position_sample_type
+#undef xq_jq_position_make_move
 #undef xq_jq_move_cache_collect
 #undef xq_jq_move_cache_refresh
 #undef xq_jq_generate_pseudo_legal
@@ -603,6 +623,109 @@ static void child_move_failure(void)
     fixture_destroy(&fixture);
 }
 
+static void check_dark_pv(const XqJqPosition *position, XqMove move, bool legal)
+{
+    unsigned char original[sizeof(*position)];
+    memcpy(original, position, sizeof(original));
+    ParallelTtEntry first = {
+        .key = xq_jq_position_hash(position), .depth = 5,
+        .score_kind = XQ_JQ_SEARCH_SCORE_EXACT, .best_move = move,
+    };
+    unsigned char original_entry[sizeof(first)];
+    memcpy(original_entry, &first, sizeof(original_entry));
+    ParallelPv pv = {.count = 3};
+    dark_move_applications = 0;
+    identity_samples = 0;
+    pseudo_legal_generations = 0;
+    parallel_pv_from_tt(NULL, position, 5, &first, &pv);
+    CHECK(pv.count == (legal ? 1 : 0));
+    if (legal)
+        CHECK(memcmp(&pv.moves[0], &move, sizeof(move)) == 0);
+    CHECK(pseudo_legal_generations == 1);
+    CHECK(dark_move_applications == 0 && identity_samples == 0);
+    CHECK(memcmp(original, position, sizeof(original)) == 0);
+    CHECK(memcmp(original_entry, &first, sizeof(first)) == 0);
+}
+
+static void dark_pv_validation(void)
+{
+    const struct
+    {
+        const char *fen;
+        int from_file, from_rank, to_file, to_rank;
+        bool in_check, legal, capture;
+    } cases[] = {
+        {"4k4/9/9/9/9/4P4/9/R*8/9/4K4 r - - 0 1", 0, 2, 0, 3, false, true, false},
+        /* Moving the blocker exposes the king; an unrelated move does not answer a check. */
+        {"3k5/4r4/9/9/9/9/9/4R*4/9/4K4 r - - 0 1", 4, 2, 5, 2, false, false, false},
+        {"3k5/4r4/9/9/9/9/9/R*8/9/4K4 r - - 0 1", 0, 2, 0, 3, true, false, false},
+        /* A dark move can answer check by capturing the attacker or interposing. */
+        {"3k5/9/9/9/9/9/9/9/R*3r4/4K4 r - - 0 1", 0, 1, 4, 1, true, true, true},
+        {"3k5/4r4/9/9/9/9/9/9/R*8/4K4 r - - 0 1", 0, 1, 4, 1, true, true, false},
+        /* After capturing the rook, the destination remains occupied as the cannon's screen. */
+        {"3k5/4c4/9/9/9/9/9/9/R*3r4/4K4 r - - 0 1", 0, 1, 4, 1, true, false, true},
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+    {
+        XqJqPosition position;
+        CHECK(xq_jq_position_from_fen(&position, cases[i].fen));
+        CHECK(xq_jq_position_in_check(&position, position.side_to_move) == cases[i].in_check);
+        XqMove move = board_move(&position, cases[i].from_file, cases[i].from_rank,
+                                 cases[i].to_file, cases[i].to_rank);
+        CHECK(xq_jq_position_is_dark(&position, (XqSquare)move.from));
+        CHECK((move.captured != XQ_EMPTY_PIECE) == cases[i].capture);
+        check_dark_pv(&position, move, cases[i].legal);
+    }
+
+    XqJqPosition black;
+    CHECK(xq_jq_position_from_fen(&black,
+        "4k4/9/r*8/9/9/4P4/9/9/9/4K4 b - - 0 1"));
+    XqMove move = board_move(&black, 0, 7, 0, 6);
+    black.fullmove_number = UINT64_MAX - 1;
+    check_dark_pv(&black, move, true);
+    black.fullmove_number = UINT64_MAX;
+    check_dark_pv(&black, move, false);
+}
+
+static void bright_prefix_stops_at_dark_move(void)
+{
+    XqJqPosition position;
+    CHECK(xq_jq_position_from_fen(&position,
+        "4k4/9/9/9/9/4P4/9/R*8/9/4K4 b - - 0 1"));
+    unsigned char original[sizeof(position)];
+    memcpy(original, &position, sizeof(original));
+    XqMove bright = board_move(&position, 4, 9, 3, 9);
+    XqJqPosition after_bright = position;
+    CHECK(xq_jq_position_make_move(&after_bright, bright, XQ_JQ_NO_REVEAL));
+    XqMove dark = board_move(&after_bright, 0, 2, 0, 3);
+    XqJqPosition after_reveal = after_bright;
+    CHECK(xq_jq_position_make_move(&after_reveal, dark, XQ_ROOK));
+    XqMove suffix = board_move(&after_reveal, 3, 9, 3, 8);
+    XqJqParallelTranspositionTable *table = xq_jq_parallel_transposition_table_create();
+    CHECK(table != NULL);
+    XqJqTranspositionStats ignored = {0};
+    parallel_tt_store(table, xq_jq_position_hash(&after_bright), 4, 0,
+                      XQ_JQ_SEARCH_SCORE_EXACT, dark, false, &ignored);
+    parallel_tt_store(table, xq_jq_position_hash(&after_reveal), 4, 0,
+                      XQ_JQ_SEARCH_SCORE_EXACT, suffix, false, &ignored);
+    ParallelTtEntry first = {
+        .key = xq_jq_position_hash(&position), .depth = 5,
+        .score_kind = XQ_JQ_SEARCH_SCORE_EXACT, .best_move = bright,
+    };
+    ParallelPv pv = {0};
+    dark_move_applications = 0;
+    identity_samples = 0;
+    pseudo_legal_generations = 0;
+    parallel_pv_from_tt(table, &position, 5, &first, &pv);
+    CHECK(pv.count == 2);
+    CHECK(memcmp(&pv.moves[0], &bright, sizeof(bright)) == 0);
+    CHECK(memcmp(&pv.moves[1], &dark, sizeof(dark)) == 0);
+    CHECK(pseudo_legal_generations == 2);
+    CHECK(dark_move_applications == 0 && identity_samples == 0);
+    CHECK(memcmp(original, &position, sizeof(original)) == 0);
+    xq_jq_parallel_transposition_table_destroy(table);
+}
+
 static void mark_split_range(SearchRange range, int count, unsigned *visits)
 {
     CHECK(range.begin >= 0 && range.begin < range.end && range.end <= count);
@@ -757,6 +880,8 @@ int main(void)
     move_collection_after_cutoffs();
     quiescence_reveal_failure();
     child_move_failure();
+    dark_pv_validation();
+    bright_prefix_stops_at_dark_move();
     split_assignments();
     searches_with_splits();
     puts("Jieqi parallel similarity checks passed");

@@ -1054,8 +1054,10 @@ static void parallel_build_pv(ParallelPv       *pv,
  * At each position, requires both kings to exist and an exact cache entry searched to at least the
  * remaining depth. Matches its best move by `from`/`to` against freshly generated pseudo-legal
  * moves, then uses the generated move's complete metadata rather than trusting cached `piece` and
- * `captured` fields. Makes that move on another copy and appends it only if making succeeds and the
- * mover's king is not in check afterward. A position with no legal continuation therefore cannot
+ * `captured` fields. Tests the move on another copy and appends it only if the mover's king is safe
+ * afterward. Dark moves only simulate movement and capture occupancy, without choosing a revealed
+ * identity or changing the identity pools; reconstruction stops after appending that move. Bright
+ * moves use the normal move operation. A position with no legal continuation therefore cannot
  * contribute a move, even if its pseudo-legal list is non-empty.
  *
  * After appending, decreases the remaining depth only if the mover was not in check, advances the
@@ -1110,23 +1112,21 @@ static void parallel_pv_from_tt(XqJqParallelTranspositionTable *table,
         if (i == moves.count)
             break;
         bool dark = xq_jq_position_is_dark(&current, moves.moves[i].from);
-        int revealed_type = XQ_JQ_NO_REVEAL;
+        XqJqPosition next = current;
         if (dark)
         {
-            /* Any available non-king identity suffices to check occupancy/self-check.
-             * It is only a validation trial, not a sampled continuation of this PV. */
-            for (int type = 1; type < XQ_PIECE_TYPE_NB; ++type)
-                if (current.pool[current.side_to_move][type] != 0)
-                {
-                    revealed_type = type;
-                    break;
-                }
-            if (revealed_type == XQ_JQ_NO_REVEAL)
+            if (current.side_to_move == XQ_BLACK && current.fullmove_number == UINT64_MAX)
+                break;
+            /* As in legal move generation, only occupancy matters for the mover's king safety. */
+            XqMove move = moves.moves[i];
+            xq_jq_position_remove_piece(&next, (XqSquare)move.from);
+            if (!xq_jq_position_set_piece(&next, (XqSquare)move.to,
+                                          xq_piece_color(move.piece), xq_piece_type(move.piece)))
                 break;
         }
-        XqJqPosition next = current;
-        if (!xq_jq_position_make_move(&next, moves.moves[i], revealed_type) ||
-            xq_jq_position_in_check(&next, current.side_to_move))
+        else if (!xq_jq_position_make_move(&next, moves.moves[i], XQ_JQ_NO_REVEAL))
+            break;
+        if (xq_jq_position_in_check(&next, current.side_to_move))
             break;
         pv->moves[pv->count++] = moves.moves[i];
         if (dark)
